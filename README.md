@@ -1,11 +1,11 @@
 # agsh
 
-An agentic shell where you speak human, not bash.
-
-![agsh Screenshot](https://github.com/user-attachments/assets/26d8cb43-234d-45dd-aca6-67ce86fff91a)
+An agentic shell where you speak human, not bash. Yeah it's a vibe shell.
 
 > [!CAUTION]
 > Agents can perform potentially destructive actions. Exercise caution when granting write permissions. It is not recommended to run agsh on important systems with write permissions enabled.
+
+![agsh Screenshot](https://github.com/user-attachments/assets/26d8cb43-234d-45dd-aca6-67ce86fff91a)
 
 ## Overview
 
