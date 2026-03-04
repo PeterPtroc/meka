@@ -36,13 +36,13 @@ Only one agsh instance can be attached to a session at a time. This prevents rac
 
 ## Storage Location
 
-Sessions are stored in a SQLite database at:
+Sessions are stored in a SQLite database at a platform-specific location:
 
-```
-~/.local/share/agsh/sessions.db
-```
-
-This follows the XDG Base Directory Specification (`$XDG_DATA_HOME/agsh/sessions.db`).
+| Platform | Path |
+|----------|------|
+| Linux | `~/.local/share/agsh/sessions.db` (`$XDG_DATA_HOME/agsh/sessions.db`) |
+| macOS | `~/Library/Application Support/agsh/sessions.db` |
+| Windows | `%APPDATA%\agsh\sessions.db` |
 
 ## Database Schema
 

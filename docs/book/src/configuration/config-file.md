@@ -1,12 +1,12 @@
 # Config File
 
-agsh looks for a TOML configuration file at:
+agsh looks for a TOML configuration file at a platform-specific location:
 
-```
-~/.config/agsh/config.toml
-```
-
-More precisely, it uses the XDG config directory (`$XDG_CONFIG_HOME/agsh/config.toml`), which defaults to `~/.config/agsh/config.toml` on Linux.
+| Platform | Path |
+|----------|------|
+| Linux | `~/.config/agsh/config.toml` (`$XDG_CONFIG_HOME/agsh/config.toml`) |
+| macOS | `~/Library/Application Support/agsh/config.toml` |
+| Windows | `%APPDATA%\agsh\config.toml` |
 
 The config file is optional. If it does not exist, agsh silently skips it.
 
