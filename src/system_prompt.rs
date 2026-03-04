@@ -1,0 +1,142 @@
+use crate::permission::Permission;
+use crate::provider::ToolDefinition;
+
+pub fn build_system_prompt(permission: Permission, tools: &[ToolDefinition]) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str(
+        "You are agsh, an agentic shell assistant. The user communicates with you \
+         in natural language, and you execute their requests using the available tools.\n\n",
+    );
+
+    prompt.push_str(&format!("## Current Permission Level: {}\n\n", permission));
+
+    match permission {
+        Permission::None => {
+            prompt.push_str(
+                "You have NO tools available. You can only respond with text. \
+                 If the user asks you to perform an action, inform them that the current \
+                 permission mode does not allow it and suggest they press Shift+Tab \
+                 to cycle to a higher permission level.\n\n",
+            );
+        }
+        Permission::Read => {
+            prompt.push_str(
+                "You can use READ-ONLY tools: reading files, searching files and contents, \
+                 fetching web pages, and searching the web. You CANNOT write files, \
+                 edit files, or execute shell commands. If the user asks you to perform \
+                 a write operation, inform them that the current permission mode does not \
+                 allow it and suggest they press Shift+Tab to cycle to 'write' mode.\n\n",
+            );
+        }
+        Permission::Write => {
+            prompt.push_str(
+                "You have FULL access to all tools, including file writing, editing, \
+                 and shell command execution. For potentially destructive operations \
+                 (e.g., deleting files, overwriting data, running dangerous commands), \
+                 briefly explain what you will do before proceeding.\n\n",
+            );
+        }
+    }
+
+    if !tools.is_empty() {
+        prompt.push_str("## Available Tools\n\n");
+        for tool in tools {
+            prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+        }
+        prompt.push_str("\n");
+    }
+
+    prompt.push_str("## Guidelines\n\n");
+    prompt.push_str("- Format your responses in Markdown.\n");
+    prompt.push_str("- When executing shell commands, show the command you are about to run.\n");
+    prompt.push_str(
+        "- For potentially destructive operations, explain what you will do before proceeding.\n",
+    );
+    prompt.push_str(
+        "- If a tool returns an error, explain the error to the user and suggest alternatives.\n",
+    );
+    prompt.push_str("- Be concise but thorough.\n\n");
+
+    prompt.push_str("## Environment\n\n");
+
+    if let Ok(cwd) = std::env::current_dir() {
+        prompt.push_str(&format!("- Working Directory: {}\n", cwd.display()));
+    }
+
+    if let Ok(shell) = std::env::var("SHELL") {
+        prompt.push_str(&format!("- Shell: {}\n", shell));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(info) = std::fs::read_to_string("/etc/os-release") {
+            for line in info.lines() {
+                if let Some(name) = line.strip_prefix("PRETTY_NAME=") {
+                    let name = name.trim_matches('"');
+                    prompt.push_str(&format!("- OS: {}\n", name));
+                    break;
+                }
+            }
+        }
+    }
+
+    let now = chrono::Local::now().to_rfc2822();
+    prompt.push_str(&format!("- Date: {}\n", now));
+
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_system_prompt_none_mode() {
+        let prompt = build_system_prompt(Permission::None, &[]);
+        assert!(prompt.contains("NO tools available"));
+        assert!(prompt.contains("Shift+Tab"));
+    }
+
+    #[test]
+    fn test_system_prompt_read_mode() {
+        let prompt = build_system_prompt(Permission::Read, &[]);
+        assert!(prompt.contains("READ-ONLY"));
+        assert!(prompt.contains("CANNOT write"));
+    }
+
+    #[test]
+    fn test_system_prompt_write_mode() {
+        let prompt = build_system_prompt(Permission::Write, &[]);
+        assert!(prompt.contains("FULL access"));
+        assert!(prompt.contains("destructive"));
+    }
+
+    #[test]
+    fn test_system_prompt_with_tools() {
+        let tools = vec![
+            ToolDefinition {
+                name: "read_file".to_string(),
+                description: "Read file contents".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "execute_command".to_string(),
+                description: "Run a shell command".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+
+        let prompt = build_system_prompt(Permission::Write, &tools);
+        assert!(prompt.contains("read_file"));
+        assert!(prompt.contains("execute_command"));
+        assert!(prompt.contains("Available Tools"));
+    }
+
+    #[test]
+    fn test_system_prompt_has_environment() {
+        let prompt = build_system_prompt(Permission::Read, &[]);
+        assert!(prompt.contains("Environment"));
+        assert!(prompt.contains("Date:"));
+    }
+}

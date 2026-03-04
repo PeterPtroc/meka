@@ -1,0 +1,126 @@
+use std::io::{self, Write};
+
+use crossterm::style::{Color, Stylize};
+use termimad::MadSkin;
+
+pub struct StreamingRenderer {
+    buffer: String,
+    skin: MadSkin,
+}
+
+impl StreamingRenderer {
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            skin: MadSkin::default_dark(),
+        }
+    }
+
+    pub fn push_delta(&mut self, delta: &str) -> io::Result<()> {
+        self.buffer.push_str(delta);
+
+        // Render complete paragraphs (text before double newline) through termimad.
+        // Keep the tail (incomplete paragraph) buffered for later.
+        while let Some(boundary) = self.buffer.find("\n\n") {
+            let complete = self.buffer[..boundary + 2].to_string();
+            self.buffer = self.buffer[boundary + 2..].to_string();
+            self.render_block(&complete)?;
+        }
+
+        // For single newline-terminated lines outside of code blocks,
+        // render them immediately to give a streaming feel
+        if !self.in_code_block() && !self.in_table() {
+            while let Some(newline_pos) = self.buffer.find('\n') {
+                // Only flush if this isn't the start of a potential double-newline
+                if newline_pos + 1 < self.buffer.len() || !self.buffer.ends_with('\n') {
+                    let line = self.buffer[..newline_pos + 1].to_string();
+                    self.buffer = self.buffer[newline_pos + 1..].to_string();
+                    self.render_block(&line)?;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let remaining = std::mem::take(&mut self.buffer);
+            self.render_block(&remaining)?;
+        }
+        io::stdout().flush()
+    }
+
+    fn render_block(&self, text: &str) -> io::Result<()> {
+        let formatted = self.skin.term_text(text);
+        print!("{}", formatted);
+        io::stdout().flush()
+    }
+
+    fn in_code_block(&self) -> bool {
+        let fence_count = self.buffer.matches("```").count();
+        fence_count % 2 != 0
+    }
+
+    fn in_table(&self) -> bool {
+        self.buffer.trim_start().starts_with('|')
+    }
+}
+
+pub fn render_tool_indicator(name: &str, input: &serde_json::Value) {
+    let display_name = tool_display_name(name);
+    let indicator = match tool_primary_param(name, input) {
+        Some(value) => {
+            let truncated = truncate_display(value, 80);
+            format!("[tool {}(`{}`)]", display_name, truncated)
+        }
+        None => format!("[tool {}]", display_name),
+    };
+    println!("{}", indicator.with(Color::DarkCyan));
+}
+
+pub fn render_session_id(label: &str, id: &str) {
+    eprintln!("{}", format!("{}: {}", label, id).with(Color::DarkGrey));
+}
+
+pub fn render_hint(message: &str) {
+    eprintln!("{}", message.with(Color::DarkGrey));
+}
+
+fn tool_display_name<'a>(name: &'a str) -> &'a str {
+    match name {
+        "execute_command" => "Shell",
+        "read_file" => "ReadFile",
+        "write_file" => "WriteFile",
+        "edit_file" => "EditFile",
+        "find_files" => "FindFiles",
+        "search_contents" => "SearchContents",
+        "fetch_url" => "FetchUrl",
+        "web_search" => "WebSearch",
+        other => other,
+    }
+}
+
+fn tool_primary_param<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
+    let key = match name {
+        "execute_command" => "command",
+        "read_file" | "write_file" | "edit_file" => "path",
+        "find_files" | "search_contents" => "pattern",
+        "fetch_url" => "url",
+        "web_search" => "query",
+        _ => return None,
+    };
+    input.get(key).and_then(|v| v.as_str())
+}
+
+fn truncate_display(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        value.to_string()
+    } else {
+        let truncated: String = value.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
+}

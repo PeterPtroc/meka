@@ -1,0 +1,86 @@
+# Sessions
+
+Sessions persist your conversation history so you can resume later. Each session is identified by a UUID and stored in a SQLite database.
+
+## How Sessions Work
+
+- A session is **not** created when agsh starts. It is created lazily when you send the first message.
+- When a session is created, its UUID is printed to stderr.
+- When you exit agsh (Ctrl+D), the session UUID is printed again so you can note it for later.
+- Sessions include the full message history: your inputs, the agent's responses, and tool call results.
+
+## Resuming a Session
+
+### By UUID
+
+```bash
+agsh -s 550e8400-e29b-41d4-a716-446655440000
+```
+
+The agent loads the previous conversation history and continues from where you left off.
+
+### Continue Last Session
+
+```bash
+agsh -c
+```
+
+This resumes the most recently updated session.
+
+## Session Locking
+
+Only one agsh instance can be attached to a session at a time. This prevents race conditions from concurrent writes.
+
+- If you try to resume a session that is locked by a running agsh process, you will get an error.
+- If the locking process has exited (crashed or was killed), agsh detects this and allows you to take over the lock.
+
+## Storage Location
+
+Sessions are stored in a SQLite database at:
+
+```
+~/.local/share/agsh/sessions.db
+```
+
+This follows the XDG Base Directory Specification (`$XDG_DATA_HOME/agsh/sessions.db`).
+
+## Database Schema
+
+The database has two tables:
+
+**sessions** -- one row per session:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT (UUID) | Primary key |
+| `created_at` | TEXT (RFC 3339) | When the session was created |
+| `updated_at` | TEXT (RFC 3339) | When the session was last updated |
+| `locked_by` | TEXT (PID) | PID of the process holding the lock, or NULL |
+| `metadata` | TEXT | Reserved for future use |
+
+**messages** -- one row per message in a session:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Auto-incrementing primary key |
+| `session_id` | TEXT (UUID) | Foreign key to `sessions.id` |
+| `role` | TEXT | `user`, `assistant`, or `tool_results` |
+| `content` | TEXT | Message content (plain text or JSON) |
+| `created_at` | TEXT (RFC 3339) | When the message was saved |
+
+## Managing Sessions
+
+Session management is done directly through the SQLite database. For example, to list all sessions:
+
+```bash
+sqlite3 ~/.local/share/agsh/sessions.db \
+  "SELECT id, created_at, updated_at FROM sessions ORDER BY updated_at DESC;"
+```
+
+To delete a session and its messages:
+
+```bash
+sqlite3 ~/.local/share/agsh/sessions.db \
+  "DELETE FROM messages WHERE session_id = '550e8400-...';
+   DELETE FROM sessions WHERE id = '550e8400-...';"
+```
