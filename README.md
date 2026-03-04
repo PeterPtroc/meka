@@ -2,7 +2,7 @@
 
 An agentic shell where you speak human, not bash.
 
-![agsh Screenshot](https://github.com/user-attachments/assets/e614ed1f-4fa3-45ef-b194-fd5c9ec554cd)
+![agsh Screenshot](https://github.com/user-attachments/assets/26d8cb43-234d-45dd-aca6-67ce86fff91a)
 
 ## Overview
 
