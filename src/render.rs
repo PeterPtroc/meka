@@ -6,6 +6,7 @@ use termimad::MadSkin;
 pub struct StreamingRenderer {
     buffer: String,
     skin: MadSkin,
+    started: bool,
 }
 
 impl StreamingRenderer {
@@ -13,10 +14,22 @@ impl StreamingRenderer {
         Self {
             buffer: String::new(),
             skin: MadSkin::default_dark(),
+            started: false,
         }
     }
 
     pub fn push_delta(&mut self, delta: &str) -> io::Result<()> {
+        let delta = if self.started {
+            delta
+        } else {
+            let trimmed = delta.trim_start_matches('\n');
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+            self.started = true;
+            trimmed
+        };
+
         self.buffer.push_str(delta);
 
         // Render complete paragraphs (text before double newline) through termimad.
