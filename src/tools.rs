@@ -1025,7 +1025,7 @@ fn parse_duckduckgo_results(html: &str) -> String {
 
 fn extract_href(html: &str, near_position: usize) -> Option<String> {
     // Look backward from position to find href="..."
-    let search_start = near_position.saturating_sub(500);
+    let search_start = html.floor_char_boundary(near_position.saturating_sub(500));
     let search_region = &html[search_start..near_position];
 
     if let Some(href_pos) = search_region.rfind("href=\"") {
@@ -1105,9 +1105,9 @@ fn parse_google_results(html: &str) -> String {
             .map(|next| {
                 // Avoid matching the same block we just found by searching past it
                 if next == 0 {
-                    html[absolute_start + 20..]
+                    html[ceil_char_boundary(html, absolute_start + 20)..]
                         .find("<div class=\"g\"")
-                        .map(|p| absolute_start + 20 + p)
+                        .map(|p| ceil_char_boundary(html, absolute_start + 20) + p)
                         .unwrap_or(html.len())
                 } else {
                     absolute_start + next
@@ -1169,9 +1169,9 @@ fn parse_bing_results(html: &str) -> String {
     // Bing organic results appear in <li class="b_algo"> blocks.
     while let Some(block_start) = html[position..].find("class=\"b_algo\"") {
         let absolute_start = position + block_start;
-        let block_end = html[absolute_start + 14..]
+        let block_end = html[ceil_char_boundary(html, absolute_start + 14)..]
             .find("class=\"b_algo\"")
-            .map(|next| absolute_start + 14 + next)
+            .map(|next| ceil_char_boundary(html, absolute_start + 14) + next)
             .unwrap_or(html.len());
 
         let block = &html[absolute_start..block_end];
@@ -1257,6 +1257,17 @@ fn require_str(input: &serde_json::Value, field: &str, tool_name: &str) -> Resul
             tool_name: tool_name.to_string(),
             message: format!("missing '{}' parameter", field),
         })
+}
+
+fn ceil_char_boundary(string: &str, index: usize) -> usize {
+    if index >= string.len() {
+        return string.len();
+    }
+    let mut boundary = index;
+    while boundary < string.len() && !string.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    boundary
 }
 
 fn truncate_string(string: &str, max_length: usize) -> &str {
