@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- One-shot prompt is now a positional argument (`agsh "prompt"`) instead of a flag (`agsh -p "prompt"`)
 - Switched `reqwest` from `native-tls` (OpenSSL) to `rustls-tls` for pure-Rust TLS, eliminating C compilation dependency
 - Added release profile optimizations (`lto`, `codegen-units = 1`, `strip`)
 - Added Rust dependency caching in CI workflow
@@ -48,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Interactive REPL shell with natural language input
-- One-shot mode via `-p`/`--prompt` flag
+- One-shot mode via positional `[PROMPT]` argument
 - OpenAI and Anthropic LLM provider support with streaming
 - Three-level permission system (none/read/write) with Shift+Tab cycling
 - Built-in tools: `read_file`, `write_file`, `edit_file`, `find_files`, `search_contents`, `execute_command`, `fetch_url`, `web_search`

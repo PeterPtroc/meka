@@ -1,18 +1,22 @@
 # CLI Options
 
 ```text
-agsh [OPTIONS]
+agsh [OPTIONS] [PROMPT]
 ```
 
-## Options
+## Arguments
 
-### `-p`, `--prompt <PROMPT>`
+### `[PROMPT]`
 
 Run a one-shot prompt and exit. The agent processes the prompt, prints its response, and the process terminates.
 
 ```bash
-agsh -p "list all files larger than 1MB in the current directory"
+agsh "list all files larger than 1MB in the current directory"
 ```
+
+When omitted, agsh starts in interactive mode.
+
+## Options
 
 ### `-s`, `--session <UUID>`
 

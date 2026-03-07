@@ -3,7 +3,7 @@
 One-shot mode runs a single prompt and exits, similar to `bash -c`:
 
 ```bash
-agsh -p "your prompt here"
+agsh "your prompt here"
 ```
 
 The agent processes the prompt (including any tool calls), prints its response, and the process terminates. The session UUID is printed to stderr on exit.
@@ -12,16 +12,16 @@ The agent processes the prompt (including any tool calls), prints its response, 
 
 ```bash
 # Simple question
-agsh -p "what is my current working directory?"
+agsh "what is my current working directory?"
 
 # File operations (requires write permission)
-agsh --permission write -p "create a file called notes.txt with today's date"
+agsh --permission write "create a file called notes.txt with today's date"
 
 # Search
-agsh -p "find all TODO comments in this project"
+agsh "find all TODO comments in this project"
 
 # Web search
-agsh -p "search the web for the latest Rust release"
+agsh "search the web for the latest Rust release"
 ```
 
 ## Combining with Other Flags
@@ -30,13 +30,13 @@ All configuration flags work in one-shot mode:
 
 ```bash
 # Use a specific provider and model
-agsh --provider anthropic -m claude-sonnet-4-20250514 -p "explain this codebase"
+agsh --provider anthropic -m claude-sonnet-4-20250514 "explain this codebase"
 
 # With write permission
-agsh --permission write -p "run 'cargo test' and summarize the results"
+agsh --permission write "run 'cargo test' and summarize the results"
 
 # Disable streaming
-agsh --no-stream -p "read README.md and summarize it"
+agsh --no-stream "read README.md and summarize it"
 ```
 
 ## Session Behavior

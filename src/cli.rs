@@ -6,7 +6,6 @@ use crate::permission::Permission;
 #[command(name = "agsh", version, about = "An agentic shell")]
 pub struct Cli {
     /// Run a one-shot prompt and exit
-    #[arg(short = 'p', long = "prompt")]
     pub prompt: Option<String>,
 
     /// Session ID to resume

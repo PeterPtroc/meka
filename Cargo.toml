@@ -1,9 +1,9 @@
 [package]
 name = "agsh"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "An agentic shell"
+description = "An agentic shell where you speak human, not bash"
 repository = "https://github.com/k4yt3x/agsh"
 
 [[bin]]

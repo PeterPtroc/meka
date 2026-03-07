@@ -201,7 +201,7 @@ async fn run_interactive(
         Err(error) => {
             eprintln!("Error: {}", error);
             eprintln!("Configure a provider and model to use agsh.");
-            eprintln!("Example: agsh --provider openai --model gpt-4o -p \"hello\"");
+            eprintln!("Example: agsh --provider openai --model gpt-4o \"hello\"");
             eprintln!(
                 "Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables."
             );

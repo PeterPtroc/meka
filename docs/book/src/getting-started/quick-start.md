@@ -68,7 +68,7 @@ agsh [w] > create a file called hello.txt with the text "hello world"
 For quick tasks without entering the interactive shell:
 
 ```bash
-agsh -p "what is my current working directory?"
+agsh "what is my current working directory?"
 ```
 
 The process exits after the agent responds.
