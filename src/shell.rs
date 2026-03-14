@@ -35,7 +35,7 @@ impl Prompt for AgshPrompt {
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
-        Cow::Borrowed("  ... ")
+        Cow::Borrowed("::: ")
     }
 
     fn render_prompt_history_search_indicator(
@@ -73,7 +73,9 @@ fn build_reedline_editor() -> Reedline {
     );
 
     let emacs_mode = Emacs::new(keybindings);
-    Reedline::create().with_edit_mode(Box::new(emacs_mode))
+    Reedline::create()
+        .with_edit_mode(Box::new(emacs_mode))
+        .use_bracketed_paste(true)
 }
 
 pub enum SlashCommand {

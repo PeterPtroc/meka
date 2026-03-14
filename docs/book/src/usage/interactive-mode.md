@@ -85,6 +85,8 @@ agsh [r] > write a python script that
 
 Press **Enter** on the last line to submit the entire multi-line input.
 
+Pasting multi-line content also works seamlessly — all pasted lines appear in the buffer for review, and you press **Enter** to submit.
+
 ## Slash Commands
 
 agsh supports `/` prefix commands for controlling the shell:
