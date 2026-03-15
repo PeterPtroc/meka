@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use crossterm::style::{Color, Stylize};
 use reedline::{
@@ -16,7 +17,10 @@ struct AgshPrompt {
 
 impl Prompt for AgshPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed("agsh ")
+        let cwd = std::env::current_dir()
+            .map(|path| shorten_path_with_tilde(&path))
+            .unwrap_or_else(|_| "?".to_string());
+        Cow::Owned(format!("agsh:{} ", cwd))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
@@ -85,6 +89,7 @@ pub enum SlashCommand {
     Session,
     Permission(Option<String>),
     Compact,
+    Cd(Option<String>),
 }
 
 pub enum ShellEvent {
@@ -106,6 +111,7 @@ fn parse_slash_command(input: &str) -> Option<SlashCommand> {
         "session" => Some(SlashCommand::Session),
         "permission" => Some(SlashCommand::Permission(argument)),
         "compact" => Some(SlashCommand::Compact),
+        "cd" => Some(SlashCommand::Cd(argument)),
         _ => None,
     }
 }
@@ -118,6 +124,7 @@ fn print_help() {
     eprintln!("  /session                       Show the current session ID");
     eprintln!("  /permission [none|read|write]  Show or set the permission level");
     eprintln!("  /compact                       Summarize and compact the session");
+    eprintln!("  /cd <path>                     Change working directory");
     eprintln!();
     eprintln!("Shortcuts:");
     eprintln!("  !<command>    Execute a shell command directly");
@@ -191,6 +198,10 @@ pub fn run_repl(
                                     }
                                 }
                             }
+                            continue;
+                        }
+                        Some(SlashCommand::Cd(argument)) => {
+                            handle_cd(argument.as_deref().unwrap_or(""));
                             continue;
                         }
                         Some(command @ (SlashCommand::Session | SlashCommand::Compact)) => {
@@ -280,6 +291,44 @@ pub fn run_repl(
     }
 }
 
+fn shorten_path_with_tilde(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if path == home {
+            return "~".to_string();
+        }
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn handle_cd(target: &str) {
+    let path = if target.is_empty() || target == "~" {
+        match dirs::home_dir() {
+            Some(home) => home,
+            None => {
+                eprintln!("cd: could not determine home directory");
+                return;
+            }
+        }
+    } else if let Some(rest) = target.strip_prefix("~/") {
+        match dirs::home_dir() {
+            Some(home) => home.join(rest),
+            None => {
+                eprintln!("cd: could not determine home directory");
+                return;
+            }
+        }
+    } else {
+        PathBuf::from(target)
+    };
+
+    if let Err(error) = std::env::set_current_dir(&path) {
+        eprintln!("cd: {}: {}", path.display(), error);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +406,42 @@ mod tests {
     #[test]
     fn test_parse_slash_command_empty() {
         assert!(parse_slash_command("/").is_none());
+    }
+
+    #[test]
+    fn test_parse_slash_command_cd_no_arg() {
+        assert!(matches!(
+            parse_slash_command("/cd"),
+            Some(SlashCommand::Cd(None))
+        ));
+    }
+
+    #[test]
+    fn test_parse_slash_command_cd_with_path() {
+        match parse_slash_command("/cd /tmp") {
+            Some(SlashCommand::Cd(Some(arg))) => assert_eq!(arg, "/tmp"),
+            _ => panic!("expected Cd with argument"),
+        }
+    }
+
+    #[test]
+    fn test_shorten_path_with_tilde_home() {
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(shorten_path_with_tilde(&home), "~");
+        }
+    }
+
+    #[test]
+    fn test_shorten_path_with_tilde_subdir() {
+        if let Some(home) = dirs::home_dir() {
+            let subdir = home.join("projects").join("test");
+            assert_eq!(shorten_path_with_tilde(&subdir), "~/projects/test");
+        }
+    }
+
+    #[test]
+    fn test_shorten_path_with_tilde_non_home() {
+        let path = std::path::Path::new("/tmp/something");
+        assert_eq!(shorten_path_with_tilde(path), "/tmp/something");
     }
 }

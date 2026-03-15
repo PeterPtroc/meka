@@ -11,7 +11,7 @@ use crate::provider::{
 };
 use crate::render::{self, StreamingRenderer};
 use crate::session::SessionManager;
-use crate::system_prompt::build_system_prompt;
+use crate::system_prompt::{build_environment_context, build_system_prompt};
 use crate::tools::ToolRegistry;
 
 pub struct AgentOptions {
@@ -70,7 +70,9 @@ impl Agent {
 
         let sid = session_id.ok_or(AgshError::Config("session_id not set".into()))?;
 
-        let user_message = Message::user(&user_input);
+        let environment_context = build_environment_context();
+        let augmented_input = format!("{}\n{}", environment_context, user_input);
+        let user_message = Message::user(&augmented_input);
         messages.push(user_message);
         self.session_manager
             .save_message(sid, "user", &user_input)

@@ -44,7 +44,17 @@ impl McpClientManager {
                 });
             }
 
-            let service = connect_server(config).await?;
+            let service = match connect_server(config).await {
+                Ok(service) => service,
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to connect to MCP server '{}': {}",
+                        config.name,
+                        error
+                    );
+                    continue;
+                }
+            };
             tracing::info!("connected to MCP server '{}'", config.name);
             servers.insert(config.name.clone(), Arc::new(service));
         }
@@ -57,13 +67,9 @@ impl McpClientManager {
         server_name: &str,
         permission_str: Option<&str>,
     ) -> Result<Vec<McpToolAdapter>> {
-        let service = self
-            .servers
-            .get(server_name)
-            .ok_or_else(|| AgshError::McpConnection {
-                server_name: server_name.to_string(),
-                message: "server not found".to_string(),
-            })?;
+        let Some(service) = self.servers.get(server_name) else {
+            return Ok(Vec::new());
+        };
 
         let permission = parse_server_permission(server_name, permission_str)?;
 

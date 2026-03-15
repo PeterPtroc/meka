@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Working directory displayed in the shell prompt with tilde shortening for home directory
+- `/cd` slash command for changing the working directory (affects prompt, agent context, and all tool operations)
 - MCP (Model Context Protocol) client support: configure external tool servers via `[[mcp.servers]]` in config file with stdio and streamable HTTP transports
 - MCP tools namespaced as `server__tool` and registered alongside built-in tools with per-server permission configuration
 - `delete` subcommand (`agsh delete <id>...` or `agsh delete --all`) to delete specific or all sessions
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dynamic environment context (working directory, date) moved from system prompt to per-turn user message injection for better KV cache efficiency
+- MCP server connection failures now display a warning instead of aborting startup
 - Default render mode changed from `rich` to `raw`
 - Split `display.show_session_id` into `display.show_session_id_on_create` (default: false) and `display.show_session_id_on_exit` (default: true) for independent control
 

@@ -133,10 +133,6 @@ pub fn build_system_prompt(
 
     prompt.push_str("## Environment\n\n");
 
-    if let Ok(cwd) = std::env::current_dir() {
-        prompt.push_str(&format!("- Working Directory: {}\n", cwd.display()));
-    }
-
     if let Ok(shell) = std::env::var("SHELL") {
         prompt.push_str(&format!("- Shell: {}\n", shell));
     }
@@ -172,10 +168,20 @@ pub fn build_system_prompt(
         prompt.push_str("- OS: Windows\n");
     }
 
-    let now = chrono::Local::now().to_rfc2822();
-    prompt.push_str(&format!("- Date: {}\n", now));
-
     prompt
+}
+
+pub fn build_environment_context() -> String {
+    let mut context = String::from("[Environment context]\n");
+
+    if let Ok(cwd) = std::env::current_dir() {
+        context.push_str(&format!("Working directory: {}\n", cwd.display()));
+    }
+
+    let now = chrono::Local::now().to_rfc2822();
+    context.push_str(&format!("Date: {}\n", now));
+
+    context
 }
 
 #[cfg(test)]
@@ -238,7 +244,16 @@ mod tests {
     fn test_system_prompt_has_environment() {
         let prompt = build_system_prompt(Permission::Read, &[], false);
         assert!(prompt.contains("Environment"));
-        assert!(prompt.contains("Date:"));
+        assert!(!prompt.contains("Working Directory:"));
+        assert!(!prompt.contains("Date:"));
+    }
+
+    #[test]
+    fn test_environment_context() {
+        let context = build_environment_context();
+        assert!(context.contains("[Environment context]"));
+        assert!(context.contains("Working directory:"));
+        assert!(context.contains("Date:"));
     }
 
     #[test]
