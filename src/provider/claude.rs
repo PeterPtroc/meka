@@ -20,6 +20,44 @@ fn now_epoch_millis() -> i64 {
         .unwrap_or(0)
 }
 
+fn generate_billing_header(request_body: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+
+    let build_hash = format!("{:03x}", rand::random_range(0u32..0xFFF));
+    let body_str = serde_json::to_string(request_body).unwrap_or_default();
+    let hash = Sha256::digest(body_str.as_bytes());
+    let content_hash = format!(
+        "{:05x}",
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) & 0xFFFFF
+    );
+
+    format!(
+        "x-anthropic-billing-header: cc_version=2.1.63.{}; cc_entrypoint=cli; cch={};",
+        build_hash, content_hash
+    )
+}
+
+fn apply_stainless_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request
+        .header("x-stainless-lang", "js")
+        .header("x-stainless-runtime", "node")
+        .header("x-stainless-runtime-version", "v24.3.0")
+        .header("x-stainless-package-version", "0.74.0")
+        .header("x-stainless-arch", std::env::consts::ARCH)
+        .header(
+            "x-stainless-os",
+            match std::env::consts::OS {
+                "macos" => "MacOS",
+                "windows" => "Windows",
+                "linux" => "Linux",
+                "freebsd" => "FreeBSD",
+                other => other,
+            },
+        )
+        .header("x-stainless-retry-count", "0")
+        .header("x-stainless-timeout", "600")
+}
+
 pub struct ClaudeProvider {
     client: reqwest::Client,
     credential: tokio::sync::RwLock<AuthCredential>,
@@ -231,10 +269,24 @@ impl ClaudeProvider {
             "messages": claude_messages,
             "max_tokens": 8192,
             "stream": stream,
+            "metadata": {
+                "user_id": "agsh"
+            },
         });
 
         if !system_prompt.is_empty() {
-            body["system"] = serde_json::json!(system_prompt);
+            let billing_header = generate_billing_header(&body);
+            body["system"] = serde_json::json!([
+                {
+                    "type": "text",
+                    "text": billing_header
+                },
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ]);
         }
 
         if !tools.is_empty() {
@@ -346,6 +398,8 @@ impl Provider for ClaudeProvider {
             request = request.header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219");
         }
 
+        request = apply_stainless_headers(request);
+
         let response = request
             .json(&body)
             .send()
@@ -390,11 +444,14 @@ impl Provider for ClaudeProvider {
             .post(format!("{}/v1/messages", self.base_url))
             .header(auth_header_name, &auth_header_value)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("accept-encoding", "identity");
 
         if auth_header_name == "Authorization" {
             request = request.header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219");
         }
+
+        request = apply_stainless_headers(request);
 
         let response = request
             .json(&body)
@@ -614,7 +671,50 @@ mod tests {
 
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["stream"], false);
-        assert_eq!(body["system"], "system prompt");
+
+        let system = body["system"].as_array().expect("system should be array");
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["type"], "text");
+        let billing = system[0]["text"].as_str().unwrap();
+        assert!(
+            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.63."),
+            "billing header should start with version prefix, got: {}",
+            billing
+        );
+        assert!(billing.contains("cc_entrypoint=cli"));
+        assert!(billing.contains("cch="));
+        // Verify build hash is 3 hex chars and content hash is 5 hex chars
+        let after_version = billing
+            .strip_prefix("x-anthropic-billing-header: cc_version=2.1.63.")
+            .unwrap();
+        let build_hash = after_version.split(';').next().unwrap().trim();
+        assert_eq!(
+            build_hash.len(),
+            3,
+            "build hash should be 3 chars: {}",
+            build_hash
+        );
+        assert!(
+            build_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
+        let cch_start = billing.find("cch=").unwrap() + 4;
+        let cch_end = billing[cch_start..].find(';').unwrap() + cch_start;
+        let content_hash = &billing[cch_start..cch_end];
+        assert_eq!(
+            content_hash.len(),
+            5,
+            "content hash should be 5 chars: {}",
+            content_hash
+        );
+        assert!(
+            content_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
+        assert_eq!(system[1]["type"], "text");
+        assert_eq!(system[1]["text"], "system prompt");
 
         let claude_messages = body["messages"]
             .as_array()

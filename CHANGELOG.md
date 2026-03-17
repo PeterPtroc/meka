@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude OAuth requests failing with 400
 - `urldecode` incorrectly handling multi-byte UTF-8 percent-encoded sequences (e.g., `%C3%A9` producing mojibake instead of 'é')
 
 ### Changed
 
+- Generate dynamic billing header with content-based hashing for Claude OAuth requests
 - Replaced custom HTML search result parsers with `scraper` crate for CSS selector-based extraction
 - Replaced custom `urldecode` implementation with `percent-encoding` crate (already a transitive dependency)
 - Replaced custom `ceil_char_boundary` utility with stdlib `str::ceil_char_boundary`
