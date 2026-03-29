@@ -16,7 +16,7 @@ agsh (agentic shell) is an interactive shell that replaces traditional command s
 Download a pre-built binary from [GitHub Releases](https://github.com/k4yt3x/agsh/releases/latest), or install with Cargo:
 
 ```bash
-cargo install --git https://github.com/k4yt3x/agsh.git
+cargo install --locked --git https://github.com/k4yt3x/agsh.git
 ```
 
 ## Quick Start

@@ -25,7 +25,7 @@ cp agsh ~/.local/bin/
 If you have [Rust](https://www.rust-lang.org/tools/install) installed, you can install agsh directly from the Git repository:
 
 ```bash
-cargo install --git https://github.com/k4yt3x/agsh.git
+cargo install --locked --git https://github.com/k4yt3x/agsh.git
 ```
 
 This builds the latest version from source and installs it to `~/.cargo/bin/`.

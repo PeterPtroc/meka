@@ -490,12 +490,14 @@ async fn authenticate_oauth_authorization_code(
                     })?;
             manager.set_metadata(metadata);
 
-            let oauth_client_config = rmcp::transport::auth::OAuthClientConfig {
-                client_id: id.to_string(),
-                client_secret: client_secret.map(|s| s.to_string()),
-                scopes: scope_strings.clone(),
-                redirect_uri: redirect_uri.clone(),
-            };
+            let mut oauth_client_config =
+                rmcp::transport::auth::OAuthClientConfig::new(id.to_string(), redirect_uri.clone());
+            if let Some(secret) = client_secret {
+                oauth_client_config = oauth_client_config.with_client_secret(secret.to_string());
+            }
+            if !scope_strings.is_empty() {
+                oauth_client_config = oauth_client_config.with_scopes(scope_strings.clone());
+            }
             manager
                 .configure_client(oauth_client_config)
                 .map_err(|error| AgshError::McpAuth {
