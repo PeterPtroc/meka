@@ -5,6 +5,9 @@ An agentic shell where you speak human, not bash. Yeah it's a vibe shell.
 > [!CAUTION]
 > Agents can perform potentially destructive actions. Exercise caution when granting write permissions. It is not recommended to run agsh on important systems with write permissions enabled.
 
+> [!WARNING]
+> Agents can consume a large number of tokens on complex tasks. If you're on a subscription, be prepared for quota exhaustion; if you are billed per token, it is recommended that you set a spending limit on the API key.
+
 ![agsh Screenshot](https://github.com/user-attachments/assets/26d8cb43-234d-45dd-aca6-67ce86fff91a)
 
 ## Overview
