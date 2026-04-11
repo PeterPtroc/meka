@@ -145,6 +145,7 @@ async fn create_agent_from_config(
     token_store: TokenStore,
     credential: AuthCredential,
     mcp_manager: Option<&mcp::McpClientManager>,
+    approval_sender: Option<std::sync::mpsc::SyncSender<shell::ToolApprovalRequest>>,
 ) -> anyhow::Result<Agent> {
     config.validate()?;
 
@@ -169,6 +170,8 @@ async fn create_agent_from_config(
         } else {
             None
         },
+        config.thinking_enabled,
+        config.thinking_budget_tokens,
     )?;
 
     let sandbox_capability = crate::sandbox::detect();
@@ -178,12 +181,27 @@ async fn create_agent_from_config(
             crate::sandbox::SandboxCapability::Unavailable
         );
 
+    let todo_list: crate::tools::todo::SharedTodoList =
+        std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
     let mut tool_registry = ToolRegistry::build_default(
         config.user_agent.clone(),
         shared_permission.clone(),
         config.sandbox,
         sandbox_capability,
+        todo_list.clone(),
     );
+
+    // Register the sub-agent tool with access to the provider
+    tool_registry.register(Box::new(crate::tools::subagent::SpawnAgentTool {
+        provider: Arc::clone(&provider),
+        parent_permission: shared_permission.clone(),
+        tool_builder_params: crate::tools::subagent::ToolBuilderParams {
+            user_agent: config.user_agent.clone(),
+            sandbox_enabled: config.sandbox,
+            sandbox_capability,
+        },
+    }));
 
     if let Some(manager) = mcp_manager {
         for mcp_config in &config.mcp_servers {
@@ -191,7 +209,10 @@ async fn create_agent_from_config(
                 .discover_tools_for_server(&mcp_config.name, mcp_config.permission.as_deref())
                 .await?;
             for tool in mcp_tools {
+                use crate::tools::Tool as _;
+                let name = tool.definition().name.clone();
                 tool_registry.register(Box::new(tool));
+                tool_registry.mark_deferred(&name);
             }
         }
     }
@@ -209,7 +230,17 @@ async fn create_agent_from_config(
             sandboxed_shell,
             render_mode: config.render_mode,
             context_messages: config.context_messages,
+            auto_compact: config.auto_compact,
+            context_window: config.context_window.unwrap_or_else(|| {
+                config
+                    .model
+                    .as_deref()
+                    .map(crate::config::context_window_for_model)
+                    .unwrap_or(128_000)
+            }),
         },
+        todo_list,
+        approval_sender,
     ))
 }
 
@@ -229,6 +260,7 @@ async fn run_oneshot(
         token_store,
         credential,
         mcp_manager.as_ref(),
+        None,
     )
     .await?;
 
@@ -302,6 +334,8 @@ async fn run_interactive(
 
     let (input_sender, mut input_receiver) = tokio::sync::mpsc::unbounded_channel::<ShellEvent>();
     let (agent_done_sender, agent_done_receiver) = std::sync::mpsc::channel::<()>();
+    let (approval_sender, approval_receiver) =
+        std::sync::mpsc::sync_channel::<shell::ToolApprovalRequest>(1);
 
     let repl_permission = shared_permission.clone();
     let show_path_in_prompt = config.show_path_in_prompt;
@@ -311,6 +345,7 @@ async fn run_interactive(
             show_path_in_prompt,
             input_sender,
             agent_done_receiver,
+            approval_receiver,
         );
     });
 
@@ -336,6 +371,7 @@ async fn run_interactive(
         token_store,
         credential,
         mcp_manager.as_ref(),
+        Some(approval_sender),
     )
     .await
     {
@@ -553,7 +589,8 @@ fn format_session_as_markdown(
                                 writeln!(output, "```json\n{}\n```\n", input_pretty).ok();
                                 writeln!(output, "</details>\n").ok();
                             }
-                            provider::ContentBlock::ToolResult { .. } => {}
+                            provider::ContentBlock::ToolResult { .. }
+                            | provider::ContentBlock::Thinking { .. } => {}
                         }
                     }
                 } else {
@@ -577,7 +614,8 @@ fn format_session_as_markdown(
                             };
                             writeln!(output, "<details>").ok();
                             writeln!(output, "<summary>{}</summary>\n", label).ok();
-                            writeln!(output, "```\n{}\n```\n", content).ok();
+                            let text = provider::ContentBlock::tool_result_text_content(content);
+                            writeln!(output, "```\n{}\n```\n", text).ok();
                             writeln!(output, "</details>\n").ok();
                         }
                     }

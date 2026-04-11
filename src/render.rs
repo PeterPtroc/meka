@@ -263,6 +263,46 @@ pub fn render_hint(message: &str) {
     eprintln!("{}", message.with(Color::DarkGrey));
 }
 
+pub fn render_thinking_start() {
+    eprint!("{}", "Thinking... ".with(Color::DarkGrey));
+}
+
+pub fn render_thinking_end() {
+    eprintln!();
+}
+
+pub fn render_todo_list(items: &[crate::tools::todo::TodoItem]) {
+    if items.is_empty() {
+        return;
+    }
+    eprintln!();
+    for item in items {
+        let (marker, color) = match item.status.as_str() {
+            "done" => ("[x]", Color::Green),
+            "in_progress" => ("[~]", Color::Yellow),
+            _ => ("[ ]", Color::DarkGrey),
+        };
+        eprintln!(
+            "  {} {} {}",
+            marker.with(color),
+            item.id.clone().with(Color::White),
+            item.description
+        );
+    }
+    eprintln!();
+}
+
+pub fn tool_display_name_for_approval(name: &str) -> &str {
+    tool_display_name(name)
+}
+
+pub fn tool_primary_param_for_approval<'a>(
+    name: &str,
+    input: &'a serde_json::Value,
+) -> Option<&'a str> {
+    tool_primary_param(name, input)
+}
+
 fn tool_display_name(name: &str) -> &str {
     match name {
         "execute_command" => "Shell",
@@ -273,6 +313,8 @@ fn tool_display_name(name: &str) -> &str {
         "search_contents" => "SearchContents",
         "fetch_url" => "FetchUrl",
         "web_search" => "WebSearch",
+        "todo_write" => "TodoWrite",
+        "spawn_agent" => "SpawnAgent",
         other => other,
     }
 }
@@ -284,6 +326,7 @@ fn tool_primary_param<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'
         "find_files" | "search_contents" => "pattern",
         "fetch_url" => "url",
         "web_search" => "query",
+        "spawn_agent" => "prompt",
         _ => return None,
     };
     input.get(key).and_then(|v| v.as_str())

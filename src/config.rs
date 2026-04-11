@@ -14,7 +14,14 @@ pub struct ConfigFile {
     pub web: Option<WebConfig>,
     pub shell: Option<ShellConfig>,
     pub session: Option<SessionConfig>,
+    pub thinking: Option<ThinkingConfig>,
     pub mcp: Option<McpConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ThinkingConfig {
+    pub enabled: Option<bool>,
+    pub budget_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -93,6 +100,8 @@ pub struct SessionConfig {
     pub context_messages: Option<usize>,
     pub retention_days: Option<u64>,
     pub max_storage_bytes: Option<u64>,
+    pub auto_compact: Option<bool>,
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -129,6 +138,10 @@ pub struct ResolvedConfig {
     pub context_messages: Option<usize>,
     pub retention_days: Option<u64>,
     pub max_storage_bytes: Option<u64>,
+    pub thinking_enabled: bool,
+    pub thinking_budget_tokens: u64,
+    pub auto_compact: bool,
+    pub context_window: Option<u64>,
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -208,6 +221,7 @@ impl ResolvedConfig {
         let file_web = config_file.web.unwrap_or_default();
         let file_shell = config_file.shell.unwrap_or_default();
         let file_session = config_file.session.unwrap_or_default();
+        let file_thinking = config_file.thinking.unwrap_or_default();
         let mcp_servers = config_file
             .mcp
             .and_then(|mcp| mcp.servers)
@@ -271,6 +285,14 @@ impl ResolvedConfig {
             context_messages: file_session.context_messages.or(Some(200)),
             retention_days: file_session.retention_days.or(Some(90)),
             max_storage_bytes: file_session.max_storage_bytes.or(Some(52_428_800)),
+            thinking_enabled: cli
+                .thinking
+                .unwrap_or_else(|| file_thinking.enabled.unwrap_or(false)),
+            thinking_budget_tokens: cli
+                .thinking_budget
+                .unwrap_or_else(|| file_thinking.budget_tokens.unwrap_or(10_000)),
+            auto_compact: file_session.auto_compact.unwrap_or(true),
+            context_window: file_session.context_window,
             mcp_servers,
         }
     }
@@ -291,6 +313,18 @@ impl ResolvedConfig {
             ));
         }
         Ok(())
+    }
+}
+
+pub fn context_window_for_model(model: &str) -> u64 {
+    if model.contains("claude") {
+        200_000
+    } else if model.contains("gpt-4o") || model.contains("gpt-4.1") {
+        128_000
+    } else if model.contains("o3") || model.contains("o4") {
+        200_000
+    } else {
+        128_000
     }
 }
 

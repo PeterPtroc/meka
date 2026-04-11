@@ -13,6 +13,7 @@ use crate::render::{self, StreamingRenderer};
 use crate::session::SessionManager;
 use crate::system_prompt::{build_environment_context, build_system_prompt};
 use crate::tools::ToolRegistry;
+use crate::tools::todo::{self, SharedTodoList};
 
 pub struct AgentOptions {
     pub streaming: bool,
@@ -22,6 +23,8 @@ pub struct AgentOptions {
     pub sandboxed_shell: bool,
     pub render_mode: crate::render::RenderMode,
     pub context_messages: Option<usize>,
+    pub auto_compact: bool,
+    pub context_window: u64,
 }
 
 pub struct Agent {
@@ -30,6 +33,9 @@ pub struct Agent {
     session_manager: SessionManager,
     shared_permission: SharedPermission,
     options: AgentOptions,
+    todo_list: SharedTodoList,
+    approval_sender: Option<std::sync::mpsc::SyncSender<crate::shell::ToolApprovalRequest>>,
+    last_input_tokens: std::sync::atomic::AtomicU64,
 }
 
 impl Agent {
@@ -39,6 +45,8 @@ impl Agent {
         session_manager: SessionManager,
         shared_permission: SharedPermission,
         options: AgentOptions,
+        todo_list: SharedTodoList,
+        approval_sender: Option<std::sync::mpsc::SyncSender<crate::shell::ToolApprovalRequest>>,
     ) -> Self {
         Self {
             provider,
@@ -46,6 +54,9 @@ impl Agent {
             session_manager,
             shared_permission,
             options,
+            todo_list,
+            approval_sender,
+            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -70,14 +81,49 @@ impl Agent {
 
         let sid = session_id.ok_or(AgshError::Config("session_id not set".into()))?;
 
+        // Auto-compact if the last turn's input tokens exceeded 80% of the
+        // context window. This runs between turns (not mid-tool-loop) so the
+        // stable base_messages invariant is preserved.
+        if self.options.auto_compact && self.options.context_window > 0 {
+            let last_tokens = self
+                .last_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let threshold = self.options.context_window * 80 / 100;
+            if last_tokens > threshold && messages.len() > 1 {
+                tracing::info!(
+                    "auto-compacting: {} input tokens exceeds 80% of {} context window",
+                    last_tokens,
+                    self.options.context_window
+                );
+                render::render_hint("Auto-compacting conversation...");
+                if let Err(error) = self.compact_session(session_id, messages).await {
+                    tracing::warn!("auto-compact failed: {}", error);
+                }
+            }
+        }
+
+        let todo_context = {
+            let todos = self.todo_list.read().await;
+            if todos.is_empty() {
+                String::new()
+            } else {
+                todo::format_todo_for_context(&todos)
+            }
+        };
         let environment_context = build_environment_context();
-        let augmented_input = format!("{}\n{}", environment_context, user_input);
+        let augmented_input = format!("{}{}\n{}", todo_context, environment_context, user_input);
         let user_message = Message::user(&augmented_input);
         messages.push(user_message);
 
         let permission = self.shared_permission.get();
         let tools = self.available_tools(permission);
-        let system_prompt = build_system_prompt(permission, &tools, self.options.sandboxed_shell);
+        let deferred_tools = self.deferred_tool_summaries(permission);
+        let system_prompt = build_system_prompt(
+            permission,
+            &tools,
+            self.options.sandboxed_shell,
+            &deferred_tools,
+        );
 
         let base_messages = truncate_messages_for_context(messages, self.options.context_messages);
         let turn_start_len = messages.len();
@@ -98,7 +144,7 @@ impl Agent {
                     base_messages.clone()
                 };
 
-                let (assistant_message, stop_reason) = match if self.options.streaming {
+                let (assistant_message, stop_reason, usage) = match if self.options.streaming {
                     self.run_streaming(&system_prompt, &api_messages, &tools, cancellation.clone())
                         .await
                 } else {
@@ -109,6 +155,9 @@ impl Agent {
                     Ok(value) => value,
                     Err(error) => break 'turn Err(error),
                 };
+
+                self.last_input_tokens
+                    .store(usage.input_tokens, std::sync::atomic::Ordering::Relaxed);
 
                 if !user_saved {
                     if let Err(error) = self
@@ -138,7 +187,19 @@ impl Agent {
                     break 'turn Err(error);
                 }
 
-                messages.push(assistant_message.clone());
+                // Strip thinking blocks from the message before adding to
+                // conversation history — thinking must not be sent back to the
+                // API in subsequent turns.
+                let cleaned_message = Message {
+                    role: Role::Assistant,
+                    content: assistant_message
+                        .content
+                        .iter()
+                        .filter(|block| !matches!(block, ContentBlock::Thinking { .. }))
+                        .cloned()
+                        .collect(),
+                };
+                messages.push(cleaned_message);
 
                 if cancellation.is_cancelled() {
                     break 'turn Err(AgshError::Interrupted);
@@ -210,7 +271,7 @@ impl Agent {
         messages: &[Message],
         tools: &[ToolDefinition],
         cancellation: CancellationToken,
-    ) -> Result<(Message, StopReason)> {
+    ) -> Result<(Message, StopReason, crate::provider::TokenUsage)> {
         let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<StreamEvent>();
 
         let provider = Arc::clone(&self.provider);
@@ -232,20 +293,40 @@ impl Agent {
         });
 
         let mut renderer = StreamingRenderer::new(self.options.render_mode);
+        let mut thinking_renderer = StreamingRenderer::new(self.options.render_mode);
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
         let mut current_text = String::new();
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input_json = String::new();
         let mut stop_reason = StopReason::EndTurn;
+        let mut token_usage = crate::provider::TokenUsage::default();
+        let mut in_thinking = false;
 
         while let Some(event) = event_receiver.recv().await {
             match event {
+                StreamEvent::ThinkingDelta(text) => {
+                    if !in_thinking {
+                        in_thinking = true;
+                        render::render_thinking_start();
+                    }
+                    thinking_renderer.push_delta(&text)?;
+                }
                 StreamEvent::TextDelta(text) => {
+                    if in_thinking {
+                        in_thinking = false;
+                        thinking_renderer.finish()?;
+                        render::render_thinking_end();
+                    }
                     current_text.push_str(&text);
                     renderer.push_delta(&text)?;
                 }
                 StreamEvent::ToolUseStart { id, name } => {
+                    if in_thinking {
+                        in_thinking = false;
+                        thinking_renderer.finish()?;
+                        render::render_thinking_end();
+                    }
                     // Flush any accumulated text
                     if !current_text.is_empty() {
                         content_blocks.push(ContentBlock::Text {
@@ -273,7 +354,14 @@ impl Agent {
                 StreamEvent::MessageEnd {
                     stop_reason: reason,
                 } => {
+                    if in_thinking {
+                        thinking_renderer.finish()?;
+                        render::render_thinking_end();
+                    }
                     stop_reason = reason;
+                }
+                StreamEvent::Usage(usage) => {
+                    token_usage = usage;
                 }
                 StreamEvent::Error(error) => {
                     tracing::error!("stream error: {}", error);
@@ -308,7 +396,7 @@ impl Agent {
             content: content_blocks,
         };
 
-        Ok((message, stop_reason))
+        Ok((message, stop_reason, token_usage))
     }
 
     async fn execute_tool_calls(
@@ -328,9 +416,31 @@ impl Agent {
                 let output = match self.tool_registry.get(name) {
                     None => {
                         let error_msg = format!("Unknown tool: '{}'", name);
-                        crate::tools::ToolOutput {
-                            content: error_msg,
-                            is_error: true,
+                        crate::tools::ToolOutput::text(error_msg, true)
+                    }
+                    // Auto-activate deferred tools on first use so their full
+                    // schema appears in subsequent API calls.
+                    Some(_) if self.tool_registry.is_deferred(name) => {
+                        self.tool_registry.activate(name);
+                        // Fall through to execute below by re-getting
+                        match self.tool_registry.get(name) {
+                            Some(tool) => {
+                                match tool.execute(input.clone(), cancellation.clone()).await {
+                                    Ok(output) => output,
+                                    Err(AgshError::Interrupted) => crate::tools::ToolOutput::text(
+                                        "Tool execution interrupted.".to_string(),
+                                        true,
+                                    ),
+                                    Err(error) => crate::tools::ToolOutput::text(
+                                        format!("Tool error: {}", error),
+                                        true,
+                                    ),
+                                }
+                            }
+                            None => crate::tools::ToolOutput::text(
+                                format!("Unknown tool: '{}'", name),
+                                true,
+                            ),
                         }
                     }
                     Some(tool) => {
@@ -340,21 +450,76 @@ impl Agent {
                                 "Permission denied: '{}' requires {} permission, current: {}",
                                 name, required, permission
                             );
-                            crate::tools::ToolOutput {
-                                content: error_msg,
-                                is_error: true,
+                            crate::tools::ToolOutput::text(error_msg, true)
+                        } else if permission == crate::permission::Permission::Ask {
+                            // In Ask mode, prompt user for each tool call
+                            match &self.approval_sender {
+                                Some(sender) => {
+                                    let (response_sender, response_receiver) =
+                                        std::sync::mpsc::sync_channel(1);
+                                    let request = crate::shell::ToolApprovalRequest {
+                                        tool_name: name.clone(),
+                                        tool_input: input.clone(),
+                                        response_sender,
+                                    };
+                                    if sender.send(request).is_err() {
+                                        crate::tools::ToolOutput::text(
+                                            "Failed to request approval (shell disconnected)"
+                                                .to_string(),
+                                            true,
+                                        )
+                                    } else {
+                                        match response_receiver.recv() {
+                                            Ok(true) => {
+                                                match tool
+                                                    .execute(input.clone(), cancellation.clone())
+                                                    .await
+                                                {
+                                                    Ok(output) => output,
+                                                    Err(AgshError::Interrupted) => {
+                                                        crate::tools::ToolOutput::text(
+                                                            "Tool execution interrupted."
+                                                                .to_string(),
+                                                            true,
+                                                        )
+                                                    }
+                                                    Err(error) => crate::tools::ToolOutput::text(
+                                                        format!("Tool error: {}", error),
+                                                        true,
+                                                    ),
+                                                }
+                                            }
+                                            Ok(false) => crate::tools::ToolOutput::text(
+                                                "User denied tool execution.".to_string(),
+                                                true,
+                                            ),
+                                            Err(_) => crate::tools::ToolOutput::text(
+                                                "Failed to receive approval response.".to_string(),
+                                                true,
+                                            ),
+                                        }
+                                    }
+                                }
+                                None => {
+                                    // No approval channel (oneshot mode) — deny
+                                    crate::tools::ToolOutput::text(
+                                        "Ask mode requires interactive shell for tool approval."
+                                            .to_string(),
+                                        true,
+                                    )
+                                }
                             }
                         } else {
                             match tool.execute(input.clone(), cancellation.clone()).await {
                                 Ok(output) => output,
-                                Err(AgshError::Interrupted) => crate::tools::ToolOutput {
-                                    content: "Tool execution interrupted.".to_string(),
-                                    is_error: true,
-                                },
-                                Err(error) => crate::tools::ToolOutput {
-                                    content: format!("Tool error: {}", error),
-                                    is_error: true,
-                                },
+                                Err(AgshError::Interrupted) => crate::tools::ToolOutput::text(
+                                    "Tool execution interrupted.".to_string(),
+                                    true,
+                                ),
+                                Err(error) => crate::tools::ToolOutput::text(
+                                    format!("Tool error: {}", error),
+                                    true,
+                                ),
                             }
                         }
                     }
@@ -401,7 +566,7 @@ impl Agent {
             "Summarize our conversation so far into a concise context message.",
         ));
 
-        let (summary_message, _stop_reason) = self
+        let (summary_message, _stop_reason, _usage) = self
             .provider
             .complete(system_prompt, &compact_messages, &[])
             .await?;
@@ -433,6 +598,24 @@ impl Agent {
 
     fn available_tools(&self, permission: crate::permission::Permission) -> Vec<ToolDefinition> {
         self.tool_registry.definitions_for_permission(permission)
+    }
+
+    /// Returns summaries of deferred tools (tools registered but not in the
+    /// active API definitions) for listing in the system prompt.
+    fn deferred_tool_summaries(
+        &self,
+        permission: crate::permission::Permission,
+    ) -> Vec<(String, String)> {
+        let all = self.tool_registry.all_tool_summaries(permission);
+        let active: std::collections::HashSet<String> = self
+            .tool_registry
+            .definitions_for_permission(permission)
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        all.into_iter()
+            .filter(|(name, _)| !active.contains(name))
+            .collect()
     }
 }
 
@@ -479,6 +662,7 @@ fn has_tool_results(content: &[ContentBlock]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ToolResultContent;
 
     fn user_msg(text: &str) -> Message {
         Message::user(text)
@@ -509,7 +693,9 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".to_string(),
-                content: "file contents".to_string(),
+                content: vec![ToolResultContent::Text {
+                    text: "file contents".to_string(),
+                }],
                 is_error: false,
             }],
         }
@@ -616,7 +802,9 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.to_string(),
-                content: content.to_string(),
+                content: vec![ToolResultContent::Text {
+                    text: content.to_string(),
+                }],
                 is_error: false,
             }],
         }

@@ -58,9 +58,27 @@ pub enum Role {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultContent {
+    Text { text: String },
+    Image { source: ImageSource },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        thinking: String,
     },
     ToolUse {
         id: String,
@@ -69,9 +87,45 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        #[serde(deserialize_with = "deserialize_tool_result_content")]
+        content: Vec<ToolResultContent>,
         is_error: bool,
     },
+}
+
+/// Deserializes ToolResult content from either a string (legacy format) or
+/// an array of ToolResultContent (new format).
+fn deserialize_tool_result_content<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<ToolResultContent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<ToolResultContent>),
+    }
+
+    match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::String(text) => Ok(vec![ToolResultContent::Text { text }]),
+        StringOrVec::Vec(vec) => Ok(vec),
+    }
+}
+
+impl ContentBlock {
+    /// Extract the text content of a ToolResult (for display/logging).
+    pub fn tool_result_text_content(content: &[ToolResultContent]) -> String {
+        content
+            .iter()
+            .filter_map(|block| match block {
+                ToolResultContent::Text { text } => Some(text.as_str()),
+                ToolResultContent::Image { .. } => Some("[Image]"),
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,11 +179,20 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolUseStart { id: String, name: String },
     ToolInputDelta(String),
     ToolUseEnd { input: serde_json::Value },
     MessageEnd { stop_reason: StopReason },
+    Usage(TokenUsage),
     Error(String),
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,7 +210,7 @@ pub trait Provider: Send + Sync {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<(Message, StopReason)>;
+    ) -> Result<(Message, StopReason, TokenUsage)>;
 
     async fn stream(
         &self,
@@ -214,6 +277,8 @@ pub fn create_provider(
     client_id: Option<String>,
     oauth_token_url: Option<String>,
     token_store: Option<Arc<TokenStore>>,
+    thinking_enabled: bool,
+    thinking_budget_tokens: u64,
 ) -> Result<Arc<dyn Provider>> {
     match provider_name {
         "openai" => {
@@ -230,6 +295,8 @@ pub fn create_provider(
             client_id,
             oauth_token_url,
             token_store,
+            thinking_enabled,
+            thinking_budget_tokens,
         ))),
         other => Err(AgshError::Config(format!(
             "unknown provider: '{}'. Supported providers: openai, claude",
@@ -323,6 +390,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            10000,
         );
         assert!(result.is_ok());
     }
@@ -337,6 +406,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            10000,
         );
         assert!(result.is_ok());
     }
@@ -351,6 +422,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            10000,
         );
         assert!(result.is_err());
     }

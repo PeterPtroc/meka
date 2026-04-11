@@ -1,20 +1,40 @@
 mod file;
 mod search;
 mod shell;
+pub(crate) mod subagent;
+pub(crate) mod todo;
 mod util;
 mod web;
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+type DeferredSet = Arc<std::sync::RwLock<HashSet<String>>>;
 
 use crate::error::Result;
 use crate::permission::Permission;
-use crate::provider::ToolDefinition;
+use crate::provider::{ToolDefinition, ToolResultContent};
+
+pub type ReadTracker = Arc<RwLock<HashSet<PathBuf>>>;
 
 #[derive(Debug)]
 pub struct ToolOutput {
-    pub content: String,
+    pub content: Vec<ToolResultContent>,
     pub is_error: bool,
+}
+
+impl ToolOutput {
+    pub fn text(content: String, is_error: bool) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text { text: content }],
+            is_error,
+        }
+    }
 }
 
 #[async_trait]
@@ -30,15 +50,36 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    deferred: DeferredSet,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            deferred: Arc::new(std::sync::RwLock::new(HashSet::new())),
+        }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Mark a tool as deferred. Deferred tools are available for execution but
+    /// not included in the API tool definitions until auto-activated.
+    pub fn mark_deferred(&self, name: &str) {
+        self.deferred
+            .write()
+            .expect("deferred lock poisoned")
+            .insert(name.to_string());
+    }
+
+    /// Activate a deferred tool so it appears in subsequent API calls.
+    pub fn activate(&self, name: &str) {
+        self.deferred
+            .write()
+            .expect("deferred lock poisoned")
+            .remove(name);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
@@ -48,11 +89,36 @@ impl ToolRegistry {
             .map(|tool| tool.as_ref())
     }
 
+    /// Check if a tool is registered but currently deferred.
+    pub fn is_deferred(&self, name: &str) -> bool {
+        self.deferred
+            .read()
+            .expect("deferred lock poisoned")
+            .contains(name)
+    }
+
+    /// Returns tool definitions for the API call, excluding deferred tools.
     pub fn definitions_for_permission(&self, permission: Permission) -> Vec<ToolDefinition> {
+        let deferred = self.deferred.read().expect("deferred lock poisoned");
+        self.tools
+            .iter()
+            .filter(|tool| {
+                permission.allows(tool.required_permission())
+                    && !deferred.contains(&tool.definition().name)
+            })
+            .map(|tool| tool.definition())
+            .collect()
+    }
+
+    /// Returns name+description summaries for ALL tools including deferred ones.
+    pub fn all_tool_summaries(&self, permission: Permission) -> Vec<(String, String)> {
         self.tools
             .iter()
             .filter(|tool| permission.allows(tool.required_permission()))
-            .map(|tool| tool.definition())
+            .map(|tool| {
+                let def = tool.definition();
+                (def.name, def.description)
+            })
             .collect()
     }
 
@@ -61,10 +127,49 @@ impl ToolRegistry {
         shared_permission: crate::permission::SharedPermission,
         sandbox_enabled: bool,
         sandbox_capability: crate::sandbox::SandboxCapability,
+        todo_list: todo::SharedTodoList,
     ) -> Self {
         let mut registry = Self::new();
-        registry.register(Box::new(file::ReadFileTool));
-        registry.register(Box::new(file::EditFileTool));
+        let read_tracker: ReadTracker = Arc::new(RwLock::new(HashSet::new()));
+        registry.register(Box::new(file::ReadFileTool {
+            read_tracker: read_tracker.clone(),
+        }));
+        registry.register(Box::new(file::EditFileTool { read_tracker }));
+        registry.register(Box::new(file::WriteFileTool));
+        registry.register(Box::new(search::FindFilesTool));
+        registry.register(Box::new(search::SearchContentsTool));
+        let web_client = reqwest::Client::builder()
+            .user_agent(&user_agent)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        registry.register(Box::new(web::FetchUrlTool {
+            client: web_client.clone(),
+        }));
+        registry.register(Box::new(web::WebSearchTool { client: web_client }));
+        registry.register(Box::new(shell::ExecuteCommandTool {
+            sandbox_capability,
+            shared_permission,
+            sandbox_enabled,
+        }));
+        registry.register(Box::new(todo::TodoWriteTool { todo_list }));
+        registry
+    }
+
+    /// Build a tool registry for sub-agents. Excludes `todo_write` (parent
+    /// owns task tracking) and `spawn_agent` (no recursive spawning).
+    pub fn build_for_subagent(
+        user_agent: String,
+        shared_permission: crate::permission::SharedPermission,
+        sandbox_enabled: bool,
+        sandbox_capability: crate::sandbox::SandboxCapability,
+    ) -> Self {
+        let mut registry = Self::new();
+        let read_tracker: ReadTracker = Arc::new(RwLock::new(HashSet::new()));
+        registry.register(Box::new(file::ReadFileTool {
+            read_tracker: read_tracker.clone(),
+        }));
+        registry.register(Box::new(file::EditFileTool { read_tracker }));
         registry.register(Box::new(file::WriteFileTool));
         registry.register(Box::new(search::FindFilesTool));
         registry.register(Box::new(search::SearchContentsTool));
@@ -94,6 +199,10 @@ mod tests {
         crate::permission::SharedPermission::new(Permission::Write)
     }
 
+    fn test_todo_list() -> todo::SharedTodoList {
+        Arc::new(RwLock::new(Vec::new()))
+    }
+
     #[test]
     fn test_tool_registry() {
         let registry = ToolRegistry::build_default(
@@ -101,6 +210,7 @@ mod tests {
             test_shared_permission(),
             true,
             crate::sandbox::detect(),
+            test_todo_list(),
         );
         assert!(registry.get("read_file").is_some());
         assert!(registry.get("write_file").is_some());
@@ -110,6 +220,7 @@ mod tests {
         assert!(registry.get("execute_command").is_some());
         assert!(registry.get("fetch_url").is_some());
         assert!(registry.get("web_search").is_some());
+        assert!(registry.get("todo_write").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -120,6 +231,7 @@ mod tests {
             test_shared_permission(),
             true,
             crate::sandbox::detect(),
+            test_todo_list(),
         );
 
         let none_tools = registry.definitions_for_permission(Permission::None);

@@ -80,15 +80,12 @@ impl Tool for FindFilesTool {
         })??;
 
         if result.is_empty() {
-            Ok(ToolOutput {
-                content: "No files found matching the pattern.".to_string(),
-                is_error: false,
-            })
+            Ok(ToolOutput::text(
+                "No files found matching the pattern.".to_string(),
+                false,
+            ))
         } else {
-            Ok(ToolOutput {
-                content: result.join("\n"),
-                is_error: false,
-            })
+            Ok(ToolOutput::text(result.join("\n"), false))
         }
     }
 }
@@ -146,15 +143,9 @@ impl Tool for SearchContentsTool {
         })??;
 
         if result.is_empty() {
-            Ok(ToolOutput {
-                content: "No matches found.".to_string(),
-                is_error: false,
-            })
+            Ok(ToolOutput::text("No matches found.".to_string(), false))
         } else {
-            Ok(ToolOutput {
-                content: result,
-                is_error: false,
-            })
+            Ok(ToolOutput::text(result, false))
         }
     }
 }
@@ -261,6 +252,11 @@ fn walk_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ContentBlock;
+
+    fn text_content(output: &ToolOutput) -> String {
+        ContentBlock::tool_result_text_content(&output.content)
+    }
 
     #[tokio::test]
     async fn test_find_files() {
@@ -282,9 +278,9 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("a.txt"));
-        assert!(result.content.contains("b.txt"));
-        assert!(!result.content.contains("c.rs"));
+        assert!(text_content(&result).contains("a.txt"));
+        assert!(text_content(&result).contains("b.txt"));
+        assert!(!text_content(&result).contains("c.rs"));
     }
 
     #[tokio::test]
@@ -309,7 +305,7 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("hello world"));
-        assert!(result.content.contains("hello again"));
+        assert!(text_content(&result).contains("hello world"));
+        assert!(text_content(&result).contains("hello again"));
     }
 }

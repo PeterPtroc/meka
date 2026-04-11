@@ -12,7 +12,7 @@ use crate::session::TokenStore;
 
 use super::{
     AuthCredential, ContentBlock, DEFAULT_CLAUDE_CLIENT_ID, Message, Provider, Role, StopReason,
-    StreamEvent, ToolDefinition,
+    StreamEvent, TokenUsage, ToolDefinition,
 };
 
 /// Claude Code version string. Single source of truth defined in `build.rs`.
@@ -308,6 +308,8 @@ pub struct ClaudeProvider {
     oauth_token_url: String,
     token_store: Option<Arc<TokenStore>>,
     session_id: String,
+    thinking_enabled: bool,
+    thinking_budget_tokens: u64,
 }
 
 impl ClaudeProvider {
@@ -318,6 +320,8 @@ impl ClaudeProvider {
         client_id: Option<String>,
         oauth_token_url: Option<String>,
         token_store: Option<Arc<TokenStore>>,
+        thinking_enabled: bool,
+        thinking_budget_tokens: u64,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -329,6 +333,24 @@ impl ClaudeProvider {
                 .unwrap_or_else(|| "https://api.anthropic.com/v1/oauth/token".to_string()),
             token_store,
             session_id: Uuid::new_v4().to_string(),
+            thinking_enabled,
+            thinking_budget_tokens,
+        }
+    }
+
+    fn compute_betas(&self, auth_header_name: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        if auth_header_name == "Authorization" {
+            parts.push("claude-code-20250219");
+            parts.push("oauth-2025-04-20");
+        }
+        if self.thinking_enabled {
+            parts.push("interleaved-thinking-2025-05-14");
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(","))
         }
     }
 
@@ -476,7 +498,7 @@ impl ClaudeProvider {
                     .content
                     .iter()
                     .enumerate()
-                    .map(|(block_index, block)| {
+                    .filter_map(|(block_index, block)| {
                         let mut value = match block {
                             ContentBlock::Text { text } => {
                                 serde_json::json!({
@@ -504,6 +526,11 @@ impl ClaudeProvider {
                                     "is_error": is_error,
                                 })
                             }
+                            ContentBlock::Thinking { .. } => {
+                                // Thinking blocks should have been stripped before
+                                // reaching here; skip if present.
+                                return None;
+                            }
                         };
 
                         if is_last_message && block_index + 1 == block_count {
@@ -515,7 +542,7 @@ impl ClaudeProvider {
                             }
                         }
 
-                        value
+                        Some(value)
                     })
                     .collect();
 
@@ -562,7 +589,22 @@ impl ClaudeProvider {
 
         body.insert("model".to_string(), serde_json::json!(self.model));
         body.insert("messages".to_string(), serde_json::json!(claude_messages));
-        body.insert("max_tokens".to_string(), serde_json::json!(8192));
+
+        if self.thinking_enabled {
+            let budget = self.thinking_budget_tokens;
+            let max_tokens = std::cmp::max(16384, budget + 8192);
+            body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                }),
+            );
+        } else {
+            body.insert("max_tokens".to_string(), serde_json::json!(8192));
+        }
+
         body.insert("stream".to_string(), serde_json::json!(stream));
         body.insert(
             "metadata".to_string(),
@@ -600,13 +642,26 @@ impl ClaudeProvider {
     pub(super) fn parse_non_streaming_response(
         &self,
         response: &serde_json::Value,
-    ) -> Result<(Message, StopReason)> {
+    ) -> Result<(Message, StopReason, TokenUsage)> {
         let stop_reason_str = response
             .get("stop_reason")
             .and_then(|reason| reason.as_str())
             .unwrap_or("end_turn");
 
         let stop_reason = parse_claude_stop_reason(stop_reason_str);
+
+        let token_usage = TokenUsage {
+            input_tokens: response
+                .get("usage")
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            output_tokens: response
+                .get("usage")
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        };
 
         let content_array = response
             .get("content")
@@ -651,6 +706,13 @@ impl ClaudeProvider {
 
                     content_blocks.push(ContentBlock::ToolUse { id, name, input });
                 }
+                "thinking" => {
+                    if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                        content_blocks.push(ContentBlock::Thinking {
+                            thinking: thinking.to_string(),
+                        });
+                    }
+                }
                 _ => {
                     tracing::warn!("unknown Claude content block type: {}", block_type);
                 }
@@ -663,6 +725,7 @@ impl ClaudeProvider {
                 content: content_blocks,
             },
             stop_reason,
+            token_usage,
         ))
     }
 }
@@ -674,7 +737,7 @@ impl Provider for ClaudeProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<(Message, StopReason)> {
+    ) -> Result<(Message, StopReason, TokenUsage)> {
         let body = self.build_request_body(system_prompt, messages, tools, false);
         let body_json = serde_json::to_string(&body)
             .map_err(|error| AgshError::Provider(format!("failed to serialize body: {}", error)))?;
@@ -685,18 +748,14 @@ impl Provider for ClaudeProvider {
         };
         let (auth_header_name, auth_header_value) = self.ensure_valid_credential().await?;
 
-        let betas = if auth_header_name == "Authorization" {
-            Some("claude-code-20250219,oauth-2025-04-20")
-        } else {
-            None
-        };
+        let betas = self.compute_betas(auth_header_name);
 
         let request = apply_headers(
             self.client.post(format!("{}/v1/messages", self.base_url)),
             auth_header_name,
             &auth_header_value,
             &self.session_id,
-            betas,
+            betas.as_deref(),
         );
 
         let response = request
@@ -745,11 +804,7 @@ impl Provider for ClaudeProvider {
         };
         let (auth_header_name, auth_header_value) = self.ensure_valid_credential().await?;
 
-        let betas = if auth_header_name == "Authorization" {
-            Some("claude-code-20250219,oauth-2025-04-20")
-        } else {
-            None
-        };
+        let betas = self.compute_betas(auth_header_name);
 
         let request = apply_headers(
             self.client
@@ -758,7 +813,7 @@ impl Provider for ClaudeProvider {
             auth_header_name,
             &auth_header_value,
             &self.session_id,
-            betas,
+            betas.as_deref(),
         );
 
         let response = request
@@ -780,6 +835,7 @@ impl Provider for ClaudeProvider {
 
         let mut current_tool_input = String::new();
         let mut in_tool_use = false;
+        let mut in_thinking = false;
 
         loop {
             tokio::select! {
@@ -811,7 +867,9 @@ impl Provider for ClaudeProvider {
                                         .and_then(|block_type| block_type.as_str())
                                         .unwrap_or("");
 
-                                    if block_type == "tool_use" {
+                                    if block_type == "thinking" {
+                                        in_thinking = true;
+                                    } else if block_type == "tool_use" {
                                         let id = content_block
                                             .get("id")
                                             .and_then(|id| id.as_str())
@@ -853,6 +911,16 @@ impl Provider for ClaudeProvider {
                                         .unwrap_or("");
 
                                     match delta_type {
+                                        "thinking_delta" => {
+                                            if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str())
+                                                && !thinking.is_empty()
+                                                    && event_sender.send(
+                                                        StreamEvent::ThinkingDelta(thinking.to_string()),
+                                                    ).is_err() {
+                                                        tracing::trace!("stream event receiver dropped");
+                                                        break;
+                                                    }
+                                        }
                                         "text_delta" => {
                                             if let Some(text) = delta.get("text").and_then(|text| text.as_str())
                                                 && !text.is_empty()
@@ -882,7 +950,9 @@ impl Provider for ClaudeProvider {
                                     }
                                 }
                                 "content_block_stop" => {
-                                    if in_tool_use {
+                                    if in_thinking {
+                                        in_thinking = false;
+                                    } else if in_tool_use {
                                         let input = if current_tool_input.is_empty() {
                                             serde_json::json!({})
                                         } else {
@@ -909,6 +979,16 @@ impl Provider for ClaudeProvider {
                                     let Some(delta) = data.get("delta") else {
                                         continue;
                                     };
+                                    if let Some(usage) = data.get("usage") {
+                                        let token_usage = TokenUsage {
+                                            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        };
+                                        if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                            tracing::trace!("stream event receiver dropped");
+                                            break;
+                                        }
+                                    }
                                     if let Some(stop_reason_str) =
                                         delta.get("stop_reason").and_then(|reason| reason.as_str())
                                     {
@@ -925,7 +1005,19 @@ impl Provider for ClaudeProvider {
                                 "message_stop" => {
                                     break;
                                 }
-                                "message_start" | "ping" => {}
+                                "message_start" => {
+                                    if let Some(usage) = data.get("message").and_then(|m| m.get("usage")) {
+                                        let token_usage = TokenUsage {
+                                            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        };
+                                        if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                            tracing::trace!("stream event receiver dropped");
+                                            break;
+                                        }
+                                    }
+                                }
+                                "ping" => {}
                                 other => {
                                     tracing::debug!("unknown Claude SSE event: {}", other);
                                 }
@@ -962,6 +1054,37 @@ fn parse_claude_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ToolResultContent;
+
+    fn test_provider() -> ClaudeProvider {
+        ClaudeProvider::new(
+            AuthCredential::ApiKey("test-key".to_string()),
+            "claude-sonnet-4-20250514".to_string(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            10000,
+        )
+    }
+
+    fn test_provider_with_oauth() -> ClaudeProvider {
+        ClaudeProvider::new(
+            AuthCredential::OAuthToken {
+                access_token: "test-oauth-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
+            "claude-sonnet-4-20250514".to_string(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            10000,
+        )
+    }
 
     #[test]
     fn test_static_fingerprint_matches_empty_message() {
@@ -1016,14 +1139,7 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_simple() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let messages = vec![Message::user("hello")];
         let body = provider.build_request_body("system prompt", &messages, &[], false);
@@ -1080,14 +1196,7 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_with_tools() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let tools = vec![ToolDefinition {
             name: "read_file".to_string(),
@@ -1112,14 +1221,7 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_with_tool_calls() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let messages = vec![
             Message::user("read /tmp/test.txt"),
@@ -1135,7 +1237,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
-                    content: "file contents here".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "file contents here".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -1174,14 +1278,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_non_streaming_text() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let response = serde_json::json!({
             "id": "msg_123",
@@ -1195,7 +1292,7 @@ mod tests {
             "usage": { "input_tokens": 10, "output_tokens": 5 }
         });
 
-        let (message, stop_reason) = provider
+        let (message, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
 
@@ -1205,14 +1302,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_non_streaming_tool_use() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let response = serde_json::json!({
             "id": "msg_456",
@@ -1234,7 +1324,7 @@ mod tests {
             "usage": { "input_tokens": 20, "output_tokens": 15 }
         });
 
-        let (message, stop_reason) = provider
+        let (message, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
 
@@ -1256,14 +1346,7 @@ mod tests {
     #[test]
     fn test_patch_request_body_replaces_placeholder() {
         let messages = vec![Message::user("hello")];
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("system prompt", &messages, &[], false);
         let body_json = serde_json::to_string(&body).unwrap();
 
@@ -1285,14 +1368,7 @@ mod tests {
         let messages = vec![Message::user(
             "The billing header contains cch=00000 as a placeholder.",
         )];
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("system prompt", &messages, &[], false);
         let body_json = serde_json::to_string(&body).unwrap();
 
@@ -1342,14 +1418,7 @@ mod tests {
 
     #[test]
     fn test_claude_no_system_prompt_when_empty() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let body = provider.build_request_body("", &[], &[], false);
         assert!(body.get("system").is_none());
@@ -1357,14 +1426,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_missing_tool_use_id() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let response = serde_json::json!({
             "id": "msg_123",
@@ -1384,14 +1446,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_missing_tool_use_name() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let response = serde_json::json!({
             "id": "msg_123",
@@ -1459,7 +1514,9 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "toolu_1".to_string(),
-                content: "result".to_string(),
+                content: vec![ToolResultContent::Text {
+                    text: "result".to_string(),
+                }],
                 is_error: false,
             }],
         }];
@@ -1582,14 +1639,7 @@ mod tests {
 
     #[test]
     fn test_patch_request_body_preserves_length() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("prompt", &[Message::user("hi")], &[], false);
         let body_json = serde_json::to_string(&body).unwrap();
         let patched = patch_request_body(&body_json).unwrap();
@@ -1612,19 +1662,14 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
-                    content: "output: cch=00000".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "output: cch=00000".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
         ];
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("system prompt", &messages, &[], false);
         let body_json = serde_json::to_string(&body).unwrap();
         assert!(body_json.matches("cch=00000").count() >= 2);
@@ -1640,28 +1685,14 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_stream_true() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("prompt", &[Message::user("hi")], &[], true);
         assert_eq!(body["stream"], true);
     }
 
     #[test]
     fn test_claude_request_body_system_and_tools_together() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let tools = vec![ToolDefinition {
             name: "bash".to_string(),
             description: "Run a shell command".to_string(),
@@ -1683,14 +1714,7 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_metadata_fields() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("prompt", &[Message::user("hi")], &[], false);
 
         let user_id_str = body["metadata"]["user_id"].as_str().unwrap();
@@ -1704,28 +1728,14 @@ mod tests {
 
     #[test]
     fn test_claude_request_body_no_tools_key_when_empty() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("prompt", &[Message::user("hi")], &[], false);
         assert!(body.get("tools").is_none());
     }
 
     #[test]
     fn test_claude_parse_missing_content_array() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1738,21 +1748,14 @@ mod tests {
 
     #[test]
     fn test_claude_parse_missing_stop_reason_defaults_to_end_turn() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
             "role": "assistant",
             "content": [{"type": "text", "text": "hi"}]
         });
-        let (_, stop_reason) = provider
+        let (_, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         assert_eq!(stop_reason, StopReason::EndTurn);
@@ -1760,14 +1763,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_max_tokens_stop_reason() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1775,7 +1771,7 @@ mod tests {
             "content": [{"type": "text", "text": "truncated"}],
             "stop_reason": "max_tokens"
         });
-        let (_, stop_reason) = provider
+        let (_, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         assert_eq!(stop_reason, StopReason::MaxTokens);
@@ -1783,14 +1779,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_unknown_stop_reason() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1798,7 +1787,7 @@ mod tests {
             "content": [{"type": "text", "text": "hi"}],
             "stop_reason": "something_new"
         });
-        let (_, stop_reason) = provider
+        let (_, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         assert_eq!(
@@ -1809,14 +1798,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_empty_content_array() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1824,7 +1806,7 @@ mod tests {
             "content": [],
             "stop_reason": "end_turn"
         });
-        let (message, _) = provider
+        let (message, _, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         assert!(message.content.is_empty());
@@ -1832,15 +1814,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_parse_unknown_block_type_skipped() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+    fn test_claude_parse_thinking_block() {
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1851,7 +1826,30 @@ mod tests {
             ],
             "stop_reason": "end_turn"
         });
-        let (message, _) = provider
+        let (message, _, _) = provider
+            .parse_non_streaming_response(&response)
+            .expect("should parse");
+        assert_eq!(message.content.len(), 2);
+        assert!(
+            matches!(&message.content[0], ContentBlock::Thinking { thinking } if thinking == "hmm...")
+        );
+        assert_eq!(message.text_content(), "answer");
+    }
+
+    #[test]
+    fn test_claude_parse_unknown_block_type_skipped() {
+        let provider = test_provider();
+        let response = serde_json::json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "totally_unknown", "data": "xyz"},
+                {"type": "text", "text": "answer"}
+            ],
+            "stop_reason": "end_turn"
+        });
+        let (message, _, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         assert_eq!(message.content.len(), 1);
@@ -1860,14 +1858,7 @@ mod tests {
 
     #[test]
     fn test_claude_parse_tool_use_missing_input_defaults() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let response = serde_json::json!({
             "id": "msg_123",
             "type": "message",
@@ -1879,7 +1870,7 @@ mod tests {
             }],
             "stop_reason": "tool_use"
         });
-        let (message, _) = provider
+        let (message, _, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
         if let ContentBlock::ToolUse { input, .. } = &message.content[0] {
@@ -2045,17 +2036,6 @@ mod tests {
         count
     }
 
-    fn test_provider() -> ClaudeProvider {
-        ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        )
-    }
-
     fn test_tools() -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
@@ -2132,7 +2112,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
-                    content: "hello world".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "hello world".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -2154,7 +2136,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
-                    content: "hello world".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "hello world".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -2170,7 +2154,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_2".to_string(),
-                    content: "1 /tmp/test.txt".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "1 /tmp/test.txt".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -2223,7 +2209,9 @@ mod tests {
                     role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "t1".to_string(),
-                        content: "data".to_string(),
+                        content: vec![ToolResultContent::Text {
+                            text: "data".to_string(),
+                        }],
                         is_error: false,
                     }],
                 },
@@ -2448,7 +2436,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: format!("toolu_{}", i),
-                    content: format!("contents of file{}", i),
+                    content: vec![ToolResultContent::Text {
+                        text: format!("contents of file{}", i),
+                    }],
                     is_error: false,
                 }],
             });
@@ -2488,7 +2478,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".to_string(),
-                    content: "file data".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "file data".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -2517,14 +2509,7 @@ mod tests {
 
     #[test]
     fn test_claude_cache_control_on_last_message_only() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let messages = vec![
             Message::user("first"),
@@ -2546,14 +2531,7 @@ mod tests {
 
     #[test]
     fn test_claude_cache_control_on_last_tool() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
 
         let tools = vec![
             ToolDefinition {
@@ -2576,14 +2554,7 @@ mod tests {
 
     #[test]
     fn test_claude_no_message_cache_control_when_empty() {
-        let provider = ClaudeProvider::new(
-            AuthCredential::ApiKey("test-key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let provider = test_provider();
         let body = provider.build_request_body("system", &[], &[], false);
         let claude_messages = body["messages"].as_array().unwrap();
         assert!(claude_messages.is_empty());

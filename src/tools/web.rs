@@ -33,7 +33,7 @@ impl Tool for FetchUrlTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "fetch_url".to_string(),
-            description: "Fetch a web page and return its content as markdown text.".to_string(),
+            description: "Fetch a web page and return its content as markdown. Set 'raw' to true to return untreated HTML instead.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -53,6 +53,10 @@ impl Tool for FetchUrlTool {
                     "regex": {
                         "type": "string",
                         "description": "Optional regex pattern. If provided, only matching content is returned (all matches joined by newlines)."
+                    },
+                    "raw": {
+                        "type": "boolean",
+                        "description": "If true, return raw HTML instead of converting to markdown. Defaults to false."
                     }
                 },
                 "required": ["url"]
@@ -82,10 +86,10 @@ impl Tool for FetchUrlTool {
 
         let status = response.status();
         if !status.is_success() {
-            return Ok(ToolOutput {
-                content: format!("HTTP {} for '{}'", status, url),
-                is_error: true,
-            });
+            return Ok(ToolOutput::text(
+                format!("HTTP {} for '{}'", status, url),
+                true,
+            ));
         }
 
         let html = response
@@ -96,21 +100,26 @@ impl Tool for FetchUrlTool {
                 message: format!("failed to read response body: {}", error),
             })?;
 
-        let markdown = rewrite_html(&html, false);
+        let raw = input["raw"].as_bool().unwrap_or(false);
+        let body = if raw {
+            html
+        } else {
+            rewrite_html(&html, false)
+        };
 
         let max_length = input["max_length"]
             .as_u64()
             .map(|value| value as usize)
             .unwrap_or(30000);
 
-        let content = if max_length > 0 && markdown.len() > max_length {
+        let content = if max_length > 0 && body.len() > max_length {
             format!(
                 "{}\n\n... (truncated, showing first {} characters)",
-                &markdown[..markdown.floor_char_boundary(max_length)],
+                &body[..body.floor_char_boundary(max_length)],
                 max_length
             )
         } else {
-            markdown
+            body
         };
 
         let content = if let Some(pattern) = input.get("regex").and_then(|v| v.as_str()) {
@@ -128,10 +137,7 @@ impl Tool for FetchUrlTool {
             content
         };
 
-        Ok(ToolOutput {
-            content,
-            is_error: false,
-        })
+        Ok(ToolOutput::text(content, false))
     }
 }
 
@@ -221,15 +227,12 @@ impl Tool for WebSearchTool {
         };
 
         if results.is_empty() {
-            Ok(ToolOutput {
-                content: "No search results found.".to_string(),
-                is_error: false,
-            })
+            Ok(ToolOutput::text(
+                "No search results found.".to_string(),
+                false,
+            ))
         } else {
-            Ok(ToolOutput {
-                content: results,
-                is_error: false,
-            })
+            Ok(ToolOutput::text(results, false))
         }
     }
 }
@@ -524,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_url_definition_has_headers_and_regex() {
+    fn test_fetch_url_definition_has_headers_regex_and_raw() {
         let tool = FetchUrlTool {
             client: reqwest::Client::new(),
         };
@@ -532,6 +535,7 @@ mod tests {
         let props = &def.parameters["properties"];
         assert!(props.get("headers").is_some());
         assert!(props.get("regex").is_some());
+        assert!(props.get("raw").is_some());
     }
 
     #[test]

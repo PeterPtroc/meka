@@ -801,7 +801,7 @@ impl Tool for McpToolAdapter {
 
         let is_error = result.is_error.unwrap_or(false);
 
-        Ok(ToolOutput { content, is_error })
+        Ok(ToolOutput::text(content, is_error))
     }
 }
 

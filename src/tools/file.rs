@@ -3,14 +3,18 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use base64::Engine;
+
 use crate::error::{AgshError, Result};
 use crate::permission::Permission;
-use crate::provider::ToolDefinition;
+use crate::provider::{ImageSource, ToolDefinition, ToolResultContent};
 
 use super::util::{require_str, truncate_string};
-use super::{Tool, ToolOutput};
+use super::{ReadTracker, Tool, ToolOutput};
 
-pub(super) struct ReadFileTool;
+pub(super) struct ReadFileTool {
+    pub read_tracker: ReadTracker,
+}
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -56,6 +60,44 @@ impl Tool for ReadFileTool {
             })?
             .to_string();
 
+        let canonical = tokio::fs::canonicalize(&path)
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&path));
+
+        // Detect image files and return multimodal content
+        let extension = PathBuf::from(&path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase());
+
+        if let Some(media_type) = extension.as_deref().and_then(image_media_type) {
+            let data = tokio::fs::read(&path)
+                .await
+                .map_err(|error| AgshError::ToolExecution {
+                    tool_name: "read_file".to_string(),
+                    message: format!("failed to read '{}': {}", path, error),
+                })?;
+            let base64_data = base64::engine::general_purpose::STANDARD.encode(&data);
+
+            self.read_tracker.write().await.insert(canonical);
+
+            return Ok(ToolOutput {
+                content: vec![
+                    ToolResultContent::Text {
+                        text: format!("[Image: {}]", path),
+                    },
+                    ToolResultContent::Image {
+                        source: ImageSource {
+                            source_type: "base64".to_string(),
+                            media_type: media_type.to_string(),
+                            data: base64_data,
+                        },
+                    },
+                ],
+                is_error: false,
+            });
+        }
+
         let offset = input["offset"].as_u64().map(|value| value as usize);
         let limit = input["limit"].as_u64().map(|value| value as usize);
 
@@ -79,21 +121,22 @@ impl Tool for ReadFileTool {
             (None, None) => content,
         };
 
-        Ok(ToolOutput {
-            content: result,
-            is_error: false,
-        })
+        self.read_tracker.write().await.insert(canonical);
+
+        Ok(ToolOutput::text(result, false))
     }
 }
 
-pub(super) struct EditFileTool;
+pub(super) struct EditFileTool {
+    pub read_tracker: ReadTracker,
+}
 
 #[async_trait]
 impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Make a string replacement in a file. Replaces the first occurrence of 'old_string' with 'new_string'.".to_string(),
+            description: "Make a string replacement in a file. By default replaces the first occurrence of 'old_string' with 'new_string'. Set 'replace_all' to true to replace every occurrence. The file must have been read with read_file first unless 'force' is set to true.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -108,6 +151,14 @@ impl Tool for EditFileTool {
                     "new_string": {
                         "type": "string",
                         "description": "The replacement string"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "If true, replace all occurrences instead of just the first. Defaults to false."
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If true, bypass the requirement to read the file first. Defaults to false."
                     }
                 },
                 "required": ["path", "old_string", "new_string"]
@@ -127,6 +178,24 @@ impl Tool for EditFileTool {
         let path = require_str(&input, "path", "edit_file")?;
         let old_string = require_str(&input, "old_string", "edit_file")?;
         let new_string = require_str(&input, "new_string", "edit_file")?;
+        let replace_all = input["replace_all"].as_bool().unwrap_or(false);
+        let force = input["force"].as_bool().unwrap_or(false);
+
+        if !force {
+            let canonical = tokio::fs::canonicalize(&path)
+                .await
+                .unwrap_or_else(|_| PathBuf::from(&path));
+            if !self.read_tracker.read().await.contains(&canonical) {
+                return Ok(ToolOutput::text(
+                    format!(
+                        "Error: file '{}' must be read before editing. \
+                         Use read_file first, or set force=true to bypass.",
+                        path
+                    ),
+                    true,
+                ));
+            }
+        }
 
         let content =
             tokio::fs::read_to_string(&path)
@@ -137,17 +206,23 @@ impl Tool for EditFileTool {
                 })?;
 
         if !content.contains(&old_string) {
-            return Ok(ToolOutput {
-                content: format!(
+            return Ok(ToolOutput::text(
+                format!(
                     "Error: '{}' not found in '{}'",
                     truncate_string(&old_string, 100),
                     path
                 ),
-                is_error: true,
-            });
+                true,
+            ));
         }
 
-        let new_content = content.replacen(&old_string, &new_string, 1);
+        let (new_content, count) = if replace_all {
+            let count = content.matches(&old_string).count();
+            (content.replace(&old_string, &new_string), count)
+        } else {
+            (content.replacen(&old_string, &new_string, 1), 1)
+        };
+
         tokio::fs::write(&path, &new_content)
             .await
             .map_err(|error| AgshError::ToolExecution {
@@ -155,10 +230,13 @@ impl Tool for EditFileTool {
                 message: format!("failed to write '{}': {}", path, error),
             })?;
 
-        Ok(ToolOutput {
-            content: format!("Successfully edited '{}'", path),
-            is_error: false,
-        })
+        Ok(ToolOutput::text(
+            format!(
+                "Successfully edited '{}': replaced {} occurrence(s)",
+                path, count
+            ),
+            false,
+        ))
     }
 }
 
@@ -216,16 +294,41 @@ impl Tool for WriteFileTool {
                 message: format!("failed to write '{}': {}", path, error),
             })?;
 
-        Ok(ToolOutput {
-            content: format!("Successfully wrote {} bytes to '{}'", content.len(), path),
-            is_error: false,
-        })
+        Ok(ToolOutput::text(
+            format!("Successfully wrote {} bytes to '{}'", content.len(), path),
+            false,
+        ))
+    }
+}
+
+fn image_media_type(extension: &str) -> Option<&'static str> {
+    match extension {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use tokio::sync::RwLock;
+
     use super::*;
+    use crate::provider::ContentBlock;
+
+    fn text_content(output: &ToolOutput) -> String {
+        ContentBlock::tool_result_text_content(&output.content)
+    }
+
+    fn test_tracker() -> ReadTracker {
+        Arc::new(RwLock::new(HashSet::new()))
+    }
 
     #[tokio::test]
     async fn test_read_file() {
@@ -233,7 +336,9 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         std::fs::write(&file_path, "line1\nline2\nline3\n").expect("failed to write");
 
-        let tool = ReadFileTool;
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
         let result = tool
             .execute(
                 serde_json::json!({"path": file_path.to_str().expect("path")}),
@@ -243,8 +348,8 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("line1"));
-        assert!(result.content.contains("line3"));
+        assert!(text_content(&result).contains("line1"));
+        assert!(text_content(&result).contains("line3"));
     }
 
     #[tokio::test]
@@ -253,7 +358,9 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         std::fs::write(&file_path, "line0\nline1\nline2\nline3\nline4\n").expect("failed to write");
 
-        let tool = ReadFileTool;
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
         let result = tool
             .execute(
                 serde_json::json!({
@@ -267,10 +374,10 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("line1"));
-        assert!(result.content.contains("line2"));
-        assert!(!result.content.contains("line0"));
-        assert!(!result.content.contains("line3"));
+        assert!(text_content(&result).contains("line1"));
+        assert!(text_content(&result).contains("line2"));
+        assert!(!text_content(&result).contains("line0"));
+        assert!(!text_content(&result).contains("line3"));
     }
 
     #[tokio::test]
@@ -301,7 +408,22 @@ mod tests {
         let file_path = temp_dir.path().join("edit.txt");
         std::fs::write(&file_path, "hello world").expect("failed to write");
 
-        let tool = EditFileTool;
+        let tracker = test_tracker();
+        // Read the file first to satisfy read-before-edit
+        let read_tool = ReadFileTool {
+            read_tracker: tracker.clone(),
+        };
+        read_tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().expect("path")}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read should succeed");
+
+        let tool = EditFileTool {
+            read_tracker: tracker,
+        };
         let result = tool
             .execute(
                 serde_json::json!({
@@ -320,18 +442,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_file_replace_all() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "foo bar foo baz foo").expect("failed to write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "foo",
+                    "new_string": "qux",
+                    "replace_all": true,
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        assert!(text_content(&result).contains("3 occurrence(s)"));
+        let content = std::fs::read_to_string(&file_path).expect("failed to read");
+        assert_eq!(content, "qux bar qux baz qux");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_replace_all_default_false() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "foo bar foo baz foo").expect("failed to write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "foo",
+                    "new_string": "qux",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        assert!(text_content(&result).contains("1 occurrence(s)"));
+        let content = std::fs::read_to_string(&file_path).expect("failed to read");
+        assert_eq!(content, "qux bar foo baz foo");
+    }
+
+    #[tokio::test]
     async fn test_edit_file_not_found_string() {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let file_path = temp_dir.path().join("edit.txt");
         std::fs::write(&file_path, "hello world").expect("failed to write");
 
-        let tool = EditFileTool;
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
         let result = tool
             .execute(
                 serde_json::json!({
                     "path": file_path.to_str().expect("path"),
                     "old_string": "nonexistent",
-                    "new_string": "replacement"
+                    "new_string": "replacement",
+                    "force": true
                 }),
                 CancellationToken::new(),
             )
@@ -339,6 +521,135 @@ mod tests {
             .expect("should succeed");
 
         assert!(result.is_error);
-        assert!(result.content.contains("not found"));
+        assert!(text_content(&result).contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_without_read_fails() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "hello world").expect("failed to write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "world",
+                    "new_string": "rust"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("must be read before editing"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_with_force_bypasses_read_check() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "hello world").expect("failed to write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "world",
+                    "new_string": "rust",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        let content = std::fs::read_to_string(&file_path).expect("failed to read");
+        assert_eq!(content, "hello rust");
+    }
+
+    #[tokio::test]
+    async fn test_read_then_edit_succeeds() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "hello world").expect("failed to write");
+
+        let tracker = test_tracker();
+
+        let read_tool = ReadFileTool {
+            read_tracker: tracker.clone(),
+        };
+        read_tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().expect("path")}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read should succeed");
+
+        let edit_tool = EditFileTool {
+            read_tracker: tracker,
+        };
+        let result = edit_tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "world",
+                    "new_string": "rust"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_a_edit_file_b_fails() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_a = temp_dir.path().join("a.txt");
+        let file_b = temp_dir.path().join("b.txt");
+        std::fs::write(&file_a, "content a").expect("failed to write");
+        std::fs::write(&file_b, "content b").expect("failed to write");
+
+        let tracker = test_tracker();
+
+        let read_tool = ReadFileTool {
+            read_tracker: tracker.clone(),
+        };
+        read_tool
+            .execute(
+                serde_json::json!({"path": file_a.to_str().expect("path")}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read should succeed");
+
+        let edit_tool = EditFileTool {
+            read_tracker: tracker,
+        };
+        let result = edit_tool
+            .execute(
+                serde_json::json!({
+                    "path": file_b.to_str().expect("path"),
+                    "old_string": "content",
+                    "new_string": "modified"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("must be read before editing"));
     }
 }

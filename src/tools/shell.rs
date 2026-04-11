@@ -60,7 +60,7 @@ impl Tool for ExecuteCommandTool {
         let command = require_str(&input, "command", "execute_command")?;
         let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(30000);
         let permission = self.shared_permission.get();
-        let sandboxed = self.sandbox_enabled && permission < Permission::Write;
+        let sandboxed = self.sandbox_enabled && permission != Permission::Write;
 
         if sandboxed
             && matches!(
@@ -68,13 +68,13 @@ impl Tool for ExecuteCommandTool {
                 crate::sandbox::SandboxCapability::Unavailable
             )
         {
-            return Ok(ToolOutput {
-                content: "Shell command execution in read mode is not available on this \
+            return Ok(ToolOutput::text(
+                "Shell command execution in read mode is not available on this \
                     platform because filesystem sandboxing is not supported. Switch to \
                     write mode (Shift+Tab) to execute commands without sandboxing."
                     .to_string(),
-                is_error: true,
-            });
+                true,
+            ));
         }
 
         #[cfg(windows)]
@@ -145,10 +145,10 @@ impl Tool for ExecuteCommandTool {
                 if let Err(error) = child.kill().await {
                     tracing::debug!("failed to kill child process: {}", error);
                 }
-                Ok(ToolOutput {
-                    content: format!("Command timed out after {}ms", timeout_ms),
-                    is_error: true,
-                })
+                Ok(ToolOutput::text(
+                    format!("Command timed out after {}ms", timeout_ms),
+                    true,
+                ))
             }
             status = child.wait() => {
                 let status = status.map_err(|error| AgshError::ToolExecution {
@@ -188,14 +188,14 @@ impl Tool for ExecuteCommandTool {
                     result_text.push_str(&format!("\nExit code: {}", exit_code));
                 }
 
-                Ok(ToolOutput {
-                    content: if result_text.is_empty() {
+                Ok(ToolOutput::text(
+                    if result_text.is_empty() {
                         "(no output)".to_string()
                     } else {
                         result_text
                     },
-                    is_error: exit_code != 0,
-                })
+                    exit_code != 0,
+                ))
             }
         }
     }
@@ -204,6 +204,11 @@ impl Tool for ExecuteCommandTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ContentBlock;
+
+    fn text_content(output: &ToolOutput) -> String {
+        ContentBlock::tool_result_text_content(&output.content)
+    }
 
     fn test_shared_permission() -> crate::permission::SharedPermission {
         crate::permission::SharedPermission::new(Permission::Write)
@@ -225,7 +230,7 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
-        assert_eq!(result.content.trim(), "hello");
+        assert_eq!(text_content(&result).trim(), "hello");
     }
 
     #[tokio::test]

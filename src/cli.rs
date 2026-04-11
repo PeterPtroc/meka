@@ -71,6 +71,14 @@ pub struct Cli {
     #[arg(long = "render-mode", value_parser = parse_render_mode)]
     pub render_mode: Option<crate::render::RenderMode>,
 
+    /// Enable extended thinking (Claude-only)
+    #[arg(long = "thinking")]
+    pub thinking: Option<bool>,
+
+    /// Token budget for extended thinking (Claude-only)
+    #[arg(long = "thinking-budget")]
+    pub thinking_budget: Option<u64>,
+
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbosity: u8,

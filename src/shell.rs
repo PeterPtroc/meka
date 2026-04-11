@@ -109,6 +109,14 @@ pub enum ShellEvent {
     Exit,
 }
 
+/// Sent from the agent to the shell when a tool call needs user approval in
+/// Ask mode.
+pub struct ToolApprovalRequest {
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub response_sender: std::sync::mpsc::SyncSender<bool>,
+}
+
 fn parse_slash_command(input: &str) -> Option<SlashCommand> {
     let input = input.strip_prefix('/')?;
     let mut parts = input.splitn(2, char::is_whitespace);
@@ -133,7 +141,7 @@ fn print_help() {
     eprintln!("  /exit                          Exit the shell");
     eprintln!("  /clear                         Clear the terminal screen");
     eprintln!("  /session                       Show the current session ID");
-    eprintln!("  /permission [none|read|write]  Show or set the permission level");
+    eprintln!("  /permission [none|read|ask|write]  Show or set the permission level");
     eprintln!("  /compact                       Summarize and compact the session");
     eprintln!("  /cd <path>                     Change working directory");
     eprintln!();
@@ -148,6 +156,7 @@ pub fn run_repl(
     show_path_in_prompt: bool,
     input_sender: tokio::sync::mpsc::UnboundedSender<ShellEvent>,
     agent_done_receiver: std::sync::mpsc::Receiver<()>,
+    approval_receiver: std::sync::mpsc::Receiver<ToolApprovalRequest>,
 ) {
     let mut editor = build_reedline_editor();
     let prompt = AgshPrompt {
@@ -221,7 +230,7 @@ pub fn run_repl(
                             if input_sender.send(ShellEvent::Command(command)).is_err() {
                                 break;
                             }
-                            if agent_done_receiver.recv().is_err() {
+                            if !wait_for_agent(&agent_done_receiver, &approval_receiver) {
                                 break;
                             }
                             continue;
@@ -280,7 +289,7 @@ pub fn run_repl(
                     break;
                 }
 
-                if agent_done_receiver.recv().is_err() {
+                if !wait_for_agent(&agent_done_receiver, &approval_receiver) {
                     break;
                 }
             }
@@ -302,6 +311,64 @@ pub fn run_repl(
             }
         }
     }
+}
+
+/// Wait for the agent to signal it is done, while also handling tool approval
+/// requests that arrive in Ask mode.
+fn wait_for_agent(
+    agent_done_receiver: &std::sync::mpsc::Receiver<()>,
+    approval_receiver: &std::sync::mpsc::Receiver<ToolApprovalRequest>,
+) -> bool {
+    use std::sync::mpsc::TryRecvError;
+    use std::time::Duration;
+
+    loop {
+        // Check if the agent is done
+        match agent_done_receiver.try_recv() {
+            Ok(()) => return true,
+            Err(TryRecvError::Disconnected) => return false,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        // Check for approval requests
+        match approval_receiver.try_recv() {
+            Ok(request) => {
+                handle_approval_request(&request);
+            }
+            Err(TryRecvError::Disconnected) => return false,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn handle_approval_request(request: &ToolApprovalRequest) {
+    use crossterm::style::Stylize;
+
+    let display_name = crate::render::tool_display_name_for_approval(&request.tool_name);
+    let summary =
+        crate::render::tool_primary_param_for_approval(&request.tool_name, &request.tool_input);
+
+    eprint!(
+        "{} ",
+        format!("[ask] {} {}", display_name, summary.unwrap_or_default())
+            .with(crossterm::style::Color::Magenta)
+    );
+    eprint!("{}", "(Y/n) ".with(crossterm::style::Color::DarkGrey));
+
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut response = String::new();
+    let allowed = match std::io::stdin().read_line(&mut response) {
+        Ok(_) => {
+            let trimmed = response.trim().to_lowercase();
+            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+        }
+        Err(_) => false,
+    };
+
+    let _ = request.response_sender.send(allowed);
 }
 
 fn shorten_path_with_tilde(path: &Path) -> String {

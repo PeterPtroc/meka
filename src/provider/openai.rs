@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{AgshError, Result};
 
 use super::{
-    ContentBlock, Message, Provider, Role, StopReason, StreamEvent, ToolCallAccumulator,
-    ToolDefinition, finalize_tool_call_accumulators,
+    ContentBlock, Message, Provider, Role, StopReason, StreamEvent, TokenUsage,
+    ToolCallAccumulator, ToolDefinition, finalize_tool_call_accumulators,
 };
 
 pub struct OpenAiProvider {
@@ -58,10 +58,11 @@ impl OpenAiProvider {
                                 is_error,
                             } = block
                             {
+                                let text = ContentBlock::tool_result_text_content(content);
                                 let mut tool_msg = serde_json::json!({
                                     "role": "tool",
                                     "tool_call_id": tool_use_id,
-                                    "content": content,
+                                    "content": text,
                                 });
                                 if *is_error {
                                     tool_msg["is_error"] = serde_json::json!(true);
@@ -142,7 +143,7 @@ impl OpenAiProvider {
     pub(super) fn parse_non_streaming_response(
         &self,
         response: &serde_json::Value,
-    ) -> Result<(Message, StopReason)> {
+    ) -> Result<(Message, StopReason, TokenUsage)> {
         let choice = response
             .get("choices")
             .and_then(|choices| choices.get(0))
@@ -211,12 +212,26 @@ impl OpenAiProvider {
             }
         }
 
+        let token_usage = TokenUsage {
+            input_tokens: response
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            output_tokens: response
+                .get("usage")
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        };
+
         Ok((
             Message {
                 role: Role::Assistant,
                 content: content_blocks,
             },
             stop_reason,
+            token_usage,
         ))
     }
 }
@@ -228,7 +243,7 @@ impl Provider for OpenAiProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<(Message, StopReason)> {
+    ) -> Result<(Message, StopReason, TokenUsage)> {
         let body = self.build_request_body(system_prompt, messages, tools, false);
 
         let response = self
@@ -330,6 +345,17 @@ impl Provider for OpenAiProvider {
                                     continue;
                                 }
                             };
+
+                            if let Some(usage) = data.get("usage") {
+                                let token_usage = TokenUsage {
+                                    input_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    output_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                };
+                                if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                    tracing::trace!("stream event receiver dropped");
+                                    break;
+                                }
+                            }
 
                             let Some(choice) = data.get("choices").and_then(|choices| choices.get(0)) else {
                                 continue;
@@ -437,6 +463,7 @@ fn parse_openai_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ToolResultContent;
 
     #[test]
     fn test_openai_request_body_simple() {
@@ -499,7 +526,9 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_1".to_string(),
-                    content: "file contents here".to_string(),
+                    content: vec![ToolResultContent::Text {
+                        text: "file contents here".to_string(),
+                    }],
                     is_error: false,
                 }],
             },
@@ -531,7 +560,7 @@ mod tests {
             }]
         });
 
-        let (message, stop_reason) = provider
+        let (message, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
 
@@ -561,7 +590,7 @@ mod tests {
             }]
         });
 
-        let (message, stop_reason) = provider
+        let (message, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse");
 
@@ -662,7 +691,7 @@ mod tests {
             }]
         });
 
-        let (message, stop_reason) = provider
+        let (message, stop_reason, _) = provider
             .parse_non_streaming_response(&response)
             .expect("should parse flattened tool call");
 

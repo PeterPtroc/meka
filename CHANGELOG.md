@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `replace_all` parameter for `edit_file` tool to replace all occurrences in a file.
+- `force` parameter for `edit_file` tool to bypass the read-before-edit requirement.
+- Read-before-edit enforcement: `edit_file` requires `read_file` on the same path first.
+- `todo_write` tool for structured task tracking within a session.
+- Ask permission mode (`a`): prompts user to approve/deny each tool call individually.
+- Extended thinking support for the Claude provider (`[thinking]` config section).
+- Image multimodal support: `read_file` returns base64-encoded images for `.png`/`.jpg`/`.gif`/`.webp`/`.bmp`.
+- `TokenUsage` tracking parsed from Claude and OpenAI API responses.
+- Auto-compact: automatically compacts conversation when input tokens exceed 80% of context window.
+- `spawn_agent` tool for delegating research tasks to read-only sub-agents.
+- Deferred tool loading: MCP tools listed in system prompt but schemas sent on first use.
+- `raw` parameter for `fetch_url` tool to return untreated HTML instead of markdown.
+
+### Changed
+
+- Permission levels expanded from 3 to 4: none, read, ask, write.
+- `ToolResult.content` changed from `String` to `Vec<ToolResultContent>` for multimodal support.
+- `Provider::complete()` now returns `TokenUsage` alongside the message and stop reason.
+- `edit_file` success message now reports the number of replacements made.
+
 ## [0.7.1] - 2026-04-04
 
 ### Changed

@@ -33,6 +33,7 @@ pub fn build_system_prompt(
     permission: Permission,
     tools: &[ToolDefinition],
     sandboxed_shell: bool,
+    deferred_tools: &[(String, String)],
 ) -> String {
     let mut prompt = String::new();
 
@@ -75,6 +76,13 @@ pub fn build_system_prompt(
                 );
             }
         }
+        Permission::Ask => {
+            prompt.push_str(
+                "You have access to all tools, but the user will be prompted to approve \
+                 or deny each tool call before it executes. Proceed normally — the user \
+                 will see each tool invocation and decide whether to allow it.\n\n",
+            );
+        }
         Permission::Write => {
             prompt.push_str(
                 "You have FULL access to all tools, including file writing, editing, \
@@ -89,6 +97,16 @@ pub fn build_system_prompt(
         prompt.push_str("## Available Tools\n\n");
         for tool in tools {
             prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+        }
+        prompt.push('\n');
+    }
+
+    if !deferred_tools.is_empty() {
+        prompt.push_str("## Additional Tools (loaded on first use)\n\n");
+        prompt.push_str("These tools are available but their schemas are loaded on demand. ");
+        prompt.push_str("Call them by name and they will be activated.\n\n");
+        for (name, description) in deferred_tools {
+            prompt.push_str(&format!("- **{}**: {}\n", name, description));
         }
         prompt.push('\n');
     }
@@ -190,14 +208,14 @@ mod tests {
 
     #[test]
     fn test_system_prompt_none_mode() {
-        let prompt = build_system_prompt(Permission::None, &[], false);
+        let prompt = build_system_prompt(Permission::None, &[], false, &[]);
         assert!(prompt.contains("NO tools available"));
         assert!(prompt.contains("Shift+Tab"));
     }
 
     #[test]
     fn test_system_prompt_read_mode_with_sandbox() {
-        let prompt = build_system_prompt(Permission::Read, &[], true);
+        let prompt = build_system_prompt(Permission::Read, &[], true, &[]);
         assert!(prompt.contains("READ-ONLY"));
         assert!(prompt.contains("read-only sandboxed"));
         assert!(prompt.contains("CANNOT write"));
@@ -205,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_read_mode_without_sandbox() {
-        let prompt = build_system_prompt(Permission::Read, &[], false);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[]);
         assert!(prompt.contains("READ-ONLY"));
         assert!(prompt.contains("CANNOT write"));
         assert!(prompt.contains("execute shell commands"));
@@ -214,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_write_mode() {
-        let prompt = build_system_prompt(Permission::Write, &[], false);
+        let prompt = build_system_prompt(Permission::Write, &[], false, &[]);
         assert!(prompt.contains("FULL access"));
         assert!(prompt.contains("destructive"));
     }
@@ -234,7 +252,7 @@ mod tests {
             },
         ];
 
-        let prompt = build_system_prompt(Permission::Write, &tools, false);
+        let prompt = build_system_prompt(Permission::Write, &tools, false, &[]);
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("execute_command"));
         assert!(prompt.contains("Available Tools"));
@@ -242,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_has_environment() {
-        let prompt = build_system_prompt(Permission::Read, &[], false);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[]);
         assert!(prompt.contains("Environment"));
         assert!(!prompt.contains("Working Directory:"));
         assert!(!prompt.contains("Date:"));
