@@ -580,19 +580,51 @@ impl Agent {
             return Err(AgshError::Config("no messages to compact".to_string()));
         }
 
-        let system_prompt = "You are a conversation summarizer. The user will ask you to \
-             summarize the conversation so far. Produce a concise summary that preserves \
-             all important information, decisions made, files discussed, and any ongoing \
-             tasks. The summary will be used as the starting context for continuing this \
-             conversation. Be thorough but concise. Write the summary in second person \
-             (e.g., 'You were working on...').";
+        let system_prompt = "You are a conversation summarizer. Produce a structured summary \
+             that will replace the conversation history. Write in second person \
+             (\"You were working on...\").\n\n\
+             Cover these sections (skip any that don't apply):\n\n\
+             1. **Primary task**: What the user asked for and the overall goal.\n\
+             2. **Current state**: What has been completed, what is in progress, what remains.\n\
+             3. **Key files**: Files read, created, or modified (list paths).\n\
+             4. **Key decisions**: Important choices made and their rationale.\n\
+             5. **Errors and fixes**: Problems encountered and how they were resolved.\n\
+             6. **User preferences**: Feedback or corrections about how to work.";
 
-        // Clone messages and append a user message so the conversation ends with a
-        // user turn. Some providers (e.g., Google) reject requests where the last
-        // message has an assistant role.
-        let mut compact_messages = messages.clone();
+        // Split into messages to summarize vs. recent messages to keep verbatim.
+        // Walk backward from the target split point to find a safe cut that
+        // doesn't orphan tool_use blocks from their tool_result responses.
+        let (to_summarize, to_keep) = if messages.len() > 6 {
+            let mut split = messages.len() - 2;
+            loop {
+                if split == 0 {
+                    break;
+                }
+                let message = &messages[split];
+                if message.role == Role::User && !has_tool_results(&message.content) {
+                    break;
+                }
+                split -= 1;
+            }
+            if split >= 4 {
+                (messages[..split].to_vec(), messages[split..].to_vec())
+            } else {
+                (messages.clone(), Vec::new())
+            }
+        } else {
+            (messages.clone(), Vec::new())
+        };
+
+        // Clone and preprocess messages for the summarizer: strip images and
+        // truncate large text blocks to avoid overwhelming the summary call.
+        let mut compact_messages = to_summarize.clone();
+        for message in &mut compact_messages {
+            strip_images_and_truncate(&mut message.content);
+        }
+
+        // Append a user message so the conversation ends with a user turn.
         compact_messages.push(Message::user(
-            "Summarize our conversation so far into a concise context message.",
+            "Summarize this conversation into a concise context message.",
         ));
 
         let (summary_message, _stop_reason, _usage) = self
@@ -607,22 +639,80 @@ impl Agent {
             ));
         }
 
-        self.session_manager.clear_messages(sid).await?;
+        // Build post-compact context: environment, todos, scratchpad inventory.
+        let post_context = self.build_post_compact_context(sid).await;
+
+        let context_message = if post_context.is_empty() {
+            format!(
+                "[Conversation summary from session compaction]\n\n{}",
+                summary_text,
+            )
+        } else {
+            format!(
+                "[Conversation summary from session compaction]\n\n{}\n\n\
+                 [Post-compaction context]\n\n{}",
+                summary_text, post_context,
+            )
+        };
+
+        // Clear messages but preserve scratchpad entries.
+        self.session_manager.clear_messages_only(sid).await?;
 
         messages.clear();
 
-        let context_message = format!(
-            "[Conversation summary from session compaction]\n\n{}",
-            summary_text
-        );
         let user_message = Message::user(&context_message);
         messages.push(user_message);
-
         self.session_manager
             .save_message(sid, "user", &context_message)
             .await?;
 
+        // Re-append preserved tail messages.
+        for message in &to_keep {
+            messages.push(message.clone());
+            let (role, content) = match message.role {
+                Role::User => ("user", message.text_content()),
+                Role::Assistant => {
+                    let json = serde_json::to_string(&message.content).unwrap_or_default();
+                    ("assistant", json)
+                }
+            };
+            self.session_manager
+                .save_message(sid, role, &content)
+                .await?;
+        }
+
         Ok(())
+    }
+
+    async fn build_post_compact_context(&self, session_id: Uuid) -> String {
+        let mut parts = Vec::new();
+
+        let env = build_environment_context();
+        if !env.is_empty() {
+            parts.push(env);
+        }
+
+        let todos = self.todo_list.read().await;
+        if !todos.is_empty() {
+            parts.push(todo::format_todo_for_context(&todos));
+        }
+        drop(todos);
+
+        if let Ok(entries) = self.session_manager.list_tool_outputs(session_id).await {
+            if !entries.is_empty() {
+                let mut listing = String::from("[Scratchpad entries]\n");
+                for entry in &entries {
+                    listing.push_str(&format!(
+                        "- \"{}\" ({})\n",
+                        entry.name,
+                        crate::tools::scratchpad::format_size(entry.size),
+                    ));
+                }
+                parts.push(listing);
+            }
+        }
+
+        parts.join("\n")
     }
 
     fn available_tools(&self, permission: crate::permission::Permission) -> Vec<ToolDefinition> {
@@ -686,6 +776,60 @@ fn has_tool_results(content: &[ContentBlock]) -> bool {
     content
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+/// Preprocess message content blocks for the compaction summarizer:
+/// replace images with "[image]" markers and truncate large text blocks.
+fn strip_images_and_truncate(content: &mut Vec<ContentBlock>) {
+    use crate::provider::ToolResultContent;
+
+    const MAX_TEXT_CHARS: usize = 2000;
+    const HEAD_CHARS: usize = 1000;
+    const TAIL_CHARS: usize = 500;
+
+    for block in content.iter_mut() {
+        match block {
+            ContentBlock::ToolResult {
+                content: tool_content,
+                ..
+            } => {
+                for item in tool_content.iter_mut() {
+                    match item {
+                        ToolResultContent::Image { .. } => {
+                            *item = ToolResultContent::Text {
+                                text: "[image]".to_string(),
+                            };
+                        }
+                        ToolResultContent::Text { text } => {
+                            if text.len() > MAX_TEXT_CHARS {
+                                let head_end = text.floor_char_boundary(HEAD_CHARS);
+                                let tail_start =
+                                    text.floor_char_boundary(text.len().saturating_sub(TAIL_CHARS));
+                                *text = format!(
+                                    "{}\n... (truncated for compaction) ...\n{}",
+                                    &text[..head_end],
+                                    &text[tail_start..],
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            ContentBlock::Text { text } => {
+                if text.len() > MAX_TEXT_CHARS {
+                    let head_end = text.floor_char_boundary(HEAD_CHARS);
+                    let tail_start =
+                        text.floor_char_boundary(text.len().saturating_sub(TAIL_CHARS));
+                    *text = format!(
+                        "{}\n... (truncated for compaction) ...\n{}",
+                        &text[..head_end],
+                        &text[tail_start..],
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

@@ -380,6 +380,7 @@ impl SessionManager {
             })
     }
 
+    #[cfg(test)]
     pub async fn clear_messages(&self, session_id: Uuid) -> Result<()> {
         self.connection
             .call(move |connection| {
@@ -388,6 +389,25 @@ impl SessionManager {
                     rusqlite::params![session_id.to_string()],
                 )?;
 
+                connection.execute(
+                    "DELETE FROM messages WHERE session_id = ?1",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+
+                connection.execute(
+                    "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![chrono::Utc::now().to_rfc3339(), session_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| AgshError::Database(format!("failed to clear messages: {}", error)))
+    }
+
+    /// Clear messages but preserve scratchpad (tool_outputs). Used by compaction.
+    pub async fn clear_messages_only(&self, session_id: Uuid) -> Result<()> {
+        self.connection
+            .call(move |connection| {
                 connection.execute(
                     "DELETE FROM messages WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],

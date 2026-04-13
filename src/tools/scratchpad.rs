@@ -27,7 +27,7 @@ const DEFAULT_READ_LIMIT: usize = 30_000;
 /// Maximum number of regex matches returned in search mode.
 const MAX_SEARCH_MATCHES: usize = 100;
 
-fn format_size(bytes: usize) -> String {
+pub(crate) fn format_size(bytes: usize) -> String {
     if bytes >= 1_048_576 {
         format!("{:.1} MB", bytes as f64 / 1_048_576.0)
     } else if bytes >= 1_024 {
