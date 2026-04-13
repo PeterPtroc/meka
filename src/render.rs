@@ -6,15 +6,17 @@ use termimad::MadSkin;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RenderMode {
+    Termimad,
     #[default]
-    Rich,
+    Bat,
     Raw,
 }
 
 impl std::fmt::Display for RenderMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RenderMode::Rich => write!(formatter, "rich"),
+            RenderMode::Termimad => write!(formatter, "termimad"),
+            RenderMode::Bat => write!(formatter, "bat"),
             RenderMode::Raw => write!(formatter, "raw"),
         }
     }
@@ -25,10 +27,11 @@ impl std::str::FromStr for RenderMode {
 
     fn from_str(string: &str) -> std::result::Result<Self, Self::Err> {
         match string.to_lowercase().as_str() {
-            "rich" => Ok(RenderMode::Rich),
+            "rich" | "termimad" => Ok(RenderMode::Termimad),
+            "bat" => Ok(RenderMode::Bat),
             "raw" => Ok(RenderMode::Raw),
             other => Err(format!(
-                "unknown render mode '{}' (expected 'rich' or 'raw')",
+                "unknown render mode '{}' (expected 'termimad', 'bat', or 'raw')",
                 other
             )),
         }
@@ -39,7 +42,7 @@ pub struct StreamingRenderer {
     buffer: String,
     skin: MadSkin,
     mode: RenderMode,
-    started: bool,
+    pub(crate) started: bool,
     raw_table_lines: Vec<String>,
 }
 
@@ -69,19 +72,30 @@ impl StreamingRenderer {
         self.buffer.push_str(delta);
 
         match self.mode {
-            RenderMode::Rich => self.flush_rich(),
+            RenderMode::Termimad => self.flush_termimad(),
+            RenderMode::Bat => self.flush_bat(),
             RenderMode::Raw => self.flush_raw(),
         }
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
         match self.mode {
-            RenderMode::Rich => {
+            RenderMode::Termimad => {
                 if !self.buffer.is_empty() {
                     let remaining = std::mem::take(&mut self.buffer);
                     let trimmed = remaining.trim_end_matches('\n');
                     if !trimmed.is_empty() {
                         print!("{}", self.skin.term_text(trimmed));
+                    }
+                }
+            }
+            RenderMode::Bat => {
+                if !self.buffer.is_empty() {
+                    let remaining = std::mem::take(&mut self.buffer);
+                    let trimmed = remaining.trim_end_matches('\n');
+                    if !trimmed.is_empty() {
+                        print_with_bat(trimmed);
+                        println!();
                     }
                 }
             }
@@ -104,7 +118,9 @@ impl StreamingRenderer {
         io::stdout().flush()
     }
 
-    fn flush_rich(&mut self) -> io::Result<()> {
+    fn flush_termimad(&mut self) -> io::Result<()> {
+        self.buffer = normalize_header_spacing(&self.buffer);
+
         while let Some(boundary) = self.buffer.find("\n\n") {
             let complete = self.buffer[..boundary + 2].to_string();
             self.buffer = self.buffer[boundary + 2..].to_string();
@@ -128,7 +144,35 @@ impl StreamingRenderer {
         Ok(())
     }
 
+    fn flush_bat(&mut self) -> io::Result<()> {
+        self.buffer = normalize_header_spacing(&self.buffer);
+
+        while let Some(boundary) = self.buffer.find("\n\n") {
+            let complete = self.buffer[..boundary + 2].to_string();
+            self.buffer = self.buffer[boundary + 2..].to_string();
+            print_with_bat(&complete);
+            io::stdout().flush()?;
+        }
+
+        if !self.in_code_block() && !self.in_table() {
+            while let Some(newline_pos) = self.buffer.find('\n') {
+                if newline_pos + 1 < self.buffer.len() || !self.buffer.ends_with('\n') {
+                    let line = self.buffer[..newline_pos + 1].to_string();
+                    self.buffer = self.buffer[newline_pos + 1..].to_string();
+                    print_with_bat(&line);
+                    io::stdout().flush()?;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn flush_raw(&mut self) -> io::Result<()> {
+        self.buffer = normalize_header_spacing(&self.buffer);
+
         while let Some(newline_pos) = self.buffer.find('\n') {
             let line = self.buffer[..newline_pos].to_string();
             self.buffer = self.buffer[newline_pos + 1..].to_string();
@@ -165,6 +209,58 @@ impl StreamingRenderer {
     fn in_table(&self) -> bool {
         self.buffer.trim_start().starts_with('|')
     }
+}
+
+/// Ensure a blank line follows each markdown header (e.g., `## Title`)
+/// unless one already exists. Skips headers inside code fences.
+fn normalize_header_spacing(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut result = Vec::with_capacity(lines.len());
+    let mut in_fence = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+
+        result.push(*line);
+
+        if in_fence {
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('#')
+            && trimmed
+                .find(|character: char| character != '#')
+                .is_some_and(|position| trimmed.as_bytes().get(position) == Some(&b' '));
+
+        if is_header {
+            let next_line = lines.get(index + 1);
+            if next_line.is_some_and(|next| !next.trim().is_empty()) {
+                result.push("");
+            }
+        }
+    }
+
+    // Preserve trailing newline if the original had one
+    let mut output = result.join("\n");
+    if text.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+fn print_with_bat(text: &str) {
+    let _ = bat::PrettyPrinter::new()
+        .input_from_bytes(text.as_bytes())
+        .language("markdown")
+        .header(false)
+        .line_numbers(false)
+        .grid(false)
+        .rule(false)
+        .wrapping_mode(bat::WrappingMode::NoWrapping(false))
+        .print();
 }
 
 fn is_table_line(line: &str) -> bool {
@@ -401,21 +497,21 @@ mod tests {
 
     #[test]
     fn test_streaming_renderer_basic() {
-        let mut renderer = StreamingRenderer::new(RenderMode::Rich);
+        let mut renderer = StreamingRenderer::new(RenderMode::Termimad);
         renderer.push_delta("hello").unwrap();
         renderer.finish().unwrap();
     }
 
     #[test]
     fn test_streaming_renderer_strips_leading_newlines() {
-        let mut renderer = StreamingRenderer::new(RenderMode::Rich);
+        let mut renderer = StreamingRenderer::new(RenderMode::Termimad);
         renderer.push_delta("\n\nhello").unwrap();
         renderer.finish().unwrap();
     }
 
     #[test]
     fn test_render_mode_default() {
-        assert_eq!(RenderMode::default(), RenderMode::Rich);
+        assert_eq!(RenderMode::default(), RenderMode::Bat);
     }
 
     #[test]
@@ -557,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_finish_trims_trailing_newlines_rich() {
-        let mut renderer = StreamingRenderer::new(RenderMode::Rich);
+        let mut renderer = StreamingRenderer::new(RenderMode::Termimad);
         renderer.push_delta("hello\n\n\n").unwrap();
         renderer.finish().unwrap();
     }
@@ -568,5 +664,54 @@ mod tests {
         renderer.started = true;
         renderer.buffer = "\n\n\n".to_string();
         renderer.finish().unwrap();
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_adds_blank_line() {
+        let input = "## Title\nBody text";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "## Title\n\nBody text");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_already_has_blank_line() {
+        let input = "## Title\n\nBody text";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "## Title\n\nBody text");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_header_at_end() {
+        let input = "## Title";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "## Title");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_inside_code_fence() {
+        let input = "```\n## Not a header\ncode\n```";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "```\n## Not a header\ncode\n```");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_multiple_levels() {
+        let input = "# H1\ntext\n### H3\nmore text";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "# H1\n\ntext\n### H3\n\nmore text");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_preserves_trailing_newline() {
+        let input = "## Title\nBody\n";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "## Title\n\nBody\n");
+    }
+
+    #[test]
+    fn test_normalize_header_spacing_no_space_after_hash_is_not_header() {
+        let input = "##not a header\ntext";
+        let output = normalize_header_spacing(input);
+        assert_eq!(output, "##not a header\ntext");
     }
 }

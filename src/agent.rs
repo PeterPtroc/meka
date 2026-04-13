@@ -135,11 +135,16 @@ impl Agent {
         let turn_start_len = messages.len();
 
         let mut user_saved = false;
+        let mut last_response_had_tools = false;
 
         let result: Result<()> = 'turn: {
             loop {
                 if cancellation.is_cancelled() {
                     break 'turn Err(AgshError::Interrupted);
+                }
+
+                if last_response_had_tools {
+                    println!();
                 }
 
                 let api_messages = if messages.len() > turn_start_len {
@@ -263,6 +268,7 @@ impl Agent {
                         }
 
                         messages.push(result_message);
+                        last_response_had_tools = true;
                     }
                     StopReason::EndTurn | StopReason::MaxTokens | StopReason::Unknown(_) => {
                         break 'turn Ok(());
@@ -371,6 +377,9 @@ impl Agent {
                 }
                 StreamEvent::ToolUseEnd { input } => {
                     renderer.finish()?;
+                    if std::mem::take(&mut renderer.started) {
+                        println!();
+                    }
                     render::render_tool_indicator(&current_tool_name, &input);
 
                     content_blocks.push(ContentBlock::ToolUse {

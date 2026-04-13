@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `bat` render mode as the new default with syntax-highlighted markdown.
+
+### Changed
+
+- Rename `rich` render mode to `termimad` (`rich` kept as alias).
+- Ensure blank line after markdown headers in bat/raw modes.
+- Ensure proper spacing around tool indicator batches.
+
 ## [0.8.1] - 2026-04-13
 
 ### Changed
