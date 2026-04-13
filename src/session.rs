@@ -92,7 +92,18 @@ impl SessionManager {
                         server_name TEXT PRIMARY KEY,
                         credentials_json TEXT NOT NULL,
                         updated_at TEXT NOT NULL
-                    );",
+                    );
+
+                    CREATE TABLE IF NOT EXISTS tool_outputs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_tool_outputs_session_id
+                        ON tool_outputs(session_id);",
                 )?;
                 Ok(())
             })
@@ -320,6 +331,13 @@ impl SessionManager {
         self.connection
             .call(move |connection| {
                 connection.execute(
+                    "DELETE FROM tool_outputs WHERE session_id IN (
+                        SELECT id FROM sessions WHERE updated_at < ?1
+                    )",
+                    rusqlite::params![cutoff_str],
+                )?;
+
+                connection.execute(
                     "DELETE FROM messages WHERE session_id IN (
                         SELECT id FROM sessions WHERE updated_at < ?1
                     )",
@@ -343,6 +361,11 @@ impl SessionManager {
         self.connection
             .call(move |connection| {
                 connection.execute(
+                    "DELETE FROM tool_outputs WHERE session_id = ?1",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+
+                connection.execute(
                     "DELETE FROM messages WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
                 )?;
@@ -360,6 +383,11 @@ impl SessionManager {
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool> {
         self.connection
             .call(move |connection| {
+                connection.execute(
+                    "DELETE FROM tool_outputs WHERE session_id = ?1",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+
                 connection.execute(
                     "DELETE FROM messages WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -379,6 +407,7 @@ impl SessionManager {
     pub async fn delete_all_sessions(&self) -> Result<u64> {
         self.connection
             .call(move |connection| {
+                connection.execute("DELETE FROM tool_outputs", [])?;
                 connection.execute("DELETE FROM messages", [])?;
                 let deleted = connection.execute("DELETE FROM sessions", [])?;
                 Ok(deleted as u64)
@@ -387,6 +416,66 @@ impl SessionManager {
             .map_err(|error| {
                 AgshError::Database(format!("failed to delete all sessions: {}", error))
             })
+    }
+
+    pub async fn save_tool_output(&self, session_id: Uuid, content: &str) -> Result<i64> {
+        let content = content.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.connection
+            .call(move |connection| {
+                connection.execute(
+                    "INSERT INTO tool_outputs (session_id, content, created_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id.to_string(), content, now],
+                )?;
+                Ok(connection.last_insert_rowid())
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to save tool output: {}", error))
+            })
+    }
+
+    pub async fn load_tool_output(
+        &self,
+        session_id: Uuid,
+        output_id: i64,
+    ) -> Result<Option<String>> {
+        self.connection
+            .call(move |connection| {
+                let result = connection.query_row(
+                    "SELECT content FROM tool_outputs WHERE id = ?1 AND session_id = ?2",
+                    rusqlite::params![output_id, session_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                );
+
+                match result {
+                    Ok(content) => Ok(Some(content)),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .await
+            .map_err(|error| AgshError::Database(format!("failed to load tool output: {}", error)))
+    }
+
+    pub async fn load_all_tool_outputs(&self, session_id: Uuid) -> Result<Vec<(i64, String)>> {
+        self.connection
+            .call(move |connection| {
+                let mut statement = connection.prepare(
+                    "SELECT id, content FROM tool_outputs WHERE session_id = ?1 ORDER BY id ASC",
+                )?;
+
+                let rows = statement
+                    .query_map(rusqlite::params![session_id.to_string()], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                Ok(rows)
+            })
+            .await
+            .map_err(|error| AgshError::Database(format!("failed to load tool outputs: {}", error)))
     }
 
     pub async fn enforce_storage_limit(&self, max_bytes: u64) -> Result<u64> {
@@ -413,6 +502,10 @@ impl SessionManager {
 
                     match oldest_id {
                         Ok(session_id) => {
+                            connection.execute(
+                                "DELETE FROM tool_outputs WHERE session_id = ?1",
+                                rusqlite::params![session_id],
+                            )?;
                             connection.execute(
                                 "DELETE FROM messages WHERE session_id = ?1",
                                 rusqlite::params![session_id],

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn_agent` tool for delegating research tasks to read-only sub-agents.
 - Deferred tool loading: MCP tools listed in system prompt but schemas sent on first use.
 - `raw` parameter for `fetch_url` tool to return untreated HTML instead of markdown.
+- `read_stash` tool for reading/searching large tool outputs persisted to the database.
+- Database-backed persistence for oversized tool results (>30K chars) with inline preview.
+- Per-tool output caps to prevent context overflow.
+- `read_file` defaults to 2000 lines and rejects images over 3.75MB.
+- Session export resolves persisted large outputs back to full content.
 
 ### Changed
 
@@ -28,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ToolResult.content` changed from `String` to `Vec<ToolResultContent>` for multimodal support.
 - `Provider::complete()` now returns `TokenUsage` alongside the message and stop reason.
 - `edit_file` success message now reports the number of replacements made.
+- Tool outputs tied to session lifecycle: deleted with session/messages cleanup.
 
 ## [0.7.1] - 2026-04-04
 

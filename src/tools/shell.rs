@@ -174,6 +174,8 @@ impl Tool for ExecuteCommandTool {
                     }
                 }
 
+                const MAX_OUTPUT_CHARS: usize = 30_000;
+
                 let mut result_text = String::new();
                 if !stdout_content.is_empty() {
                     result_text.push_str(&stdout_content);
@@ -183,6 +185,13 @@ impl Tool for ExecuteCommandTool {
                         result_text.push_str("\n--- stderr ---\n");
                     }
                     result_text.push_str(&stderr_content);
+                }
+                if result_text.len() > MAX_OUTPUT_CHARS {
+                    let boundary = result_text.floor_char_boundary(MAX_OUTPUT_CHARS);
+                    result_text.truncate(boundary);
+                    result_text.push_str(
+                        "\n\n... (output truncated, showing first 30000 characters)",
+                    );
                 }
                 if exit_code != 0 {
                     result_text.push_str(&format!("\nExit code: {}", exit_code));

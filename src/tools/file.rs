@@ -70,6 +70,8 @@ impl Tool for ReadFileTool {
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_lowercase());
 
+        const MAX_IMAGE_RAW_BYTES: usize = 3_750_000;
+
         if let Some(media_type) = extension.as_deref().and_then(image_media_type) {
             let data = tokio::fs::read(&path)
                 .await
@@ -77,6 +79,19 @@ impl Tool for ReadFileTool {
                     tool_name: "read_file".to_string(),
                     message: format!("failed to read '{}': {}", path, error),
                 })?;
+
+            if data.len() > MAX_IMAGE_RAW_BYTES {
+                return Ok(ToolOutput::text(
+                    format!(
+                        "Error: image '{}' is too large ({} bytes, max {} bytes / ~5MB base64)",
+                        path,
+                        data.len(),
+                        MAX_IMAGE_RAW_BYTES,
+                    ),
+                    true,
+                ));
+            }
+
             let base64_data = base64::engine::general_purpose::STANDARD.encode(&data);
 
             self.read_tracker.write().await.insert(canonical);
@@ -98,6 +113,8 @@ impl Tool for ReadFileTool {
             });
         }
 
+        const DEFAULT_LINE_LIMIT: usize = 2000;
+
         let offset = input["offset"].as_u64().map(|value| value as usize);
         let limit = input["limit"].as_u64().map(|value| value as usize);
 
@@ -109,16 +126,24 @@ impl Tool for ReadFileTool {
                     message: format!("failed to read '{}': {}", path, error),
                 })?;
 
-        let result = match (offset, limit) {
-            (Some(offset), Some(limit)) => content
-                .lines()
-                .skip(offset)
-                .take(limit)
-                .collect::<Vec<_>>()
-                .join("\n"),
-            (Some(offset), None) => content.lines().skip(offset).collect::<Vec<_>>().join("\n"),
-            (None, Some(limit)) => content.lines().take(limit).collect::<Vec<_>>().join("\n"),
-            (None, None) => content,
+        let total_lines = content.lines().count();
+        let effective_offset = offset.unwrap_or(0);
+        let effective_limit = limit.unwrap_or(DEFAULT_LINE_LIMIT);
+
+        let result: String = content
+            .lines()
+            .skip(effective_offset)
+            .take(effective_limit)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result = if offset.is_none() && limit.is_none() && total_lines > DEFAULT_LINE_LIMIT {
+            format!(
+                "{}\n\n... (showing first {} of {} lines, use offset/limit to read more)",
+                result, DEFAULT_LINE_LIMIT, total_lines,
+            )
+        } else {
+            result
         };
 
         self.read_tracker.write().await.insert(canonical);

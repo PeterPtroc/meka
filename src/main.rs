@@ -184,12 +184,17 @@ async fn create_agent_from_config(
     let todo_list: crate::tools::todo::SharedTodoList =
         std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
+    let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
     let mut tool_registry = ToolRegistry::build_default(
         config.user_agent.clone(),
         shared_permission.clone(),
         config.sandbox,
         sandbox_capability,
         todo_list.clone(),
+        session_manager.clone(),
+        shared_session_id.clone(),
     );
 
     // Register the sub-agent tool with access to the provider
@@ -240,6 +245,7 @@ async fn create_agent_from_config(
             }),
         },
         todo_list,
+        shared_session_id,
         approval_sender,
     ))
 }
@@ -484,7 +490,12 @@ async fn export_session(
     }
 
     let stored_messages = session_manager.load_messages(session_id).await?;
-    let markdown = format_session_as_markdown(session_id, &stored_messages);
+    let tool_outputs: std::collections::HashMap<i64, String> = session_manager
+        .load_all_tool_outputs(session_id)
+        .await?
+        .into_iter()
+        .collect();
+    let markdown = format_session_as_markdown(session_id, &stored_messages, &tool_outputs);
 
     match output {
         Some("-") => {
@@ -559,6 +570,7 @@ fn format_timestamp(rfc3339: &str) -> String {
 fn format_session_as_markdown(
     session_id: uuid::Uuid,
     messages: &[session::StoredMessage],
+    tool_outputs: &std::collections::HashMap<i64, String>,
 ) -> String {
     use std::fmt::Write;
 
@@ -615,6 +627,7 @@ fn format_session_as_markdown(
                             writeln!(output, "<details>").ok();
                             writeln!(output, "<summary>{}</summary>\n", label).ok();
                             let text = provider::ContentBlock::tool_result_text_content(content);
+                            let text = resolve_large_output_tags(&text, tool_outputs);
                             writeln!(output, "```\n{}\n```\n", text).ok();
                             writeln!(output, "</details>\n").ok();
                         }
@@ -626,6 +639,25 @@ fn format_session_as_markdown(
     }
 
     output
+}
+
+fn resolve_large_output_tags(
+    text: &str,
+    tool_outputs: &std::collections::HashMap<i64, String>,
+) -> String {
+    let re = match regex::Regex::new(r#"<large-output id="(\d+)"[^>]*>[\s\S]*?</large-output>"#) {
+        Ok(re) => re,
+        Err(_) => return text.to_string(),
+    };
+
+    re.replace_all(text, |caps: &regex::Captures| {
+        let id: i64 = caps[1].parse().unwrap_or(-1);
+        match tool_outputs.get(&id) {
+            Some(content) => content.clone(),
+            None => caps[0].to_string(),
+        }
+    })
+    .into_owned()
 }
 
 fn resolve_credential(config: &ResolvedConfig) -> anyhow::Result<AuthCredential> {

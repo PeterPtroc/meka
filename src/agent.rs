@@ -34,6 +34,7 @@ pub struct Agent {
     shared_permission: SharedPermission,
     options: AgentOptions,
     todo_list: SharedTodoList,
+    shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
     approval_sender: Option<std::sync::mpsc::SyncSender<crate::shell::ToolApprovalRequest>>,
     last_input_tokens: std::sync::atomic::AtomicU64,
 }
@@ -46,6 +47,7 @@ impl Agent {
         shared_permission: SharedPermission,
         options: AgentOptions,
         todo_list: SharedTodoList,
+        shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
         approval_sender: Option<std::sync::mpsc::SyncSender<crate::shell::ToolApprovalRequest>>,
     ) -> Self {
         Self {
@@ -55,6 +57,7 @@ impl Agent {
             shared_permission,
             options,
             todo_list,
+            shared_session_id,
             approval_sender,
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
         }
@@ -80,6 +83,9 @@ impl Agent {
         }
 
         let sid = session_id.ok_or(AgshError::Config("session_id not set".into()))?;
+
+        // Keep the shared session ID in sync so ReadStashTool can access it.
+        *self.shared_session_id.write().await = Some(sid);
 
         // Auto-compact if the last turn's input tokens exceeded 80% of the
         // context window. This runs between turns (not mid-tool-loop) so the
@@ -207,9 +213,19 @@ impl Agent {
 
                 match stop_reason {
                     StopReason::ToolUse => {
-                        let tool_results = self
+                        let mut tool_results = self
                             .execute_tool_calls(&assistant_message, cancellation.clone())
                             .await;
+
+                        if let Err(error) = crate::tools::stash::persist_oversized_results(
+                            &self.session_manager,
+                            sid,
+                            &mut tool_results,
+                        )
+                        .await
+                        {
+                            tracing::warn!("failed to persist oversized tool results: {}", error);
+                        }
 
                         let result_message = Message {
                             role: Role::User,

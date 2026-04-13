@@ -51,13 +51,22 @@ impl Tool for FindFilesTool {
             None => pattern.clone(),
         };
 
+        const MAX_RESULTS: usize = 200;
+
         let result = tokio::task::spawn_blocking(move || {
             let mut matches = Vec::new();
+            let mut truncated = false;
             match glob::glob(&full_pattern) {
                 Ok(paths) => {
                     for entry in paths {
                         match entry {
-                            Ok(path) => matches.push(path.display().to_string()),
+                            Ok(path) => {
+                                matches.push(path.display().to_string());
+                                if matches.len() >= MAX_RESULTS {
+                                    truncated = true;
+                                    break;
+                                }
+                            }
                             Err(error) => {
                                 tracing::warn!("glob error: {}", error);
                             }
@@ -71,7 +80,7 @@ impl Tool for FindFilesTool {
                     });
                 }
             }
-            Ok(matches)
+            Ok((matches, truncated))
         })
         .await
         .map_err(|error| AgshError::ToolExecution {
@@ -79,13 +88,21 @@ impl Tool for FindFilesTool {
             message: format!("task join error: {}", error),
         })??;
 
-        if result.is_empty() {
+        let (matches, truncated) = result;
+        if matches.is_empty() {
             Ok(ToolOutput::text(
                 "No files found matching the pattern.".to_string(),
                 false,
             ))
         } else {
-            Ok(ToolOutput::text(result.join("\n"), false))
+            let mut output = matches.join("\n");
+            if truncated {
+                output.push_str(&format!(
+                    "\n\n... (truncated, showing first {} results)",
+                    MAX_RESULTS
+                ));
+            }
+            Ok(ToolOutput::text(output, false))
         }
     }
 }

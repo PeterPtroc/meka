@@ -1,6 +1,7 @@
 mod file;
 mod search;
 mod shell;
+pub(crate) mod stash;
 pub(crate) mod subagent;
 pub(crate) mod todo;
 mod util;
@@ -13,12 +14,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 type DeferredSet = Arc<std::sync::RwLock<HashSet<String>>>;
 
 use crate::error::Result;
 use crate::permission::Permission;
 use crate::provider::{ToolDefinition, ToolResultContent};
+use crate::session::SessionManager;
 
 pub type ReadTracker = Arc<RwLock<HashSet<PathBuf>>>;
 
@@ -128,6 +131,8 @@ impl ToolRegistry {
         sandbox_enabled: bool,
         sandbox_capability: crate::sandbox::SandboxCapability,
         todo_list: todo::SharedTodoList,
+        session_manager: SessionManager,
+        shared_session_id: Arc<RwLock<Option<Uuid>>>,
     ) -> Self {
         let mut registry = Self::new();
         let read_tracker: ReadTracker = Arc::new(RwLock::new(HashSet::new()));
@@ -153,6 +158,11 @@ impl ToolRegistry {
             sandbox_enabled,
         }));
         registry.register(Box::new(todo::TodoWriteTool { todo_list }));
+        registry.register(Box::new(stash::ReadStashTool {
+            session_manager,
+            session_id: shared_session_id,
+        }));
+        registry.mark_deferred("read_stash");
         registry
     }
 
@@ -193,6 +203,8 @@ impl ToolRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn test_shared_permission() -> crate::permission::SharedPermission {
@@ -203,15 +215,25 @@ mod tests {
         Arc::new(RwLock::new(Vec::new()))
     }
 
-    #[test]
-    fn test_tool_registry() {
-        let registry = ToolRegistry::build_default(
+    async fn test_registry() -> ToolRegistry {
+        let session_manager = SessionManager::open(Some(Path::new(":memory:")))
+            .await
+            .expect("failed to open in-memory database");
+        let shared_session_id = Arc::new(RwLock::new(None));
+        ToolRegistry::build_default(
             "test-agent/0.1".to_string(),
             test_shared_permission(),
             true,
             crate::sandbox::detect(),
             test_todo_list(),
-        );
+            session_manager,
+            shared_session_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_tool_registry() {
+        let registry = test_registry().await;
         assert!(registry.get("read_file").is_some());
         assert!(registry.get("write_file").is_some());
         assert!(registry.get("edit_file").is_some());
@@ -221,18 +243,13 @@ mod tests {
         assert!(registry.get("fetch_url").is_some());
         assert!(registry.get("web_search").is_some());
         assert!(registry.get("todo_write").is_some());
+        assert!(registry.get("read_stash").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
-    #[test]
-    fn test_permission_filtering() {
-        let registry = ToolRegistry::build_default(
-            "test-agent/0.1".to_string(),
-            test_shared_permission(),
-            true,
-            crate::sandbox::detect(),
-            test_todo_list(),
-        );
+    #[tokio::test]
+    async fn test_permission_filtering() {
+        let registry = test_registry().await;
 
         let none_tools = registry.definitions_for_permission(Permission::None);
         assert!(none_tools.is_empty());
