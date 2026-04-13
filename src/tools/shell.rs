@@ -32,6 +32,10 @@ impl Tool for ExecuteCommandTool {
                     "timeout_ms": {
                         "type": "integer",
                         "description": "Timeout in milliseconds. Defaults to 30000 (30 seconds)."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["command"]

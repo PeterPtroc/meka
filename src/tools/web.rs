@@ -57,6 +57,10 @@ impl Tool for FetchUrlTool {
                     "raw": {
                         "type": "boolean",
                         "description": "If true, return raw HTML instead of converting to markdown. Defaults to false."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["url"]
@@ -169,6 +173,10 @@ impl Tool for WebSearchTool {
                         "type": "object",
                         "description": "Optional HTTP headers. Overrides defaults (e.g., User-Agent).",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["query"]

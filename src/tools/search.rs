@@ -27,6 +27,10 @@ impl Tool for FindFilesTool {
                     "path": {
                         "type": "string",
                         "description": "Directory to search in. Defaults to current directory."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["pattern"]
@@ -130,6 +134,10 @@ impl Tool for SearchContentsTool {
                     "glob": {
                         "type": "string",
                         "description": "Glob pattern to filter files (e.g., '*.rs'). Optional."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["pattern"]

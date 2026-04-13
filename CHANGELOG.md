@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn_agent` tool for delegating research tasks to read-only sub-agents.
 - Deferred tool loading: MCP tools listed in system prompt but schemas sent on first use.
 - `raw` parameter for `fetch_url` tool to return untreated HTML instead of markdown.
-- `read_stash` tool for reading/searching large tool outputs persisted to the database.
-- Database-backed persistence for oversized tool results (>30K chars) with inline preview.
+- Scratchpad: session-scoped, name-keyed agent working memory.
+- `scratchpad_write`, `scratchpad_read`, `scratchpad_edit`, `scratchpad_list`, `scratchpad_delete` tools.
+- `scratchpad` parameter on all tools to save output directly.
+- Auto-persist for oversized tool results (>30K chars) with `{tool}_{N}` naming.
 - Per-tool output caps to prevent context overflow.
 - `read_file` defaults to 2000 lines and rejects images over 3.75MB.
 - Session export resolves persisted large outputs back to full content.

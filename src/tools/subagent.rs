@@ -40,6 +40,10 @@ impl Tool for SpawnAgentTool {
                     "prompt": {
                         "type": "string",
                         "description": "The task description for the sub-agent"
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["prompt"]

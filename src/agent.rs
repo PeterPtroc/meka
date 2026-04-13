@@ -84,7 +84,7 @@ impl Agent {
 
         let sid = session_id.ok_or(AgshError::Config("session_id not set".into()))?;
 
-        // Keep the shared session ID in sync so ReadStashTool can access it.
+        // Keep the shared session ID in sync so scratchpad tools can access it.
         *self.shared_session_id.write().await = Some(sid);
 
         // Auto-compact if the last turn's input tokens exceeded 80% of the
@@ -217,9 +217,22 @@ impl Agent {
                             .execute_tool_calls(&assistant_message, cancellation.clone())
                             .await;
 
-                        if let Err(error) = crate::tools::stash::persist_oversized_results(
+                        if let Err(error) =
+                            crate::tools::scratchpad::save_explicit_scratchpad_results(
+                                &self.session_manager,
+                                sid,
+                                &assistant_message,
+                                &mut tool_results,
+                            )
+                            .await
+                        {
+                            tracing::warn!("failed to save explicit scratchpad results: {}", error);
+                        }
+
+                        if let Err(error) = crate::tools::scratchpad::persist_oversized_results(
                             &self.session_manager,
                             sid,
+                            &assistant_message,
                             &mut tool_results,
                         )
                         .await

@@ -22,6 +22,13 @@ pub struct SessionSummary {
     pub preview: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolOutputSummary {
+    pub name: String,
+    pub size: usize,
+    pub created_at: String,
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
     connection: Arc<Connection>,
@@ -94,17 +101,33 @@ impl SessionManager {
                         updated_at TEXT NOT NULL
                     );
 
-                    CREATE TABLE IF NOT EXISTS tool_outputs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ",
+                )?;
+
+                // Migration: recreate tool_outputs if it has the old integer-ID schema.
+                let has_old_schema: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('tool_outputs') WHERE name = 'id'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
+                if has_old_schema {
+                    connection.execute_batch("DROP TABLE tool_outputs")?;
+                }
+
+                connection.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS tool_outputs (
                         session_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
                         content TEXT NOT NULL,
                         created_at TEXT NOT NULL,
+                        PRIMARY KEY (session_id, name),
                         FOREIGN KEY (session_id) REFERENCES sessions(id)
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_tool_outputs_session_id
-                        ON tool_outputs(session_id);",
+                    );",
                 )?;
+
                 Ok(())
             })
             .await
@@ -418,34 +441,103 @@ impl SessionManager {
             })
     }
 
-    pub async fn save_tool_output(&self, session_id: Uuid, content: &str) -> Result<i64> {
+    pub async fn save_tool_output(
+        &self,
+        session_id: Uuid,
+        name: &str,
+        content: &str,
+    ) -> Result<()> {
+        let name = name.to_string();
         let content = content.to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
             .call(move |connection| {
                 connection.execute(
-                    "INSERT INTO tool_outputs (session_id, content, created_at) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![session_id.to_string(), content, now],
+                    "INSERT OR REPLACE INTO tool_outputs (session_id, name, content, created_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![session_id.to_string(), name, content, now],
                 )?;
-                Ok(connection.last_insert_rowid())
+                Ok(())
+            })
+            .await
+            .map_err(|error| AgshError::Database(format!("failed to save tool output: {}", error)))
+    }
+
+    pub async fn update_tool_output(
+        &self,
+        session_id: Uuid,
+        name: &str,
+        content: &str,
+    ) -> Result<bool> {
+        let name = name.to_string();
+        let content = content.to_string();
+
+        self.connection
+            .call(move |connection| {
+                let updated = connection.execute(
+                    "UPDATE tool_outputs SET content = ?1 \
+                     WHERE session_id = ?2 AND name = ?3",
+                    rusqlite::params![content, session_id.to_string(), name],
+                )?;
+                Ok(updated > 0)
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to save tool output: {}", error))
+                AgshError::Database(format!("failed to update tool output: {}", error))
             })
     }
 
-    pub async fn load_tool_output(
-        &self,
-        session_id: Uuid,
-        output_id: i64,
-    ) -> Result<Option<String>> {
+    pub async fn delete_tool_output(&self, session_id: Uuid, name: &str) -> Result<bool> {
+        let name = name.to_string();
+
+        self.connection
+            .call(move |connection| {
+                let deleted = connection.execute(
+                    "DELETE FROM tool_outputs WHERE session_id = ?1 AND name = ?2",
+                    rusqlite::params![session_id.to_string(), name],
+                )?;
+                Ok(deleted > 0)
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to delete tool output: {}", error))
+            })
+    }
+
+    pub async fn list_tool_outputs(&self, session_id: Uuid) -> Result<Vec<ToolOutputSummary>> {
+        self.connection
+            .call(move |connection| {
+                let mut statement = connection.prepare(
+                    "SELECT name, LENGTH(content), created_at \
+                     FROM tool_outputs WHERE session_id = ?1 ORDER BY created_at ASC",
+                )?;
+
+                let rows = statement
+                    .query_map(rusqlite::params![session_id.to_string()], |row| {
+                        Ok(ToolOutputSummary {
+                            name: row.get(0)?,
+                            size: row.get::<_, i64>(1)? as usize,
+                            created_at: row.get(2)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                Ok(rows)
+            })
+            .await
+            .map_err(|error| AgshError::Database(format!("failed to list tool outputs: {}", error)))
+    }
+
+    pub async fn load_tool_output(&self, session_id: Uuid, name: &str) -> Result<Option<String>> {
+        let name = name.to_string();
+
         self.connection
             .call(move |connection| {
                 let result = connection.query_row(
-                    "SELECT content FROM tool_outputs WHERE id = ?1 AND session_id = ?2",
-                    rusqlite::params![output_id, session_id.to_string()],
+                    "SELECT content FROM tool_outputs \
+                     WHERE session_id = ?1 AND name = ?2",
+                    rusqlite::params![session_id.to_string(), name],
                     |row| row.get::<_, String>(0),
                 );
 
@@ -459,16 +551,17 @@ impl SessionManager {
             .map_err(|error| AgshError::Database(format!("failed to load tool output: {}", error)))
     }
 
-    pub async fn load_all_tool_outputs(&self, session_id: Uuid) -> Result<Vec<(i64, String)>> {
+    pub async fn load_all_tool_outputs(&self, session_id: Uuid) -> Result<Vec<(String, String)>> {
         self.connection
             .call(move |connection| {
                 let mut statement = connection.prepare(
-                    "SELECT id, content FROM tool_outputs WHERE session_id = ?1 ORDER BY id ASC",
+                    "SELECT name, content FROM tool_outputs \
+                     WHERE session_id = ?1 ORDER BY created_at ASC",
                 )?;
 
                 let rows = statement
                     .query_map(rusqlite::params![session_id.to_string()], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
 

@@ -36,6 +36,10 @@ impl Tool for ReadFileTool {
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of lines to read. Optional."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["path"]
@@ -184,6 +188,10 @@ impl Tool for EditFileTool {
                     "force": {
                         "type": "boolean",
                         "description": "If true, bypass the requirement to read the file first. Defaults to false."
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["path", "old_string", "new_string"]
@@ -283,6 +291,10 @@ impl Tool for WriteFileTool {
                     "content": {
                         "type": "string",
                         "description": "The content to write to the file"
+                    },
+                    "scratchpad": {
+                        "type": "string",
+                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
                 "required": ["path", "content"]

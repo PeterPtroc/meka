@@ -490,7 +490,7 @@ async fn export_session(
     }
 
     let stored_messages = session_manager.load_messages(session_id).await?;
-    let tool_outputs: std::collections::HashMap<i64, String> = session_manager
+    let tool_outputs: std::collections::HashMap<String, String> = session_manager
         .load_all_tool_outputs(session_id)
         .await?
         .into_iter()
@@ -570,7 +570,7 @@ fn format_timestamp(rfc3339: &str) -> String {
 fn format_session_as_markdown(
     session_id: uuid::Uuid,
     messages: &[session::StoredMessage],
-    tool_outputs: &std::collections::HashMap<i64, String>,
+    tool_outputs: &std::collections::HashMap<String, String>,
 ) -> String {
     use std::fmt::Write;
 
@@ -643,16 +643,17 @@ fn format_session_as_markdown(
 
 fn resolve_large_output_tags(
     text: &str,
-    tool_outputs: &std::collections::HashMap<i64, String>,
+    tool_outputs: &std::collections::HashMap<String, String>,
 ) -> String {
-    let re = match regex::Regex::new(r#"<large-output id="(\d+)"[^>]*>[\s\S]*?</large-output>"#) {
+    let re = match regex::Regex::new(r#"<large-output name="([^"]+)"[^>]*>[\s\S]*?</large-output>"#)
+    {
         Ok(re) => re,
         Err(_) => return text.to_string(),
     };
 
     re.replace_all(text, |caps: &regex::Captures| {
-        let id: i64 = caps[1].parse().unwrap_or(-1);
-        match tool_outputs.get(&id) {
+        let name = &caps[1];
+        match tool_outputs.get(name) {
             Some(content) => content.clone(),
             None => caps[0].to_string(),
         }

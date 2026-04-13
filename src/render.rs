@@ -315,6 +315,11 @@ fn tool_display_name(name: &str) -> &str {
         "web_search" => "WebSearch",
         "todo_write" => "TodoWrite",
         "spawn_agent" => "SpawnAgent",
+        "scratchpad_write" => "ScratchpadWrite",
+        "scratchpad_read" => "ScratchpadRead",
+        "scratchpad_edit" => "ScratchpadEdit",
+        "scratchpad_list" => "ScratchpadList",
+        "scratchpad_delete" => "ScratchpadDelete",
         other => other,
     }
 }
@@ -327,6 +332,7 @@ fn tool_primary_param<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'
         "fetch_url" => "url",
         "web_search" => "query",
         "spawn_agent" => "prompt",
+        "scratchpad_write" | "scratchpad_read" | "scratchpad_edit" | "scratchpad_delete" => "name",
         _ => return None,
     };
     input.get(key).and_then(|v| v.as_str())

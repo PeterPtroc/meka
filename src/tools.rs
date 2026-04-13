@@ -1,7 +1,7 @@
 mod file;
+pub(crate) mod scratchpad;
 mod search;
 mod shell;
-pub(crate) mod stash;
 pub(crate) mod subagent;
 pub(crate) mod todo;
 mod util;
@@ -158,11 +158,30 @@ impl ToolRegistry {
             sandbox_enabled,
         }));
         registry.register(Box::new(todo::TodoWriteTool { todo_list }));
-        registry.register(Box::new(stash::ReadStashTool {
+        registry.register(Box::new(scratchpad::ScratchpadWriteTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        registry.register(Box::new(scratchpad::ScratchpadReadTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        registry.mark_deferred("scratchpad_read");
+        registry.register(Box::new(scratchpad::ScratchpadEditTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        registry.mark_deferred("scratchpad_edit");
+        registry.register(Box::new(scratchpad::ScratchpadListTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        registry.mark_deferred("scratchpad_list");
+        registry.register(Box::new(scratchpad::ScratchpadDeleteTool {
             session_manager,
             session_id: shared_session_id,
         }));
-        registry.mark_deferred("read_stash");
+        registry.mark_deferred("scratchpad_delete");
         registry
     }
 
@@ -243,7 +262,11 @@ mod tests {
         assert!(registry.get("fetch_url").is_some());
         assert!(registry.get("web_search").is_some());
         assert!(registry.get("todo_write").is_some());
-        assert!(registry.get("read_stash").is_some());
+        assert!(registry.get("scratchpad_write").is_some());
+        assert!(registry.get("scratchpad_read").is_some());
+        assert!(registry.get("scratchpad_edit").is_some());
+        assert!(registry.get("scratchpad_list").is_some());
+        assert!(registry.get("scratchpad_delete").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
