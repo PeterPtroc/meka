@@ -84,10 +84,16 @@ impl StreamingRenderer {
                 if !self.buffer.is_empty() {
                     let remaining = std::mem::take(&mut self.buffer);
                     let trimmed = remaining.trim_end_matches('\n');
-                    if !trimmed.is_empty() {
-                        print_with_bat(trimmed);
-                        println!();
+                    for line in trimmed.lines() {
+                        if is_table_line(line) {
+                            self.raw_table_lines.push(line.to_string());
+                        } else {
+                            self.flush_bat_table()?;
+                            print_with_bat(line);
+                        }
                     }
+                    self.flush_bat_table()?;
+                    println!();
                 }
             }
             RenderMode::Termimad => {
@@ -121,27 +127,37 @@ impl StreamingRenderer {
     fn flush_bat(&mut self) -> io::Result<()> {
         self.buffer = normalize_header_spacing(&self.buffer);
 
-        while let Some(boundary) = self.buffer.find("\n\n") {
-            let complete = self.buffer[..boundary + 2].to_string();
-            self.buffer = self.buffer[boundary + 2..].to_string();
-            print_with_bat(&complete);
-            io::stdout().flush()?;
-        }
+        while let Some(newline_pos) = self.buffer.find('\n') {
+            let line = self.buffer[..newline_pos].to_string();
 
-        if !self.in_code_block() && !self.in_table() {
-            while let Some(newline_pos) = self.buffer.find('\n') {
-                if newline_pos + 1 < self.buffer.len() || !self.buffer.ends_with('\n') {
-                    let line = self.buffer[..newline_pos + 1].to_string();
-                    self.buffer = self.buffer[newline_pos + 1..].to_string();
-                    print_with_bat(&line);
-                    io::stdout().flush()?;
-                } else {
-                    break;
-                }
+            // Don't flush incomplete code blocks or tables from the buffer
+            if self.in_code_block() {
+                break;
+            }
+
+            self.buffer = self.buffer[newline_pos + 1..].to_string();
+
+            if is_table_line(&line) {
+                self.raw_table_lines.push(line);
+            } else {
+                self.flush_bat_table()?;
+                print_with_bat(&format!("{}\n", line));
+                io::stdout().flush()?;
             }
         }
-
         Ok(())
+    }
+
+    fn flush_bat_table(&mut self) -> io::Result<()> {
+        if self.raw_table_lines.is_empty() {
+            return Ok(());
+        }
+
+        let lines = std::mem::take(&mut self.raw_table_lines);
+        let formatted = format_table(&lines);
+        let table_text = formatted.join("\n");
+        print_with_bat(&table_text);
+        io::stdout().flush()
     }
 
     fn flush_termimad(&mut self) -> io::Result<()> {
@@ -288,6 +304,10 @@ fn parse_table_row(line: &str) -> Vec<String> {
         .collect()
 }
 
+fn display_width(string: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(string)
+}
+
 fn format_table(lines: &[String]) -> Vec<String> {
     if lines.is_empty() {
         return Vec::new();
@@ -307,7 +327,7 @@ fn format_table(lines: &[String]) -> Vec<String> {
         }
         for (column_index, cell) in row.iter().enumerate() {
             if column_index < column_count {
-                column_widths[column_index] = column_widths[column_index].max(cell.len());
+                column_widths[column_index] = column_widths[column_index].max(display_width(cell));
             }
         }
     }
@@ -329,7 +349,8 @@ fn format_table(lines: &[String]) -> Vec<String> {
             let padded: Vec<String> = (0..column_count)
                 .map(|column_index| {
                     let cell = row.get(column_index).map(|s| s.as_str()).unwrap_or("");
-                    format!("{:width$}", cell, width = column_widths[column_index])
+                    let padding = column_widths[column_index].saturating_sub(display_width(cell));
+                    format!("{}{}", cell, " ".repeat(padding))
                 })
                 .collect();
             result.push(format!("| {} |", padded.join(" | ")));
@@ -616,6 +637,76 @@ mod tests {
         let result = format_table(&lines);
         // Separator dashes should be at least 3 wide
         assert!(result[1].contains("---"));
+    }
+
+    #[test]
+    fn test_format_table_emoji_single() {
+        let lines = vec![
+            "| Status | Name |".to_string(),
+            "|---|---|".to_string(),
+            "| 🟢 Pass | Alpha |".to_string(),
+            "| 🔴 Fail | Beta |".to_string(),
+        ];
+        let result = format_table(&lines);
+        assert_eq!(result.len(), 4);
+
+        // All rows should have the same display width
+        let first_width = display_width(&result[0]);
+        for (index, row) in result.iter().enumerate() {
+            assert_eq!(
+                display_width(row),
+                first_width,
+                "row {} has display width {} but expected {}",
+                index,
+                display_width(row),
+                first_width
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_table_emoji_multiple() {
+        let lines = vec![
+            "| Icon | Desc |".to_string(),
+            "|---|---|".to_string(),
+            "| 🟢🟢🟢 | Good |".to_string(),
+            "| 🔴 | Bad |".to_string(),
+        ];
+        let result = format_table(&lines);
+        let first_width = display_width(&result[0]);
+        for (index, row) in result.iter().enumerate() {
+            assert_eq!(
+                display_width(row),
+                first_width,
+                "row {} has display width {} but expected {}",
+                index,
+                display_width(row),
+                first_width
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_table_emoji_mixed_with_ascii() {
+        let lines = vec![
+            "| Segment | Change | Verdict |".to_string(),
+            "|---|---|---|".to_string(),
+            "| Canadian Banking | -9% | 🔴 Credit losses |".to_string(),
+            "| Global Wealth | +17% | 🟢 AUM growth |".to_string(),
+            "| Other | Flat | No emoji here |".to_string(),
+        ];
+        let result = format_table(&lines);
+        let first_width = display_width(&result[0]);
+        for (index, row) in result.iter().enumerate() {
+            assert_eq!(
+                display_width(row),
+                first_width,
+                "row {} has display width {} but expected {}",
+                index,
+                display_width(row),
+                first_width
+            );
+        }
     }
 
     #[test]
