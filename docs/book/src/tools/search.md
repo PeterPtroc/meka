@@ -12,6 +12,12 @@ Find files matching a glob pattern.
 |------|------|----------|-------------|
 | `pattern` | string | yes | Glob pattern to match files against |
 | `path` | string | no | Directory to search in (defaults to current directory) |
+| `scratchpad` | string | no | Save output to the scratchpad under this name |
+
+### Behavior
+
+- Results are limited to 200 matches.
+- Returns one file path per line.
 
 ### Glob Patterns
 
@@ -21,16 +27,6 @@ Find files matching a glob pattern.
 | `**/*.rs` | All `.rs` files recursively |
 | `src/*.txt` | All `.txt` files in `src/` |
 | `test_*` | All files starting with `test_` |
-
-### Examples
-
-```text
-agsh [r] > find all Rust source files in this project
-```
-
-```text
-agsh [r] > find all configuration files (*.toml, *.yaml, *.json) in this repo
-```
 
 ---
 
@@ -47,26 +43,11 @@ Search file contents using a regex pattern. Powered by the ripgrep library.
 | `pattern` | string | yes | Regex pattern to search for |
 | `path` | string | no | File or directory to search in (defaults to current directory) |
 | `glob` | string | no | Glob pattern to filter which files are searched (e.g., `*.rs`) |
+| `scratchpad` | string | no | Save output to the scratchpad under this name |
 
 ### Behavior
 
 - Searches recursively through directories.
 - Skips hidden files (starting with `.`) and common non-text directories (`target`, `node_modules`).
-- Results are limited to 100 matches to avoid overwhelming the LLM context.
+- Results are limited to 100 matches.
 - Each result includes the file path, line number, and matching line.
-
-### Examples
-
-```text
-agsh [r] > search for all TODO comments in this project
-```
-
-```text
-agsh [r] > find all uses of "unwrap()" in Rust files
-```
-
-The agent will call `search_contents` with `pattern: "unwrap\\(\\)"` and `glob: "*.rs"`.
-
-```text
-agsh [r] > search for the string "API_KEY" in all .env files
-```

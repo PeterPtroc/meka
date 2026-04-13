@@ -17,6 +17,35 @@ agsh setup
 
 This wizard also runs automatically on first launch when no config file exists.
 
+### `export`
+
+Export a session as Markdown.
+
+```bash
+agsh export <SESSION_ID> [-o <PATH>]
+```
+
+Use `-o -` to print to stdout. See [Sessions](../usage/sessions.md#exporting-a-session) for details.
+
+### `delete`
+
+Delete one or more sessions by UUID, or all sessions with `--all`.
+
+```bash
+agsh delete <SESSION_ID>...
+agsh delete --all
+```
+
+### `list`
+
+List past sessions with ID, last update time, and a preview.
+
+```bash
+agsh list [-n <LIMIT>]
+```
+
+Default limit: 20.
+
 ## Arguments
 
 ### `[PROMPT]`
@@ -51,11 +80,11 @@ agsh -c
 
 ### `--permission <MODE>`
 
-Set the initial permission mode. Accepts `none` (or `n`), `read` (or `r`), `write` (or `w`). Case-insensitive.
+Set the initial permission mode. Accepts `none` (or `n`), `read` (or `r`), `ask` (or `a`), `write` (or `w`). Case-insensitive.
 
 ```bash
 agsh --permission write
-agsh --permission w
+agsh --permission ask
 ```
 
 Default: `read`.
@@ -96,16 +125,33 @@ agsh --no-stream
 
 ### `--render-mode <MODE>`
 
-Set the output render mode. Accepts `rich` (default) or `raw`.
+Set the output render mode. Accepts `bat` (default), `termimad` (or `rich`), or `raw`.
 
-- `rich`: Full terminal formatting via termimad (box-drawn code blocks, reflowed paragraphs, formatted tables).
-- `raw`: Raw markdown with ANSI syntax highlighting (bold, italic, colored code/headings). Outputs the exact markdown the model returns.
+- `bat`: Syntax-highlighted markdown output via bat.
+- `termimad`: Full terminal formatting (box-drawn code blocks, reflowed paragraphs, formatted tables).
+- `raw`: Raw markdown printed verbatim with aligned tables.
 
 ```bash
 agsh --render-mode raw
 ```
 
-Can also be set permanently via `display.render_mode = "raw"` in the config file.
+Can also be set permanently via `display.render_mode` in the config file.
+
+### `--thinking`
+
+Enable extended thinking (Claude provider only).
+
+```bash
+agsh --thinking
+```
+
+### `--thinking-budget <TOKENS>`
+
+Set the extended thinking token budget. Implies `--thinking`.
+
+```bash
+agsh --thinking-budget 20000
+```
 
 ### `-v`, `--verbose`
 

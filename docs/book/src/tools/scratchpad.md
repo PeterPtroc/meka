@@ -1,0 +1,73 @@
+# Scratchpad
+
+The scratchpad is a session-scoped working memory that the agent can use to store, retrieve, edit, and manage content without consuming conversation context. Entries are identified by string names and persist across turns within a session.
+
+## When the Scratchpad is Used
+
+- **Proactively**: The agent stores intermediate results (extracted text, API responses, research notes) for later use.
+- **Via `scratchpad` parameter**: Any tool can save its output directly to the scratchpad by including a `scratchpad` parameter in the tool call.
+- **Automatically**: When a tool's output exceeds 30,000 characters, it is saved to the scratchpad under an auto-generated name (e.g., `execute_command_1`) and replaced with a preview in the conversation.
+
+## Tools
+
+### `scratchpad_write`
+
+Store content in the scratchpad. If the name already exists, the content is overwritten.
+
+**Permission:** Read
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `name` | string | yes | Name for the entry |
+| `content` | string | yes | The content to store |
+
+### `scratchpad_read`
+
+Read or search a scratchpad entry by name.
+
+**Permission:** Read
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `name` | string | yes | The entry name |
+| `offset` | integer | no | Character offset to start reading from (default: 0) |
+| `limit` | integer | no | Maximum characters to return (default: 30000) |
+| `regex` | string | no | Search the entry and return matching lines (max 100) |
+
+### `scratchpad_edit`
+
+Edit a scratchpad entry in place. Provide `content` for a full overwrite, or `old_string`/`new_string` for targeted replacement.
+
+**Permission:** Read
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `name` | string | yes | The entry name |
+| `content` | string | no | Full replacement (mutually exclusive with old/new) |
+| `old_string` | string | no | String to find |
+| `new_string` | string | no | Replacement string |
+| `replace_all` | boolean | no | Replace all occurrences (default: false) |
+
+### `scratchpad_list`
+
+List all scratchpad entries with their name, size, and creation time. No parameters.
+
+**Permission:** Read
+
+### `scratchpad_delete`
+
+Delete a scratchpad entry by name.
+
+**Permission:** Read
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `name` | string | yes | The entry name to delete |
+
+## Lifecycle
+
+- Entries are scoped to the session and persist across turns.
+- Entries survive session compaction (`/compact`).
+- Entries are deleted when the session is deleted.
+- Two sessions can have entries with the same name without conflict.
+- Writing to an existing name overwrites it silently.

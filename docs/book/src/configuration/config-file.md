@@ -117,10 +117,11 @@ Output render mode. Equivalent to the `--render-mode` CLI flag.
 
 | Value | Description |
 |-------|-------------|
-| `rich` | Full terminal formatting (box-drawn code blocks, reflowed paragraphs, formatted tables) |
+| `bat` | Syntax-highlighted markdown via bat (default) |
+| `termimad` | Terminal formatting via termimad (box-drawn code blocks, reflowed paragraphs). Alias: `rich` |
 | `raw` | Raw markdown printed verbatim with aligned tables |
 
-Default: `rich`
+Default: `bat`
 
 ```toml
 [display]
@@ -237,6 +238,48 @@ Default: `52428800` (50 MB)
 ```toml
 [session]
 max_storage_bytes = 10485760  # 10 MB
+```
+
+### `session.auto_compact`
+
+Automatically compact the conversation when input tokens exceed 80% of the context window. Compaction summarizes older messages and preserves recent ones, the todo list, and scratchpad entries.
+
+Default: `true`
+
+```toml
+[session]
+auto_compact = false
+```
+
+### `session.context_window`
+
+Override the model's context window size (in tokens). Used for auto-compact threshold calculation. If not set, agsh infers the context window from the model name.
+
+```toml
+[session]
+context_window = 200000
+```
+
+## `[thinking]`
+
+Settings for extended thinking (Claude provider only).
+
+### `thinking.enabled`
+
+Whether to enable extended thinking. When enabled, the model can use additional tokens for internal reasoning before responding.
+
+Default: `false`
+
+### `thinking.budget_tokens`
+
+Maximum number of tokens the model can use for thinking.
+
+Default: `10000`
+
+```toml
+[thinking]
+enabled = true
+budget_tokens = 20000
 ```
 
 ## `[mcp]`

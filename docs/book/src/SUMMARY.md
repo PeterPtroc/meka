@@ -35,3 +35,4 @@
 - [Search](./tools/search.md)
 - [Web](./tools/web.md)
 - [Shell](./tools/shell.md)
+- [Scratchpad](./tools/scratchpad.md)

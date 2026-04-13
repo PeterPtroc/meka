@@ -24,7 +24,7 @@ agsh uses Emacs-style keybindings (provided by reedline).
 |-----|--------|
 | Enter | Submit the current prompt |
 | Alt+Enter | Insert a newline (for multi-line input) |
-| Shift+Tab | Cycle the permission mode (none &rarr; read &rarr; write &rarr; none) |
+| Shift+Tab | Cycle the permission mode (none &rarr; read &rarr; ask &rarr; write &rarr; none) |
 
 ### Navigation
 
@@ -69,6 +69,7 @@ The indicator shows the current permission mode:
 |------|-----------|-------|
 | None | `[n]` | Green |
 | Read | `[r]` | Yellow |
+| Ask | `[a]` | Magenta |
 | Write | `[w]` | Red |
 
 The color provides a visual cue about the agent's current capabilities. Red means the agent can modify your system.
@@ -97,8 +98,9 @@ agsh supports `/` prefix commands for controlling the shell:
 | `/exit` | Exit the shell |
 | `/clear` | Clear the terminal screen |
 | `/session` | Show the current session ID |
-| `/permission [none\|read\|write]` | Show or set the permission level |
+| `/permission [none\|read\|ask\|write]` | Show or set the permission level |
 | `/compact` | Summarize and compact the session history |
+| `/cd [path]` | Change working directory |
 
 ### `/compact`
 

@@ -46,7 +46,7 @@ Sessions are stored in a SQLite database at a platform-specific location:
 
 ## Database Schema
 
-The database has two tables:
+The database has three tables:
 
 **sessions** -- one row per session:
 
@@ -67,6 +67,17 @@ The database has two tables:
 | `role` | TEXT | `user`, `assistant`, or `tool_results` |
 | `content` | TEXT | Message content (plain text or JSON) |
 | `created_at` | TEXT (RFC 3339) | When the message was saved |
+
+**tool_outputs** -- scratchpad entries, one row per entry:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_id` | TEXT (UUID) | Part of composite primary key |
+| `name` | TEXT | Part of composite primary key |
+| `content` | TEXT | The stored content |
+| `created_at` | TEXT (RFC 3339) | When the entry was created |
+
+Scratchpad entries are scoped to a session. Two sessions can have entries with the same name. Entries are preserved across compaction but deleted when a session is deleted.
 
 ## History Retention
 
@@ -98,7 +109,19 @@ The full history remains in SQLite for resumption. Only the API payload is trunc
 
 ### Compacting a Session
 
-If a session becomes too long, you can use the `/compact` command to have the LLM summarize the conversation and replace the full history with a single summary message. See [Interactive Mode](./interactive-mode.md#slash-commands) for details.
+If a session becomes too long, you can use the `/compact` command to have the LLM summarize the conversation and replace older messages with a structured summary. Recent messages are preserved verbatim. The summary includes key files, decisions, errors, and user preferences.
+
+Compaction preserves scratchpad entries and the todo list, and re-injects environment context so the agent isn't disoriented after compaction.
+
+### Auto-Compact
+
+When `auto_compact` is enabled (default: `true`), agsh automatically compacts the conversation when the input token count exceeds 80% of the context window. This runs between turns, not during tool loops.
+
+```toml
+[session]
+auto_compact = true
+context_window = 200000  # optional override
+```
 
 ## Listing Sessions
 

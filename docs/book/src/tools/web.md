@@ -11,24 +11,19 @@ Fetch a web page and return its content as markdown text.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `url` | string | yes | The URL to fetch |
+| `max_length` | integer | no | Maximum characters to return (default: 30000, 0 for no limit) |
+| `headers` | object | no | Custom HTTP headers (overrides defaults like User-Agent) |
+| `regex` | string | no | If provided, return only matching content (matches joined by newlines) |
+| `raw` | boolean | no | Return raw HTML instead of converting to markdown (default: false) |
+| `scratchpad` | string | no | Save output to the scratchpad under this name |
 
 ### Behavior
 
 - Fetches the page via HTTP GET.
-- Converts HTML to Markdown using `fast_html2md`.
-- Truncates the output to 50,000 characters if the page is very large.
+- Converts HTML to Markdown using `fast_html2md` (unless `raw` is true).
+- Truncates the output to `max_length` characters (default: 30,000).
 - HTTP timeout: 30 seconds.
 - Returns the HTTP status code as an error if the request fails (e.g., 404, 500).
-
-### Examples
-
-```text
-agsh [r] > fetch the Rust homepage and summarize what's new
-```
-
-```text
-agsh [r] > read the documentation at https://docs.rs/tokio/latest/tokio/
-```
 
 ---
 
@@ -44,6 +39,8 @@ Search the web and return results. Supports multiple search engines.
 |------|------|----------|-------------|
 | `query` | string | yes | The search query |
 | `engine` | string | no | Search engine to use (default: `duckduckgo`) |
+| `headers` | object | no | Custom HTTP headers |
+| `scratchpad` | string | no | Save output to the scratchpad under this name |
 
 ### Search Engines
 
@@ -58,18 +55,4 @@ Search the web and return results. Supports multiple search engines.
 - Returns up to 10 results per search.
 - Each result includes the title, URL, and a snippet (when available).
 - Uses HTML scraping (no API keys required for any search engine).
-- HTTP timeout: 15 seconds.
-
-### Examples
-
-```text
-agsh [r] > search the web for "rust async tutorial"
-```
-
-```text
-agsh [r] > search google for the latest news about WebAssembly
-```
-
-```text
-agsh [r] > use bing to search for "tokio vs async-std comparison"
-```
+- HTTP timeout: 30 seconds.

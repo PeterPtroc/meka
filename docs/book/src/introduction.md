@@ -12,11 +12,15 @@ Instead of remembering `find . -name '*.rs' | xargs wc -l`, you describe what yo
 
 - **Natural language interface** -- describe what you want instead of memorizing syntax
 - **Built-in tools** -- file read/write/edit, glob search, regex content search (ripgrep), web fetch, web search, shell command execution
+- **Scratchpad** -- session-scoped working memory for the agent to store and retrieve intermediate results
+- **Sub-agents** -- delegate research tasks to read-only sub-agents
 - **Multiple LLM providers** -- OpenAI and Claude, with support for any OpenAI-compatible API
-- **Permission system** -- control what the agent can do (none/read/write), switchable mid-session
-- **Session management** -- conversations are persisted in SQLite; resume any session later
-- **Streaming output** -- responses stream to the terminal in real time, rendered as Markdown
+- **MCP support** -- extend the agent with tools from external MCP servers
+- **Permission system** -- control what the agent can do (none/read/ask/write), switchable mid-session
+- **Session management** -- conversations are persisted in SQLite; resume, export, or compact any session
+- **Streaming output** -- responses stream to the terminal in real time with syntax highlighting
 - **Interactive and one-shot modes** -- use it as a REPL or pipe a single prompt
+- **Extended thinking** -- Claude provider supports extended thinking for complex reasoning
 
 ## How It Works
 
