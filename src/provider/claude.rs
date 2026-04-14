@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
@@ -310,6 +311,28 @@ pub struct ClaudeProvider {
     session_id: String,
     thinking_enabled: bool,
     thinking_budget_tokens: u64,
+    thinking_override: AtomicI8,
+}
+
+/// Parse (major, minor) version from a Claude model string.
+/// E.g., "claude-opus-4-6-20250514" → Some((4, 6)), "claude-sonnet-4" → Some((4, 0)).
+fn parse_claude_model_version(model: &str) -> Option<(u32, u32)> {
+    for family in &["opus", "sonnet", "haiku"] {
+        if let Some(pos) = model.find(family) {
+            let after = &model[pos + family.len()..];
+            let after = after.strip_prefix('-')?;
+            let mut parts = after.splitn(3, '-');
+            let major: u32 = parts.next()?.parse().ok()?;
+            let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            return Some((major, minor));
+        }
+    }
+    None
+}
+
+fn model_supports_adaptive_thinking(model: &str) -> bool {
+    parse_claude_model_version(model)
+        .is_some_and(|(major, minor)| major > 4 || (major == 4 && minor >= 6))
 }
 
 impl ClaudeProvider {
@@ -335,6 +358,15 @@ impl ClaudeProvider {
             session_id: Uuid::new_v4().to_string(),
             thinking_enabled,
             thinking_budget_tokens,
+            thinking_override: AtomicI8::new(-1),
+        }
+    }
+
+    fn is_thinking_enabled(&self) -> bool {
+        match self.thinking_override.load(Ordering::Relaxed) {
+            0 => false,
+            1 => true,
+            _ => self.thinking_enabled,
         }
     }
 
@@ -344,7 +376,7 @@ impl ClaudeProvider {
             parts.push("claude-code-20250219");
             parts.push("oauth-2025-04-20");
         }
-        if self.thinking_enabled {
+        if self.is_thinking_enabled() {
             parts.push("interleaved-thinking-2025-05-14");
         }
         if parts.is_empty() {
@@ -482,7 +514,7 @@ impl ClaudeProvider {
         stream: bool,
     ) -> serde_json::Value {
         let message_count = messages.len();
-        let claude_messages: Vec<serde_json::Value> = messages
+        let mut claude_messages: Vec<serde_json::Value> = messages
             .iter()
             .enumerate()
             .map(|(message_index, message)| {
@@ -526,10 +558,18 @@ impl ClaudeProvider {
                                     "is_error": is_error,
                                 })
                             }
-                            ContentBlock::Thinking { .. } => {
-                                // Thinking blocks should have been stripped before
-                                // reaching here; skip if present.
-                                return None;
+                            ContentBlock::Thinking {
+                                thinking,
+                                signature,
+                            } => {
+                                let mut obj = serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": thinking
+                                });
+                                if let Some(sig) = signature {
+                                    obj["signature"] = serde_json::json!(sig);
+                                }
+                                obj
                             }
                         };
 
@@ -552,6 +592,34 @@ impl ClaudeProvider {
                 })
             })
             .collect();
+
+        // Strip trailing thinking blocks from the last assistant message
+        // (Claude API requirement).
+        if let Some(last_assistant) = claude_messages
+            .iter_mut()
+            .rev()
+            .find(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        {
+            if let Some(content) = last_assistant
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
+            {
+                while content
+                    .last()
+                    .and_then(|b| b.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("thinking")
+                {
+                    content.pop();
+                }
+                if content.is_empty() {
+                    content.push(serde_json::json!({
+                        "type": "text",
+                        "text": "[No message content]"
+                    }));
+                }
+            }
+        }
 
         let metadata_user_id = serde_json::json!({
             "device_id": "agsh",
@@ -590,19 +658,27 @@ impl ClaudeProvider {
         body.insert("model".to_string(), serde_json::json!(self.model));
         body.insert("messages".to_string(), serde_json::json!(claude_messages));
 
-        if self.thinking_enabled {
-            let budget = self.thinking_budget_tokens;
-            let max_tokens = std::cmp::max(16384, budget + 8192);
-            body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-            body.insert(
-                "thinking".to_string(),
-                serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": budget
-                }),
-            );
+        if self.is_thinking_enabled() {
+            if model_supports_adaptive_thinking(&self.model) {
+                body.insert("max_tokens".to_string(), serde_json::json!(64_000));
+                body.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({ "type": "adaptive" }),
+                );
+            } else {
+                let budget = self.thinking_budget_tokens;
+                let max_tokens = std::cmp::max(budget * 2, 32_000);
+                body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+                body.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    }),
+                );
+            }
         } else {
-            body.insert("max_tokens".to_string(), serde_json::json!(8192));
+            body.insert("max_tokens".to_string(), serde_json::json!(32_000));
         }
 
         body.insert("stream".to_string(), serde_json::json!(stream));
@@ -708,8 +784,13 @@ impl ClaudeProvider {
                 }
                 "thinking" => {
                     if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                        let signature = block
+                            .get("signature")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string());
                         content_blocks.push(ContentBlock::Thinking {
                             thinking: thinking.to_string(),
+                            signature,
                         });
                     }
                 }
@@ -836,6 +917,7 @@ impl Provider for ClaudeProvider {
         let mut current_tool_input = String::new();
         let mut in_tool_use = false;
         let mut in_thinking = false;
+        let mut current_thinking_signature: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -931,6 +1013,14 @@ impl Provider for ClaudeProvider {
                                                         break;
                                                     }
                                         }
+                                        "signature_delta" => {
+                                            if let Some(sig) = delta.get("signature").and_then(|s| s.as_str()) {
+                                                current_thinking_signature = Some(
+                                                    current_thinking_signature
+                                                        .map_or_else(|| sig.to_string(), |existing| existing + sig),
+                                                );
+                                            }
+                                        }
                                         "input_json_delta" => {
                                             if let Some(partial_json) =
                                                 delta.get("partial_json").and_then(|partial_json| partial_json.as_str())
@@ -952,6 +1042,14 @@ impl Provider for ClaudeProvider {
                                 "content_block_stop" => {
                                     if in_thinking {
                                         in_thinking = false;
+                                        let signature = current_thinking_signature.take();
+                                        if event_sender
+                                            .send(StreamEvent::ThinkingComplete { signature })
+                                            .is_err()
+                                        {
+                                            tracing::trace!("stream event receiver dropped");
+                                            break;
+                                        }
                                     } else if in_tool_use {
                                         let input = if current_tool_input.is_empty() {
                                             serde_json::json!({})
@@ -1039,6 +1137,15 @@ impl Provider for ClaudeProvider {
 
     fn name(&self) -> &str {
         "claude"
+    }
+
+    fn set_thinking_override(&self, enabled: Option<bool>) {
+        let value = match enabled {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        };
+        self.thinking_override.store(value, Ordering::Relaxed);
     }
 }
 
@@ -1814,7 +1921,7 @@ mod tests {
             .expect("should parse");
         assert_eq!(message.content.len(), 2);
         assert!(
-            matches!(&message.content[0], ContentBlock::Thinking { thinking } if thinking == "hmm...")
+            matches!(&message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "hmm...")
         );
         assert_eq!(message.text_content(), "answer");
     }

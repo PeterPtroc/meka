@@ -172,6 +172,7 @@ async fn create_agent_from_config(
         },
         config.thinking_enabled,
         config.thinking_budget_tokens,
+        config.reasoning_effort.clone(),
     )?;
 
     let sandbox_capability = crate::sandbox::detect();
@@ -243,6 +244,7 @@ async fn create_agent_from_config(
                     .map(crate::config::context_window_for_model)
                     .unwrap_or(128_000)
             }),
+            thinking_show_content: config.thinking_show_content,
         },
         todo_list,
         shared_session_id,

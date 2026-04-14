@@ -79,6 +79,7 @@ pub enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        signature: Option<String>,
     },
     ToolUse {
         id: String,
@@ -180,6 +181,7 @@ pub struct ToolDefinition {
 pub enum StreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
+    ThinkingComplete { signature: Option<String> },
     ToolUseStart { id: String, name: String },
     ToolInputDelta(String),
     ToolUseEnd { input: serde_json::Value },
@@ -223,6 +225,10 @@ pub trait Provider: Send + Sync {
 
     #[allow(dead_code)]
     fn name(&self) -> &str;
+
+    /// Override thinking for the next API call. `Some(false)` disables,
+    /// `Some(true)` enables, `None` restores the default.
+    fn set_thinking_override(&self, _enabled: Option<bool>) {}
 }
 
 struct ToolCallAccumulator {
@@ -279,6 +285,7 @@ pub fn create_provider(
     token_store: Option<Arc<TokenStore>>,
     thinking_enabled: bool,
     thinking_budget_tokens: u64,
+    reasoning_effort: Option<String>,
 ) -> Result<Arc<dyn Provider>> {
     match provider_name {
         "openai" => {
@@ -286,7 +293,12 @@ pub fn create_provider(
                 AuthCredential::ApiKey(key) => key,
                 AuthCredential::OAuthToken { access_token, .. } => access_token,
             };
-            Ok(Arc::new(OpenAiProvider::new(api_key, model, base_url)))
+            Ok(Arc::new(OpenAiProvider::new(
+                api_key,
+                model,
+                base_url,
+                reasoning_effort,
+            )))
         }
         "claude" => Ok(Arc::new(ClaudeProvider::new(
             credential,
@@ -392,6 +404,7 @@ mod tests {
             None,
             false,
             10000,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -408,6 +421,7 @@ mod tests {
             None,
             false,
             10000,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -424,6 +438,7 @@ mod tests {
             None,
             false,
             10000,
+            None,
         );
         assert!(result.is_err());
     }

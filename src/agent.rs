@@ -25,6 +25,7 @@ pub struct AgentOptions {
     pub context_messages: Option<usize>,
     pub auto_compact: bool,
     pub context_window: u64,
+    pub thinking_show_content: bool,
 }
 
 pub struct Agent {
@@ -207,19 +208,11 @@ impl Agent {
                     break 'turn Err(error);
                 }
 
-                // Strip thinking blocks from the message before adding to
-                // conversation history — thinking must not be sent back to the
-                // API in subsequent turns.
-                let cleaned_message = Message {
-                    role: Role::Assistant,
-                    content: assistant_message
-                        .content
-                        .iter()
-                        .filter(|block| !matches!(block, ContentBlock::Thinking { .. }))
-                        .cloned()
-                        .collect(),
-                };
-                messages.push(cleaned_message);
+                // Thinking blocks are preserved in the message history
+                // for the Claude API (interleaved-thinking beta). The provider's
+                // build_messages handles stripping trailing thinking from the last
+                // assistant message.
+                messages.push(assistant_message.clone());
 
                 if cancellation.is_cancelled() {
                     break 'turn Err(AgshError::Interrupted);
@@ -341,31 +334,34 @@ impl Agent {
         });
 
         let mut renderer = StreamingRenderer::new(self.options.render_mode);
-        let mut thinking_renderer = StreamingRenderer::new(self.options.render_mode);
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
         let mut current_text = String::new();
+        let mut current_thinking = String::new();
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input_json = String::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut token_usage = crate::provider::TokenUsage::default();
-        let mut in_thinking = false;
+        let show_thinking = self.options.thinking_show_content;
 
         while let Some(event) = event_receiver.recv().await {
             match event {
                 StreamEvent::ThinkingDelta(text) => {
-                    if !in_thinking {
-                        in_thinking = true;
-                        render::render_thinking_start();
+                    current_thinking.push_str(&text);
+                }
+                StreamEvent::ThinkingComplete { signature } => {
+                    if !current_thinking.is_empty() {
+                        if spacing.before_thinking() {
+                            println!();
+                        }
+                        render::render_thinking_block(&current_thinking, show_thinking);
+                        content_blocks.push(ContentBlock::Thinking {
+                            thinking: std::mem::take(&mut current_thinking),
+                            signature,
+                        });
                     }
-                    thinking_renderer.push_delta(&text)?;
                 }
                 StreamEvent::TextDelta(text) => {
-                    if in_thinking {
-                        in_thinking = false;
-                        thinking_renderer.finish()?;
-                        render::render_thinking_end();
-                    }
                     if !renderer.started {
                         if spacing.before_text() {
                             println!();
@@ -375,11 +371,6 @@ impl Agent {
                     renderer.push_delta(&text)?;
                 }
                 StreamEvent::ToolUseStart { id, name } => {
-                    if in_thinking {
-                        in_thinking = false;
-                        thinking_renderer.finish()?;
-                        render::render_thinking_end();
-                    }
                     // Flush any accumulated text
                     if !current_text.is_empty() {
                         content_blocks.push(ContentBlock::Text {
@@ -410,10 +401,6 @@ impl Agent {
                 StreamEvent::MessageEnd {
                     stop_reason: reason,
                 } => {
-                    if in_thinking {
-                        thinking_renderer.finish()?;
-                        render::render_thinking_end();
-                    }
                     stop_reason = reason;
                 }
                 StreamEvent::Usage(usage) => {
@@ -664,10 +651,13 @@ impl Agent {
             "Summarize this conversation into a concise context message.",
         ));
 
-        let (summary_message, _stop_reason, _usage) = self
+        self.provider.set_thinking_override(Some(false));
+        let compact_result = self
             .provider
             .complete(system_prompt, &compact_messages, &[])
-            .await?;
+            .await;
+        self.provider.set_thinking_override(None);
+        let (summary_message, _stop_reason, _usage) = compact_result?;
 
         let summary_text = summary_message.text_content();
         if summary_text.is_empty() {

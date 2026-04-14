@@ -22,6 +22,7 @@ pub struct ConfigFile {
 pub struct ThinkingConfig {
     pub enabled: Option<bool>,
     pub budget_tokens: Option<u64>,
+    pub show_content: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -112,6 +113,7 @@ pub struct ProviderConfig {
     pub oauth_token: Option<String>,
     pub oauth_token_url: Option<String>,
     pub base_url: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug)]
@@ -139,6 +141,8 @@ pub struct ResolvedConfig {
     pub max_storage_bytes: Option<u64>,
     pub thinking_enabled: bool,
     pub thinking_budget_tokens: u64,
+    pub thinking_show_content: bool,
+    pub reasoning_effort: Option<String>,
     pub auto_compact: bool,
     pub context_window: Option<u64>,
     pub mcp_servers: Vec<McpServerConfig>,
@@ -285,10 +289,12 @@ impl ResolvedConfig {
             max_storage_bytes: file_session.max_storage_bytes.or(Some(52_428_800)),
             thinking_enabled: cli
                 .thinking
-                .unwrap_or_else(|| file_thinking.enabled.unwrap_or(false)),
+                .unwrap_or_else(|| file_thinking.enabled.unwrap_or(true)),
             thinking_budget_tokens: cli
                 .thinking_budget
-                .unwrap_or_else(|| file_thinking.budget_tokens.unwrap_or(10_000)),
+                .unwrap_or_else(|| file_thinking.budget_tokens.unwrap_or(16_000)),
+            thinking_show_content: file_thinking.show_content.unwrap_or(false),
+            reasoning_effort: file_provider.reasoning_effort.clone(),
             auto_compact: file_session.auto_compact.unwrap_or(true),
             context_window: file_session.context_window,
             mcp_servers,
@@ -317,9 +323,13 @@ impl ResolvedConfig {
 pub fn context_window_for_model(model: &str) -> u64 {
     if model.contains("claude") {
         200_000
-    } else if model.contains("gpt-4o") || model.contains("gpt-4.1") {
+    } else if model.contains("gpt-4.1") {
+        1_047_576
+    } else if model.contains("gpt-4o") {
         128_000
-    } else if model.contains("o3") || model.contains("o4") {
+    } else if model.contains("o3") || model.contains("o4-mini") {
+        200_000
+    } else if model.contains("o1") {
         200_000
     } else {
         128_000

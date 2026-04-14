@@ -11,6 +11,7 @@ enum LastOutput {
     Nothing,
     Prompt,
     Text,
+    Thinking,
     ToolIndicator,
     TodoList,
 }
@@ -31,7 +32,7 @@ impl OutputSpacing {
     /// Call before printing streamed text. Returns true if a blank line
     /// should be emitted first.
     pub fn before_text(&mut self) -> bool {
-        let need_blank = matches!(self.last, LastOutput::ToolIndicator);
+        let need_blank = matches!(self.last, LastOutput::ToolIndicator | LastOutput::Thinking);
         self.last = LastOutput::Text;
         need_blank
     }
@@ -39,8 +40,16 @@ impl OutputSpacing {
     /// Call before printing a tool indicator. Returns true if a blank line
     /// should be emitted first.
     pub fn before_tool_indicator(&mut self) -> bool {
-        let need_blank = matches!(self.last, LastOutput::Text);
+        let need_blank = matches!(self.last, LastOutput::Text | LastOutput::Thinking);
         self.last = LastOutput::ToolIndicator;
+        need_blank
+    }
+
+    /// Call before printing a thinking block. Returns true if a blank line
+    /// should be emitted first.
+    pub fn before_thinking(&mut self) -> bool {
+        let need_blank = matches!(self.last, LastOutput::Text | LastOutput::ToolIndicator);
+        self.last = LastOutput::Thinking;
         need_blank
     }
 
@@ -449,12 +458,22 @@ pub fn render_hint(message: &str) {
     eprintln!("{}", message.with(Color::DarkGrey));
 }
 
-pub fn render_thinking_start() {
-    eprint!("{}", "Thinking... ".with(Color::DarkGrey));
-}
-
-pub fn render_thinking_end() {
-    eprintln!();
+pub fn render_thinking_block(thinking: &str, show_full: bool) {
+    if show_full {
+        eprintln!(
+            "{}{}",
+            "Thinking... ".with(Color::DarkGrey),
+            thinking.with(Color::DarkGrey),
+        );
+    } else {
+        let first_line = thinking.lines().next().unwrap_or("");
+        let truncated = truncate_display(first_line, 80);
+        eprintln!(
+            "{}{}",
+            "Thinking... ".with(Color::DarkGrey),
+            truncated.with(Color::DarkGrey),
+        );
+    }
 }
 
 pub fn render_todo_list(items: &[crate::tools::todo::TodoItem]) {

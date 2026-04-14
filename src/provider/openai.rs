@@ -14,15 +14,22 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     model: String,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
-    pub fn new(api_key: String, model: String, base_url: Option<String>) -> Self {
+    pub fn new(
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+        reasoning_effort: Option<String>,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             model,
+            reasoning_effort,
         }
     }
 
@@ -82,6 +89,7 @@ impl OpenAiProvider {
                         .content
                         .iter()
                         .filter_map(|block| match block {
+                            ContentBlock::Thinking { .. } => None,
                             ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
                                 "id": id,
                                 "type": "function",
@@ -119,6 +127,11 @@ impl OpenAiProvider {
             "messages": openai_messages,
             "stream": stream,
         });
+
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = serde_json::json!(effort);
+            body["max_completion_tokens"] = serde_json::json!(32_000);
+        }
 
         if !tools.is_empty() {
             let openai_tools: Vec<_> = tools
@@ -467,7 +480,8 @@ mod tests {
 
     #[test]
     fn test_openai_request_body_simple() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let messages = vec![Message::user("hello")];
         let body = provider.build_request_body("system prompt", &messages, &[], false);
@@ -487,7 +501,8 @@ mod tests {
 
     #[test]
     fn test_openai_request_body_with_tools() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let tools = vec![ToolDefinition {
             name: "read_file".to_string(),
@@ -510,7 +525,8 @@ mod tests {
 
     #[test]
     fn test_openai_request_body_with_tool_calls() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let messages = vec![
             Message::user("read /tmp/test.txt"),
@@ -548,7 +564,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_non_streaming_text() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -570,7 +587,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_non_streaming_tool_call() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -609,7 +627,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_missing_message_in_choice() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -623,7 +642,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_missing_tool_call_id() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -648,7 +668,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_missing_tool_call_function_name() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -673,7 +694,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_non_streaming_flattened_tool_call() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -710,7 +732,8 @@ mod tests {
 
     #[test]
     fn test_openai_parse_non_streaming_flattened_missing_name_still_errors() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let response = serde_json::json!({
             "choices": [{
@@ -733,7 +756,8 @@ mod tests {
 
     #[test]
     fn test_openai_tool_definitions_use_standard_chat_completions_format() {
-        let provider = OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None);
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
         let tools = vec![ToolDefinition {
             name: "write_file".to_string(),

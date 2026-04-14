@@ -66,6 +66,17 @@ If not set, defaults to:
 - `https://api.openai.com/v1` for the `openai` provider
 - `https://api.anthropic.com` for the `claude` provider
 
+### `provider.reasoning_effort`
+
+Reasoning effort level for OpenAI o-series models. When set, the `reasoning_effort` parameter is included in API requests and `max_completion_tokens` is used instead of `max_tokens`.
+
+Accepted values: `low`, `medium`, `high`. Omitted by default.
+
+```toml
+[provider]
+reasoning_effort = "medium"
+```
+
 ## Examples
 
 ### OpenAI
@@ -262,19 +273,19 @@ context_window = 200000
 
 ## `[thinking]`
 
-Settings for extended thinking (Claude provider only).
+Settings for extended thinking (Claude provider only). Claude 4.6+ models use adaptive thinking automatically; older models use a fixed token budget.
 
 ### `thinking.enabled`
 
 Whether to enable extended thinking. When enabled, the model can use additional tokens for internal reasoning before responding.
 
-Default: `false`
+Default: `true`
 
 ### `thinking.budget_tokens`
 
-Maximum number of tokens the model can use for thinking.
+Maximum number of tokens the model can use for thinking (for non-adaptive models).
 
-Default: `10000`
+Default: `16000`
 
 ```toml
 [thinking]

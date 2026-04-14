@@ -5,17 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-04-14
 
 ### Added
 
 - `/export` slash command to export the current session as Markdown.
 - Re-print last message when resuming a session with `-c`.
+- Adaptive thinking for Claude 4.6+ models.
+- `set_thinking_override` on Provider trait for compaction.
+- Optional `reasoning_effort` config for OpenAI o-series models.
 
 ### Changed
 
 - Combine `-s` and `-c` CLI flags into `-c [SESSION_ID]`.
 - Wrap injected context in `<context>` XML tags for structured parsing.
+- Thinking enabled by default (was disabled).
+- Default thinking budget: 10K → 16K tokens.
+- Default max_tokens: 8K → 32K (non-thinking), dynamic (thinking).
+- Preserve thinking blocks in conversation history for Claude API.
+- Disable thinking during session compaction.
+- Updated context window defaults for GPT-4.1 (1M) and o-series (200K).
 
 ### Fixed
 
