@@ -34,7 +34,7 @@ api_key = "sk-or-v1-..."
 model = "anthropic/claude-opus-4.6"
 ```
 
-2. Run `agsh` and start typing. Press Shift+Tab to cycle permissions (none, read, write):
+2. Run `agsh` and start typing. Press Shift+Tab to cycle permissions (none, read, ask, write):
 
 ```
 agsh [r] > find all TODO comments in this project
@@ -53,6 +53,11 @@ The agent has access to the following built-in tools:
 - **SearchContents**: search file contents with regex (powered by ripgrep)
 - **FetchUrl**: fetch and read web page content
 - **WebSearch**: search the web for up-to-date information
+- **Scratchpad**: session-scoped working memory (write, read, edit, list, delete)
+- **TodoWrite**: structured task tracking for multi-step work
+- **SpawnAgent**: delegate research tasks to a read-only sub-agent
+
+All tools support an optional `scratchpad` parameter to save output directly to the scratchpad.
 
 ## Permissions
 
@@ -60,6 +65,7 @@ The prompt indicator shows the current permission mode. Press **Shift+Tab** to c
 
 - `[n]` **none**: no tools available, text-only responses
 - `[r]` **read**: read-only tools (file reading, searching, web, sandboxed shell); cannot modify anything
+- `[a]` **ask**: all tools available, but each call requires user approval
 - `[w]` **write**: all tools enabled, including shell execution and file writes
 
 ## Sessions
@@ -67,7 +73,19 @@ The prompt indicator shows the current permission mode. Press **Shift+Tab** to c
 Conversations are persisted in a local SQLite database and can be resumed:
 
 - `agsh -c` continues the last session
-- `agsh -s <UUID>` resumes a specific session by ID
+- `agsh -c <UUID>` resumes a specific session by ID
+- `agsh list` lists past sessions
+- `agsh export <UUID>` exports a session as Markdown
+- `/export` exports the current session from within the shell
+- `/compact` summarizes and compacts the session history
+
+## Features
+
+- **Extended thinking**: Claude models use extended thinking by default (adaptive for 4.6+)
+- **Syntax-highlighted output**: bat-powered markdown rendering with code block highlighting
+- **Auto-compact**: automatically compacts the conversation when approaching the context limit
+- **MCP support**: extend the agent with tools from external MCP servers
+- **Skills**: load reusable prompt templates from `~/.config/agsh/skills/`
 
 ## Shell Escape
 
