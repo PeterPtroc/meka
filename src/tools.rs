@@ -1,6 +1,7 @@
 mod file;
+mod find;
+mod grep;
 pub(crate) mod scratchpad;
-mod search;
 mod shell;
 mod skill;
 pub(crate) mod subagent;
@@ -141,8 +142,8 @@ impl ToolRegistry {
         }));
         self.register(Box::new(file::EditFileTool { read_tracker }));
         self.register(Box::new(file::WriteFileTool));
-        self.register(Box::new(search::FindFilesTool));
-        self.register(Box::new(search::SearchContentsTool));
+        self.register(Box::new(find::FindFilesTool));
+        self.register(Box::new(grep::SearchContentsTool));
         let web_client = reqwest::Client::builder()
             .user_agent(user_agent)
             .timeout(std::time::Duration::from_secs(30))

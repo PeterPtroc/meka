@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Skills are now directory-based (`~/.config/agsh/skills/<name>/SKILL.md`) instead of flat `.md` files.
 - Skills section in system prompt lists `description` and `when_to_use` per skill; agent invokes via `skill` tool rather than `read_file`.
+- Expand `find_files` and `search_contents` tool descriptions with guidance to scope searches narrowly and broaden progressively, avoiding slow tree-wide scans and permission-denied noise.
 
 ### Security
 
