@@ -3,6 +3,11 @@
 //! and MCP credentials. Per-session mutual exclusion is provided by an
 //! OS-level file lock ([`SessionLock`]) so the kernel reclaims it whenever
 //! the holder dies — no PID-aliveness check, no risk of stale locks.
+//!
+//! On Unix the data directory (`0700`), lock directory (`0700`), and the
+//! database file itself (`0600`) are tightened after creation so the
+//! persisted OAuth tokens, MCP credentials, and conversation content
+//! aren't readable by other local users regardless of the user's umask.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -74,6 +79,42 @@ fn default_database_path() -> Result<PathBuf> {
     Ok(base.join("agsh").join("sessions.db"))
 }
 
+/// Restrict a path's permissions on Unix. Best-effort — if the call fails
+/// we log and continue, because on some mounts (`/tmp` under specific
+/// overlay setups, NFS without proper support, etc.) `chmod` returns
+/// `EPERM`/`EROFS` and refusing to open the session is a strictly worse
+/// failure than leaving the file at the umask-derived mode.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(mode);
+            if let Err(error) = std::fs::set_permissions(path, permissions) {
+                tracing::debug!(
+                    "failed to restrict '{}' to mode {:o}: {}",
+                    path.display(),
+                    mode,
+                    error
+                );
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                "failed to stat '{}' while restricting permissions: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path, _mode: u32) {
+    // Windows ACLs inherit from the parent directory; leave alone.
+}
+
 impl SessionManager {
     pub async fn open(path: Option<&Path>) -> Result<Self> {
         let database_path = match path {
@@ -90,6 +131,7 @@ impl SessionManager {
         } else {
             if let Some(parent) = database_path.parent() {
                 std::fs::create_dir_all(parent)?;
+                restrict_permissions(parent, 0o700);
             }
             database_path
                 .parent()
@@ -97,10 +139,20 @@ impl SessionManager {
                 .join("locks")
         };
         std::fs::create_dir_all(&lock_dir)?;
+        restrict_permissions(&lock_dir, 0o700);
 
         let connection = Connection::open(&database_path)
             .await
             .map_err(|error| AgshError::Database(format!("failed to open database: {}", error)))?;
+
+        // Tighten the DB file itself to 0600. -wal/-shm companions created
+        // later by SQLite may pick up the default umask, but the parent
+        // directory mode above (0700) is already enough to block other
+        // local users; the 0600 here is belt-and-braces for the case where
+        // the data dir is pre-created with permissive modes.
+        if !is_in_memory {
+            restrict_permissions(&database_path, 0o600);
+        }
 
         let manager = Self {
             connection: Arc::new(connection),
@@ -866,6 +918,56 @@ mod tests {
         SessionManager::open(Some(Path::new(":memory:")))
             .await
             .expect("failed to open in-memory database")
+    }
+
+    /// Regression test for the umask-dependent permission bug: the session
+    /// database file stores OAuth tokens and MCP credentials, so it must be
+    /// readable by the owner only (0600) and the surrounding directory by
+    /// the owner only (0700), regardless of the user's umask.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_session_db_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("data").join("sessions.db");
+
+        let _manager = SessionManager::open(Some(&db_path))
+            .await
+            .expect("open session");
+
+        let db_mode = std::fs::metadata(&db_path)
+            .expect("stat db")
+            .permissions()
+            .mode();
+        assert_eq!(
+            db_mode & 0o777,
+            0o600,
+            "db file should be 0600 (got {:o})",
+            db_mode & 0o777
+        );
+
+        let dir_mode = std::fs::metadata(db_path.parent().expect("parent"))
+            .expect("stat dir")
+            .permissions()
+            .mode();
+        assert_eq!(
+            dir_mode & 0o777,
+            0o700,
+            "data dir should be 0700 (got {:o})",
+            dir_mode & 0o777
+        );
+
+        let lock_mode = std::fs::metadata(db_path.parent().expect("parent").join("locks"))
+            .expect("stat lock dir")
+            .permissions()
+            .mode();
+        assert_eq!(
+            lock_mode & 0o777,
+            0o700,
+            "lock dir should be 0700 (got {:o})",
+            lock_mode & 0o777
+        );
     }
 
     #[tokio::test]

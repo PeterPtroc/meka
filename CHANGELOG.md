@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- File tools route I/O through the canonical path with `O_NOFOLLOW` on Unix, closing a symlink-swap TOCTOU.
+- `fetch_url` caps response body at 10 MiB to defend against gzip/brotli decompression bombs.
+- Session data dir, lock dir, and DB file are created 0700/0700/0600 on Unix regardless of umask.
+- Tool calls with unparseable JSON arguments are now rejected instead of silently run with `{}`.
+- Windows Low-integrity sandbox scrubs the child environment so provider API keys aren't inherited.
+- `execute_command` on Unix kills the whole process group on timeout so grandchildren can't outlive it.
+- LLM-supplied regex patterns are compiled with 1 MiB size/DFA limits to bound compile-time memory.
+- Tool indicators strip ANSI CSI escapes and C0 controls so commands can't spoof the permission prompt.
+- Permission enforcement now reads the shared permission atomically at the dispatch site.
+
 ### Added
 
 - `tests/cli.rs` end-to-end smoke tests for `--version`, `--help`, unknown flags.

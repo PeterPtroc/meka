@@ -4,9 +4,10 @@
 //! theme used for code blocks.
 
 use std::io::{self, Write};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crossterm::style::{Color, Stylize};
+use regex::Regex;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -558,13 +559,41 @@ pub fn render_tool_indicator(name: &str, input: &serde_json::Value) {
     let display_name = tool_display_name(name);
     let indicator = match tool_primary_param(name, input) {
         Some(value) => {
-            let sanitized = value.replace('\n', " ");
+            // Strip ANSI escapes and C0 control chars before display so a
+            // model-supplied command or path can't spoof the permission
+            // prompt, clear the screen, or move the cursor. The LLM-facing
+            // copy keeps the raw bytes.
+            let sanitized = sanitize_for_display(&value.replace('\n', " "));
             let truncated = truncate_display(&sanitized, 80);
             format!("[tool {}(`{}`)]", display_name, truncated)
         }
         None => format!("[tool {}]", display_name),
     };
     println!("{}", indicator.with(Color::DarkCyan));
+}
+
+/// Match ANSI CSI (Control Sequence Introducer) escapes: `ESC [` followed by
+/// parameter bytes (`0x30-0x3F`), optional intermediate bytes (`0x20-0x2F`),
+/// and a final byte (`0x40-0x7E`). This covers the sequences an attacker
+/// would use to clear the screen, move the cursor, or alter colors.
+static CSI_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]").expect("static CSI pattern")
+});
+
+/// Strip ANSI CSI escapes and C0 control characters (except `\n`, `\r`, `\t`)
+/// from a string destined for the user's terminal. Intended for text that
+/// originates in untrusted sources — LLM tool arguments, command output
+/// echoed into indicators/prompts, etc. — so a hostile or broken string
+/// cannot forge UI chrome or corrupt terminal state.
+///
+/// The sanitized form is for **display only**. The conversation copy sent
+/// back to the LLM keeps full fidelity.
+pub fn sanitize_for_display(text: &str) -> String {
+    let stripped = CSI_PATTERN.replace_all(text, "");
+    stripped
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect()
 }
 
 pub fn render_session_id(label: &str, id: &str) {
@@ -835,6 +864,37 @@ mod tests {
     fn test_tool_primary_param_render_image_empty() {
         let input = serde_json::json!({});
         assert_eq!(tool_primary_param("render_image", &input), None);
+    }
+
+    #[test]
+    fn test_sanitize_strips_csi_and_c0() {
+        // Clear-screen + home + bell, with ASCII text around.
+        let input = "hello\x1b[2J\x1b[H\x07world\n";
+        assert_eq!(sanitize_for_display(input), "helloworld\n");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_newline_tab_cr() {
+        let input = "a\tb\nc\rd";
+        assert_eq!(sanitize_for_display(input), "a\tb\nc\rd");
+    }
+
+    #[test]
+    fn test_sanitize_strips_color_escape() {
+        let input = "\x1b[31mred\x1b[0m";
+        assert_eq!(sanitize_for_display(input), "red");
+    }
+
+    #[test]
+    fn test_sanitize_strips_cursor_move() {
+        let input = "\x1b[10;20H";
+        assert_eq!(sanitize_for_display(input), "");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_unicode() {
+        let input = "日本語 emoji \u{1F600}";
+        assert_eq!(sanitize_for_display(input), "日本語 emoji \u{1F600}");
     }
 
     #[test]

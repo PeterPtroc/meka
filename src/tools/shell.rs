@@ -131,19 +131,50 @@ impl Tool for ExecuteCommandTool {
         let mut command_builder = {
             let mut cmd = tokio::process::Command::new("sh");
             cmd.arg("-c").arg(&command);
-            if sandboxed
-                && let crate::sandbox::SandboxCapability::Landlock { abi_version } =
-                    self.sandbox_capability
-            {
-                unsafe {
-                    cmd.pre_exec(move || {
-                        crate::sandbox::apply_landlock_readonly(abi_version)
-                            .map_err(std::io::Error::from_raw_os_error)
-                    });
-                }
-            }
             cmd
         };
+
+        // Unix: place the child in its own session/process group via
+        // `setsid` so timeouts and cancellation can kill the whole tree
+        // (including backgrounded grandchildren such as `(sleep 3600 &)`)
+        // via `kill(-pgid, …)`. On Linux the Landlock setup runs in the
+        // same closure — `pre_exec` overwrites rather than chains, so we
+        // fold both steps into one.
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "linux")]
+            let landlock_abi: Option<i32> = if sandboxed {
+                if let crate::sandbox::SandboxCapability::Landlock { abi_version } =
+                    self.sandbox_capability
+                {
+                    Some(abi_version)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            unsafe {
+                command_builder.pre_exec(move || {
+                    // SAFETY: `setsid(2)` is async-signal-safe and has no
+                    // preconditions beyond "the caller isn't already a
+                    // process group leader" — which is guaranteed for a
+                    // freshly forked child process.
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(abi) = landlock_abi {
+                        crate::sandbox::apply_landlock_readonly(abi)
+                            .map_err(std::io::Error::from_raw_os_error)?;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = (); // landlock_abi unused on non-Linux Unix
+                    Ok(())
+                });
+            }
+        }
 
         let mut child = command_builder
             .stdin(std::process::Stdio::null())
@@ -161,15 +192,11 @@ impl Tool for ExecuteCommandTool {
         // stdout/stderr reading instead to allow kill on cancellation.
         tokio::select! {
             _ = cancellation.cancelled() => {
-                if let Err(error) = child.kill().await {
-                    tracing::debug!("failed to kill child process: {}", error);
-                }
+                kill_child_tree(&mut child).await;
                 Err(AgshError::Interrupted)
             }
             _ = tokio::time::sleep(timeout_duration) => {
-                if let Err(error) = child.kill().await {
-                    tracing::debug!("failed to kill child process: {}", error);
-                }
+                kill_child_tree(&mut child).await;
                 Ok(ToolOutput::text(
                     format!("Command timed out after {}ms", timeout_ms),
                     true,
@@ -193,6 +220,37 @@ impl Tool for ExecuteCommandTool {
                 Ok(assemble_command_output(&stdout_content, &stderr_content, exit_code))
             }
         }
+    }
+}
+
+/// Terminate the child and — on Unix — its entire process group. Called
+/// on timeout and on cancellation. On Unix we rely on the `setsid()` done
+/// in `pre_exec`: the child's pid is also its pgid, so `kill(-pgid, …)`
+/// reaches every backgrounded descendant it spawned (e.g.
+/// `(sleep 3600 &)` survives a plain `child.kill()` but is caught here).
+/// The fallback `child.kill().await` is a no-op on Unix once the group
+/// has been signaled but still the right primitive on Windows.
+async fn kill_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let pgid = pid as libc::pid_t;
+            // SAFETY: `kill(2)` is always safe to call; it just returns an
+            // error if the target is gone. Sending to `-pgid` targets the
+            // whole process group.
+            unsafe {
+                libc::kill(-pgid, libc::SIGTERM);
+            }
+            // Brief grace period so well-behaved children can shut down
+            // cleanly before SIGKILL lands.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    if let Err(error) = child.kill().await {
+        tracing::debug!("failed to kill child process: {}", error);
     }
 }
 
@@ -293,7 +351,14 @@ async fn run_windows_low_integrity(
     let stderr_task = tokio::spawn(async move { read_to_string_best_effort(stderr).await });
 
     let wait_child = Arc::clone(&child);
-    let wait_handle = tokio::task::spawn_blocking(move || wait_child.wait_blocking());
+    // `tokio::select!` requires the future passed to the happy-path branch
+    // (`join = ...`) to be polled without consuming ownership of the handle,
+    // because the other two branches need to move the same handle into
+    // `abort_after_timeout` if their future resolves first. Polling
+    // `&mut wait_handle` satisfies `JoinHandle`'s `Future` impl (it has a
+    // `&mut self`-based `poll`) without committing the move until we know
+    // which branch wins.
+    let mut wait_handle = tokio::task::spawn_blocking(move || wait_child.wait_blocking());
 
     tokio::select! {
         _ = cancellation.cancelled() => {
@@ -317,7 +382,7 @@ async fn run_windows_low_integrity(
                 true,
             ))
         }
-        join = wait_handle => {
+        join = &mut wait_handle => {
             let status = join
                 .map_err(|error| AgshError::ToolExecution {
                     tool_name: "execute_command".to_string(),
@@ -445,6 +510,54 @@ mod tests {
 
         assert!(!result.is_error);
         assert_eq!(text_content(&result).trim(), "hello");
+    }
+
+    /// Regression test for the orphaned-grandchild bug: a command that
+    /// backgrounds a long-running helper (`(sleep 30 &)`) must have that
+    /// helper killed when the tool times out, not outlive the agent. The
+    /// child is placed in its own process group via `setsid` so the tool
+    /// can signal the whole tree via `kill(-pgid, …)`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_command_timeout_kills_grandchild() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let marker = temp_dir.path().join("marker");
+        let marker_str = marker.to_str().expect("utf-8 path").to_string();
+
+        let tool = ExecuteCommandTool {
+            sandbox_capability: crate::sandbox::detect(),
+            shared_permission: test_shared_permission(),
+            sandbox_enabled: false,
+        };
+
+        // The grandchild sleeps 3s then touches `marker`. If it survived
+        // the timeout, the marker file will appear. The timeout is 300ms
+        // and we wait 5s below for a definitive "did it survive?" answer.
+        let script = format!(
+            "( sleep 3 && : > '{}' ) & echo backgrounded; sleep 30",
+            marker_str
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({ "command": script, "timeout_ms": 300u64 }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute should not error");
+
+        // Tool reports timeout.
+        assert!(result.is_error);
+        let text = text_content(&result);
+        assert!(text.contains("timed out"), "got: {:?}", text);
+
+        // Wait well past the grandchild's sleep-3s. If the marker
+        // materializes, the grandchild wasn't killed — the bug is back.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild survived timeout and created marker at {:?}",
+            marker
+        );
     }
 
     #[tokio::test]
@@ -658,6 +771,47 @@ mod tests {
                     text
                 );
             }
+        }
+
+        /// Regression test for the parent-env-inheritance leak: secrets set
+        /// in the parent (API keys, OAuth tokens) must not appear in the
+        /// sandboxed child's environment, because a Low-integrity child
+        /// can still open outbound sockets and exfiltrate them.
+        #[tokio::test]
+        async fn test_windows_sandbox_scrubs_provider_api_keys() {
+            // SAFETY: tests run under `cargo test`, which is single-threaded
+            // per target by default for integration tests, and this env var
+            // is scoped to the test's probe command. Acceptable for a test.
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", "probe-12345-leaked");
+            }
+
+            let tool = ExecuteCommandTool {
+                sandbox_capability: crate::sandbox::SandboxCapability::LowIntegrity,
+                shared_permission: read_permission(),
+                sandbox_enabled: true,
+            };
+            let result = tool
+                .execute(
+                    serde_json::json!({
+                        "command": "$env:ANTHROPIC_API_KEY",
+                        "timeout_ms": 10000u64,
+                    }),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("execute should not error");
+
+            unsafe {
+                std::env::remove_var("ANTHROPIC_API_KEY");
+            }
+
+            let text = text_content(&result);
+            assert!(
+                !text.contains("probe-12345-leaked"),
+                "parent API key leaked into sandboxed child env: {:?}",
+                text
+            );
         }
 
         /// Reads must still succeed under Low integrity. The hosts file is

@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use regex::Regex;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -17,6 +16,7 @@ use crate::permission::Permission;
 use crate::provider::{ContentBlock, Message, ToolDefinition, ToolResultContent};
 use crate::session::SessionManager;
 
+use super::util::compile_user_regex;
 use super::{Tool, ToolOutput};
 
 /// Tool result text blocks larger than this are persisted to the database and
@@ -379,10 +379,7 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
 }
 
 fn search_mode(content: &str, pattern: &str) -> Result<ToolOutput> {
-    let re = Regex::new(pattern).map_err(|error| AgshError::ToolExecution {
-        tool_name: "scratchpad_read".to_string(),
-        message: format!("invalid regex '{}': {}", pattern, error),
-    })?;
+    let re = compile_user_regex(pattern, "scratchpad_read")?;
 
     let mut matches = Vec::new();
     for (line_num, line) in content.lines().enumerate() {

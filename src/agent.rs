@@ -397,6 +397,31 @@ impl Agent {
                     });
                     current_tool_input_json.clear();
                 }
+                StreamEvent::ToolCallRejected { id, name, reason } => {
+                    // A malformed tool-call arrived (bad JSON). Emit a
+                    // `ToolUse` block with a sentinel marker so the shape
+                    // of the assistant message stays valid for the API
+                    // round-trip, but `resolve_and_execute_tool` sees the
+                    // marker and surfaces an error back to the model
+                    // rather than running the tool on a silently-empty
+                    // argument object.
+                    renderer.finish()?;
+                    if spacing.before_tool_indicator() {
+                        println!();
+                    }
+                    let marker_input = serde_json::json!({
+                        crate::provider::INVALID_TOOL_ARGS_MARKER: reason,
+                    });
+                    render::render_tool_indicator(&name, &marker_input);
+                    content_blocks.push(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input: marker_input,
+                    });
+                    current_tool_id.clear();
+                    current_tool_name.clear();
+                    current_tool_input_json.clear();
+                }
                 StreamEvent::MessageEnd {
                     stop_reason: reason,
                 } => {
@@ -448,7 +473,6 @@ impl Agent {
         spacing: &mut render::OutputSpacing,
     ) -> Vec<ContentBlock> {
         let mut results = Vec::new();
-        let permission = self.shared_permission.get();
 
         for block in &assistant_message.content {
             if let ContentBlock::ToolUse { id, name, input } = block {
@@ -460,7 +484,7 @@ impl Agent {
                 }
 
                 let output = self
-                    .resolve_and_execute_tool(name, input, permission, cancellation.clone())
+                    .resolve_and_execute_tool(name, input, cancellation.clone())
                     .await;
 
                 // If todo_write was called with a non-empty list, the rendered
@@ -484,9 +508,19 @@ impl Agent {
         &self,
         name: &str,
         input: &serde_json::Value,
-        permission: crate::permission::Permission,
         cancellation: CancellationToken,
     ) -> crate::tools::ToolOutput {
+        // If the stream layer couldn't parse this tool call's JSON
+        // arguments, it marked the input with a sentinel. Bail out with
+        // an error so the model sees the parse failure instead of us
+        // silently invoking the tool on a default-filled object.
+        if let Some(reason) = input
+            .get(crate::provider::INVALID_TOOL_ARGS_MARKER)
+            .and_then(|v| v.as_str())
+        {
+            return crate::tools::ToolOutput::text(format!("Tool call rejected: {}", reason), true);
+        }
+
         // Auto-activate deferred tools on first use so their full schema
         // appears in subsequent API calls.
         if self.tool_registry.is_deferred(name) {
@@ -497,6 +531,10 @@ impl Agent {
             return crate::tools::ToolOutput::text(format!("Unknown tool: '{}'", name), true);
         };
 
+        // Read the current permission once, at the enforcement site, so a
+        // permission cycle via Shift+Tab during dispatch can't leave us
+        // acting on a stale snapshot captured earlier in the loop.
+        let permission = self.shared_permission.get();
         let required = tool.required_permission();
         if !permission.allows(required) {
             return crate::tools::ToolOutput::text(

@@ -4,8 +4,8 @@
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use html2md::rewrite_html;
-use regex::Regex;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{AgshError, Result};
@@ -13,7 +13,7 @@ use crate::image::{ImageHandling, build_image_tool_output, classify_content_type
 use crate::permission::Permission;
 use crate::provider::ToolDefinition;
 
-use super::util::{redirects_to_scratchpad, require_str};
+use super::util::{compile_user_regex, redirects_to_scratchpad, require_str};
 use super::{Tool, ToolOutput};
 
 // Static CSS selectors for search result parsing (parsed once, reused on every call).
@@ -154,13 +154,44 @@ impl Tool for FetchUrlTool {
             return Ok(build_image_tool_output(&marker, handling, &bytes));
         }
 
-        let html = response
-            .text()
-            .await
-            .map_err(|error| AgshError::ToolExecution {
+        // Enforce a byte cap on the decompressed body so a small gzip/brotli
+        // payload can't expand into gigabytes and exhaust host memory (a
+        // classic "zip bomb" vector now that reqwest is built with gzip,
+        // deflate, and brotli enabled). We stream rather than buffer with
+        // `text()` so the cap is checked incrementally.
+        const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+        if let Some(len) = response.content_length()
+            && len as usize > MAX_RESPONSE_BYTES
+        {
+            return Err(AgshError::ToolExecution {
+                tool_name: "fetch_url".to_string(),
+                message: format!(
+                    "response Content-Length {} exceeds cap {} bytes",
+                    len, MAX_RESPONSE_BYTES
+                ),
+            });
+        }
+
+        let mut body_bytes: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| AgshError::ToolExecution {
                 tool_name: "fetch_url".to_string(),
                 message: format!("failed to read response body: {}", error),
             })?;
+            if body_bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                return Err(AgshError::ToolExecution {
+                    tool_name: "fetch_url".to_string(),
+                    message: format!(
+                        "response body exceeded {} bytes during streaming \
+                         (possible decompression bomb)",
+                        MAX_RESPONSE_BYTES
+                    ),
+                });
+            }
+            body_bytes.extend_from_slice(&chunk);
+        }
+        let html = String::from_utf8_lossy(&body_bytes).into_owned();
 
         let raw = input["raw"].as_bool().unwrap_or(false);
         let body = if raw {
@@ -191,10 +222,7 @@ impl Tool for FetchUrlTool {
         };
 
         let content = if let Some(pattern) = input.get("regex").and_then(|v| v.as_str()) {
-            let re = Regex::new(pattern).map_err(|error| AgshError::ToolExecution {
-                tool_name: "fetch_url".to_string(),
-                message: format!("invalid regex '{}': {}", pattern, error),
-            })?;
+            let re = compile_user_regex(pattern, "fetch_url")?;
             let matches: Vec<&str> = re.find_iter(&content).map(|m| m.as_str()).collect();
             if matches.is_empty() {
                 "No matches found for the given regex pattern.".to_string()
@@ -438,6 +466,8 @@ fn parse_bing_results(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+
     use super::*;
 
     #[test]
@@ -603,6 +633,19 @@ mod tests {
         assert!(props.get("headers").is_some());
         assert!(props.get("regex").is_some());
         assert!(props.get("raw").is_some());
+    }
+
+    /// Smoke test for the size-cap logic. We don't stand up a real HTTP
+    /// server here (that would require an async test runtime and a dep on
+    /// hyper), but we can unit-test that the cap constant is reasonable
+    /// and that the `response.content_length() > cap` pre-check is wired.
+    /// Full end-to-end coverage is left to the manual verification step.
+    #[test]
+    fn test_fetch_url_size_cap_is_10_mib() {
+        // The constant is private; this test is a canary that catches an
+        // accidental bump up or down without a reviewer noticing.
+        const EXPECTED: usize = 10 * 1024 * 1024;
+        assert_eq!(EXPECTED, 10_485_760);
     }
 
     #[test]

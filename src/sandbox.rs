@@ -285,7 +285,7 @@ pub fn quote_command_arg(arg: &str) -> String {
 // --------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::{SandboxedChild, spawn_low_integrity_command};
+pub use windows_impl::spawn_low_integrity_command;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
@@ -312,9 +312,9 @@ mod windows_impl {
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CreateProcessAsUserW, CreateProcessWithTokenW,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+        CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+        CreateProcessWithTokenW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
         LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
         UpdateProcThreadAttribute, WaitForSingleObject,
@@ -707,8 +707,18 @@ mod windows_impl {
         startup: &STARTUPINFOEXW,
         proc_info: &mut PROCESS_INFORMATION,
     ) -> std::io::Result<()> {
-        let creation_flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+        let creation_flags =
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
         let startup_ptr = startup as *const STARTUPINFOEXW as *const STARTUPINFOW;
+
+        // Build a scrubbed UTF-16 environment block once. Passing this for
+        // both `CreateProcessAsUserW` and the `CreateProcessWithTokenW`
+        // fallback ensures the sandboxed child never sees the agent's
+        // `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or any `*_TOKEN` /
+        // `*_SECRET` variable — a Low-integrity child can still open
+        // outbound sockets, so a leaked key in env is a live exfil vector.
+        let mut env_block = build_scrubbed_env_block_utf16();
+        let env_ptr = env_block.as_mut_ptr() as *const core::ffi::c_void;
 
         let mut cmd_line_utf16: Vec<u16> = cmd_line_utf8
             .encode_utf16()
@@ -726,7 +736,7 @@ mod windows_impl {
                 ptr::null(),
                 TRUE,
                 creation_flags,
-                ptr::null(),
+                env_ptr,
                 ptr::null(),
                 startup_ptr,
                 proc_info,
@@ -744,8 +754,9 @@ mod windows_impl {
         tracing::warn!(
             "CreateProcessAsUserW denied (SE_INCREASE_QUOTA_NAME not held); \
              falling back to CreateProcessWithTokenW. The child is still spawned \
-             under the Low-integrity token; semantics differ slightly (no custom \
-             process/thread SECURITY_ATTRIBUTES, environment is parent's)."
+             under the Low-integrity token with the same scrubbed environment \
+             block; semantics differ slightly (no custom process/thread \
+             SECURITY_ATTRIBUTES)."
         );
 
         // Rebuild the command-line buffer — the previous call may have
@@ -758,7 +769,9 @@ mod windows_impl {
         // SAFETY: same contract as CreateProcessAsUserW; the two APIs only
         // differ in their parameter list (no process/thread security attrs,
         // no bInheritHandles — inheritance is driven by the per-handle
-        // `HANDLE_FLAG_INHERIT` flag plus the attribute-list filter).
+        // `HANDLE_FLAG_INHERIT` flag plus the attribute-list filter). We
+        // re-use the scrubbed environment block so the fallback path
+        // doesn't accidentally regress to inheriting the parent's env.
         let ok = unsafe {
             CreateProcessWithTokenW(
                 token,
@@ -766,16 +779,77 @@ mod windows_impl {
                 ptr::null(),
                 cmd_line_utf16_retry.as_mut_ptr(),
                 creation_flags,
-                ptr::null(),
+                env_ptr,
                 ptr::null(),
                 startup_ptr,
                 proc_info,
             )
         };
+        // Keep `env_block` alive until after both calls complete — Win32
+        // copies the contents but documents `lpEnvironment` as a pointer
+        // that must be valid through the call.
+        drop(env_block);
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// Build a minimal UTF-16 `NAME=VALUE\0NAME=VALUE\0\0` environment
+    /// block containing only variables the sandboxed PowerShell instance
+    /// strictly needs. All provider API keys, OAuth tokens, and generic
+    /// `*_TOKEN`/`*_SECRET` style variables are dropped so a Low-integrity
+    /// child cannot read them via `$env:FOO` and exfiltrate over the
+    /// network (Low-integrity does not restrict outbound sockets).
+    fn build_scrubbed_env_block_utf16() -> Vec<u16> {
+        // Minimal set required for the Windows API loader and PowerShell
+        // startup. `SystemRoot` in particular is load-bearing — without
+        // it, `kernel32.dll` refuses to initialize and the child exits
+        // immediately with a cryptic error.
+        const ALLOWED_NAMES: &[&str] = &[
+            "SystemRoot",
+            "SystemDrive",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
+            "ComSpec",
+            "PATHEXT",
+            "OS",
+            "PROCESSOR_ARCHITECTURE",
+            "PROCESSOR_IDENTIFIER",
+            "NUMBER_OF_PROCESSORS",
+            "WINDIR",
+        ];
+
+        let mut block: Vec<u16> = Vec::new();
+        for name in ALLOWED_NAMES {
+            if let Ok(value) = std::env::var(name) {
+                append_env_entry(&mut block, name, &value);
+            }
+        }
+
+        // Rebuild `PATH` from system directories only — any user-appended
+        // entries (language SDKs, dev tooling) are dropped. Sandboxed
+        // commands that need more should be promoted out of read mode.
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let safe_path = format!(
+            "{root}\\System32;{root};{root}\\System32\\Wbem;\
+             {root}\\System32\\WindowsPowerShell\\v1.0\\",
+            root = system_root
+        );
+        append_env_entry(&mut block, "PATH", &safe_path);
+
+        // Double-NUL terminator (each entry already ends with one NUL; we
+        // need another to close the block).
+        block.push(0);
+        block
+    }
+
+    fn append_env_entry(block: &mut Vec<u16>, name: &str, value: &str) {
+        block.extend(name.encode_utf16());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_utf16());
+        block.push(0);
     }
 
     /// RAII wrapper around `PROC_THREAD_ATTRIBUTE_LIST`. Owns both the

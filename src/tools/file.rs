@@ -1,10 +1,16 @@
 //! Filesystem tools: `read_file`, `write_file`, and `edit_file`. Image files
 //! are returned as multimodal Image content blocks (transcoding to PNG when
 //! needed). Writes are gated by the active permission level.
+//!
+//! All I/O goes through the canonicalized path and, on Unix, uses
+//! `O_NOFOLLOW` on the final `open(2)` so a symlink swap between the
+//! permission check and the I/O cannot redirect the operation onto an
+//! unintended target.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use base64::Engine;
@@ -14,8 +20,75 @@ use crate::image::{ImageHandling, classify_extension, prepare_image_payload};
 use crate::permission::Permission;
 use crate::provider::{ImageSource, ToolDefinition, ToolResultContent};
 
-use super::util::{require_str, truncate_string};
+use super::util::{canonicalize_for_tool, require_str, truncate_string};
 use super::{ReadTracker, Tool, ToolOutput};
+
+/// Open a file for reading, refusing to follow a symlink on Unix. Callers
+/// pass a canonicalized `PathBuf` so the check closes the
+/// canonicalize→open TOCTOU window: if the target was replaced by a
+/// symlink after we canonicalized, the open errors out instead of
+/// silently redirecting.
+async fn open_read_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
+    #[cfg(unix)]
+    {
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .await
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::File::open(path).await
+    }
+}
+
+/// Open a file for writing (create-or-truncate) with symlink-follow
+/// disabled on Unix. Errors if the target is a symlink — a safer default
+/// than `tokio::fs::write` for paths that may race against a hostile
+/// rename.
+async fn open_write_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
+    #[cfg(unix)]
+    {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .await
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .await
+    }
+}
+
+async fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = open_read_nofollow(path).await?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
+    Ok(buffer)
+}
+
+async fn read_file_to_string(path: &Path) -> std::io::Result<String> {
+    let mut file = open_read_nofollow(path).await?;
+    let mut buffer = String::new();
+    file.read_to_string(&mut buffer).await?;
+    Ok(buffer)
+}
+
+async fn write_file_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = open_write_nofollow(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await
+}
 
 pub(super) struct ReadFileTool {
     pub read_tracker: ReadTracker,
@@ -75,13 +148,11 @@ impl Tool for ReadFileTool {
             })?
             .to_string();
 
-        let canonical = tokio::fs::canonicalize(&path)
-            .await
-            .unwrap_or_else(|_| PathBuf::from(&path));
+        let canonical = canonicalize_for_tool(&path).await;
 
         // Detect image files and return multimodal content, converting
         // non-native formats (TIFF, ICO, etc.) to PNG along the way.
-        let extension = PathBuf::from(&path)
+        let extension = canonical
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_lowercase());
@@ -92,12 +163,13 @@ impl Tool for ReadFileTool {
             .unwrap_or(ImageHandling::Unsupported);
 
         if !matches!(handling, ImageHandling::Unsupported) {
-            let data = tokio::fs::read(&path)
-                .await
-                .map_err(|error| AgshError::ToolExecution {
-                    tool_name: "read_file".to_string(),
-                    message: format!("failed to read '{}': {}", path, error),
-                })?;
+            let data =
+                read_file_bytes(&canonical)
+                    .await
+                    .map_err(|error| AgshError::ToolExecution {
+                        tool_name: "read_file".to_string(),
+                        message: format!("failed to read '{}': {}", path, error),
+                    })?;
 
             let (media_type, payload) = match prepare_image_payload(handling, &data) {
                 Ok(pair) => pair,
@@ -136,7 +208,7 @@ impl Tool for ReadFileTool {
         let limit = input["limit"].as_u64().map(|value| value as usize);
 
         let content =
-            tokio::fs::read_to_string(&path)
+            read_file_to_string(&canonical)
                 .await
                 .map_err(|error| AgshError::ToolExecution {
                     tool_name: "read_file".to_string(),
@@ -227,24 +299,24 @@ impl Tool for EditFileTool {
         let replace_all = input["replace_all"].as_bool().unwrap_or(false);
         let force = input["force"].as_bool().unwrap_or(false);
 
-        if !force {
-            let canonical = tokio::fs::canonicalize(&path)
-                .await
-                .unwrap_or_else(|_| PathBuf::from(&path));
-            if !self.read_tracker.read().await.contains(&canonical) {
-                return Ok(ToolOutput::text(
-                    format!(
-                        "Error: file '{}' must be read before editing. \
-                         Use read_file first, or set force=true to bypass.",
-                        path
-                    ),
-                    true,
-                ));
-            }
+        // Canonicalize once. All subsequent I/O goes through this path so a
+        // symlink swap between the tracker check and the actual read/write
+        // can't redirect us onto a different file.
+        let canonical = canonicalize_for_tool(&path).await;
+
+        if !force && !self.read_tracker.read().await.contains(&canonical) {
+            return Ok(ToolOutput::text(
+                format!(
+                    "Error: file '{}' must be read before editing. \
+                     Use read_file first, or set force=true to bypass.",
+                    path
+                ),
+                true,
+            ));
         }
 
         let content =
-            tokio::fs::read_to_string(&path)
+            read_file_to_string(&canonical)
                 .await
                 .map_err(|error| AgshError::ToolExecution {
                     tool_name: "edit_file".to_string(),
@@ -269,7 +341,7 @@ impl Tool for EditFileTool {
             (content.replacen(&old_string, &new_string, 1), 1)
         };
 
-        tokio::fs::write(&path, &new_content)
+        write_file_bytes(&canonical, new_content.as_bytes())
             .await
             .map_err(|error| AgshError::ToolExecution {
                 tool_name: "edit_file".to_string(),
@@ -327,17 +399,44 @@ impl Tool for WriteFileTool {
         let path = require_str(&input, "path", "write_file")?;
         let content = require_str(&input, "content", "write_file")?;
 
+        // The target file may not exist yet, so we canonicalize the *parent*
+        // directory and re-join the filename. This pins the final open to a
+        // directory whose symlinks have been resolved, closing the window
+        // where a symlink-pointing-at-a-parent swap could redirect the
+        // write. The per-file `O_NOFOLLOW` in `write_file_bytes` then
+        // prevents a last-component symlink swap.
         let file_path = PathBuf::from(&path);
-        if let Some(parent) = file_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| AgshError::ToolExecution {
-                    tool_name: "write_file".to_string(),
-                    message: format!("failed to create directories for '{}': {}", path, error),
-                })?;
-        }
+        let file_name = file_path
+            .file_name()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "write_file".to_string(),
+                message: format!("invalid path (no file name): '{}'", path),
+            })?;
+        let parent = file_path.parent().ok_or_else(|| AgshError::ToolExecution {
+            tool_name: "write_file".to_string(),
+            message: format!("invalid path (no parent): '{}'", path),
+        })?;
 
-        tokio::fs::write(&path, &content)
+        // Treat an empty parent (relative filename like "out.txt") as the
+        // current directory; this matches the previous `tokio::fs::write`
+        // behavior for bare filenames.
+        let parent_for_create: &Path = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        tokio::fs::create_dir_all(parent_for_create)
+            .await
+            .map_err(|error| AgshError::ToolExecution {
+                tool_name: "write_file".to_string(),
+                message: format!("failed to create directories for '{}': {}", path, error),
+            })?;
+
+        let canonical_parent =
+            canonicalize_for_tool(parent_for_create.to_str().unwrap_or(".")).await;
+        let target = canonical_parent.join(file_name);
+
+        write_file_bytes(&target, content.as_bytes())
             .await
             .map_err(|error| AgshError::ToolExecution {
                 tool_name: "write_file".to_string(),
@@ -650,6 +749,75 @@ mod tests {
             .expect("should succeed");
 
         assert!(!result.is_error);
+    }
+
+    /// Regression test for the canonicalize/open TOCTOU fix: edit_file must
+    /// honor the canonical path, not re-interpret the raw argument after the
+    /// tracker check. Simulated here by read-tracking the resolved file,
+    /// then swapping the symlink's target between read and edit. The edit
+    /// must land on the original canonical file, never the new target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_edit_file_symlink_swap_lands_on_canonical() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let real_a = temp_dir.path().join("a.txt");
+        let real_b = temp_dir.path().join("b.txt");
+        let link = temp_dir.path().join("link");
+        std::fs::write(&real_a, "value-a").expect("write a");
+        std::fs::write(&real_b, "value-b").expect("write b");
+        std::os::unix::fs::symlink(&real_a, &link).expect("symlink");
+
+        let tracker = test_tracker();
+
+        let read_tool = ReadFileTool {
+            read_tracker: tracker.clone(),
+        };
+        read_tool
+            .execute(
+                serde_json::json!({"path": link.to_str().expect("path")}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read");
+
+        // Attacker swaps symlink to point at real_b between read and edit.
+        std::fs::remove_file(&link).expect("remove link");
+        std::os::unix::fs::symlink(&real_b, &link).expect("swap symlink");
+
+        let edit_tool = EditFileTool {
+            read_tracker: tracker,
+        };
+        let result = edit_tool
+            .execute(
+                serde_json::json!({
+                    "path": link.to_str().expect("path"),
+                    "old_string": "value-a",
+                    "new_string": "overwritten",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        // Either the tracker rejects the new canonical target (expected,
+        // since `real_b` was never read) or the O_NOFOLLOW open hits the
+        // swapped symlink and errors. Both outcomes are acceptable; the
+        // critical invariant is that neither file is corrupted.
+        assert!(
+            result.is_error,
+            "edit should be rejected after symlink swap, got: {}",
+            text_content(&result)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real_a).expect("read a"),
+            "value-a",
+            "original target must be untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real_b).expect("read b"),
+            "value-b",
+            "alternate target must be untouched"
+        );
     }
 
     #[tokio::test]

@@ -185,14 +185,38 @@ pub struct ToolDefinition {
 pub enum StreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
-    ThinkingComplete { signature: Option<String> },
-    ToolUseStart { id: String, name: String },
+    ThinkingComplete {
+        signature: Option<String>,
+    },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
     ToolInputDelta(String),
-    ToolUseEnd { input: serde_json::Value },
-    MessageEnd { stop_reason: StopReason },
+    ToolUseEnd {
+        input: serde_json::Value,
+    },
+    /// Emitted in lieu of `ToolUseEnd` when the accumulated tool-call
+    /// arguments fail to parse as JSON. The agent layer must not execute
+    /// the tool; it should surface the parse error back to the model as
+    /// a `ToolResult { is_error: true }` instead.
+    ToolCallRejected {
+        id: String,
+        name: String,
+        reason: String,
+    },
+    MessageEnd {
+        stop_reason: StopReason,
+    },
     Usage(TokenUsage),
     Error(String),
 }
+
+/// Sentinel key inserted into `ToolUse::input` when the upstream tool-call
+/// arguments failed to parse. `resolve_and_execute_tool` checks for this
+/// and short-circuits to an error result instead of invoking the tool
+/// with a potentially surprising default-filled object.
+pub(crate) const INVALID_TOOL_ARGS_MARKER: &str = "_agsh_invalid_arguments";
 
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
@@ -260,19 +284,34 @@ fn finalize_tool_call_accumulators(
                 tracing::trace!("stream event receiver dropped");
                 return has_tools;
             }
-            let input = match serde_json::from_str(&accumulator.arguments) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!("failed to parse tool arguments: {}", error);
-                    serde_json::json!({})
+            match serde_json::from_str::<serde_json::Value>(&accumulator.arguments) {
+                Ok(value) => {
+                    if event_sender
+                        .send(StreamEvent::ToolUseEnd { input: value })
+                        .is_err()
+                    {
+                        tracing::trace!("stream event receiver dropped");
+                        return has_tools;
+                    }
                 }
-            };
-            if event_sender
-                .send(StreamEvent::ToolUseEnd { input })
-                .is_err()
-            {
-                tracing::trace!("stream event receiver dropped");
-                return has_tools;
+                Err(error) => {
+                    tracing::warn!(
+                        tool = %accumulator.name,
+                        "rejecting tool call with unparseable JSON arguments: {}",
+                        error
+                    );
+                    if event_sender
+                        .send(StreamEvent::ToolCallRejected {
+                            id: accumulator.id.clone(),
+                            name: accumulator.name.clone(),
+                            reason: format!("invalid JSON arguments: {}", error),
+                        })
+                        .is_err()
+                    {
+                        tracing::trace!("stream event receiver dropped");
+                        return has_tools;
+                    }
+                }
             }
         }
     }
@@ -325,6 +364,76 @@ pub fn create_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for the "silent `{}` fallback" bug: a tool call with
+    /// unparseable JSON arguments must be rejected via
+    /// [`StreamEvent::ToolCallRejected`] rather than replayed with an
+    /// empty input object (which would run the tool on whatever defaults
+    /// it happens to tolerate).
+    #[test]
+    fn test_finalize_tool_call_accumulators_rejects_invalid_json() {
+        let mut accumulators = std::collections::HashMap::new();
+        accumulators.insert(
+            0,
+            ToolCallAccumulator {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: "{not json".to_string(),
+            },
+        );
+
+        let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
+        let has_tools = finalize_tool_call_accumulators(&mut accumulators, &sender);
+        assert!(has_tools, "accumulator was non-empty");
+
+        let first = receiver.try_recv().expect("ToolUseStart emitted first");
+        assert!(
+            matches!(first, StreamEvent::ToolUseStart { .. }),
+            "expected ToolUseStart, got {:?}",
+            first
+        );
+
+        let second = receiver.try_recv().expect("follow-up event");
+        match second {
+            StreamEvent::ToolCallRejected { id, name, reason } => {
+                assert_eq!(id, "call-1");
+                assert_eq!(name, "read_file");
+                assert!(reason.starts_with("invalid JSON arguments"));
+            }
+            other => panic!("expected ToolCallRejected, got {:?}", other),
+        }
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "no further events after rejection"
+        );
+    }
+
+    #[test]
+    fn test_finalize_tool_call_accumulators_passes_valid_json() {
+        let mut accumulators = std::collections::HashMap::new();
+        accumulators.insert(
+            0,
+            ToolCallAccumulator {
+                id: "call-2".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "/tmp/x"}"#.to_string(),
+            },
+        );
+
+        let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
+        finalize_tool_call_accumulators(&mut accumulators, &sender);
+
+        let first = receiver.try_recv().expect("ToolUseStart");
+        assert!(matches!(first, StreamEvent::ToolUseStart { .. }));
+
+        match receiver.try_recv().expect("ToolUseEnd") {
+            StreamEvent::ToolUseEnd { input } => {
+                assert_eq!(input["path"], "/tmp/x");
+            }
+            other => panic!("expected ToolUseEnd, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_message_user() {

@@ -97,12 +97,21 @@ fn search_with_grep(
     file_glob: Option<&str>,
     max_results: usize,
 ) -> Result<String> {
-    use grep_regex::RegexMatcher;
+    use grep_regex::RegexMatcherBuilder;
 
-    let matcher = RegexMatcher::new(pattern).map_err(|error| AgshError::ToolExecution {
-        tool_name: "search_contents".to_string(),
-        message: format!("invalid regex '{}': {}", pattern, error),
-    })?;
+    // Cap the compiled-regex automaton and DFA cache sizes so an LLM-supplied
+    // pattern like `a{10_000_000}` can't exhaust host memory during compile.
+    const PATTERN_SIZE_LIMIT: usize = 1 << 20;
+    const DFA_SIZE_LIMIT: usize = 1 << 20;
+
+    let matcher = RegexMatcherBuilder::new()
+        .size_limit(PATTERN_SIZE_LIMIT)
+        .dfa_size_limit(DFA_SIZE_LIMIT)
+        .build(pattern)
+        .map_err(|error| AgshError::ToolExecution {
+            tool_name: "search_contents".to_string(),
+            message: format!("invalid or oversized regex '{}': {}", pattern, error),
+        })?;
 
     let mut results = Vec::new();
     let path = std::path::Path::new(search_path);
