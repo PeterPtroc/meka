@@ -1,3 +1,8 @@
+//! Anthropic Claude provider. Handles the Messages API (streaming and
+//! non-streaming), OAuth/PKCE token exchange and refresh, request-body
+//! patching for the Claude Code billing/attestation header, and per-call
+//! extended-thinking overrides.
+
 use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{Arc, LazyLock};
 
@@ -25,7 +30,7 @@ const CC_SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official
 /// Fingerprint salt. Must match claude-code `src/utils/fingerprint.ts`.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
 
-/// SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3].
+/// `SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3]`.
 fn compute_fingerprint(message_text: &str, version: &str) -> String {
     let indices = [4, 7, 20];
     let chars: String = indices

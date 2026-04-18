@@ -1,3 +1,8 @@
+//! Terminal rendering: streaming markdown renderer (syntect highlighting +
+//! termimad), tool-call indicators, todo-list display, and helpers for
+//! one-off CLI status/error messages. Owns the embedded Monokai Extended
+//! theme used for code blocks.
+
 use std::io::{self, Write};
 use std::sync::OnceLock;
 
@@ -568,6 +573,19 @@ pub fn render_session_id(label: &str, id: &str) {
 
 pub fn render_hint(message: &str) {
     eprintln!("{}", message.with(Color::DarkGrey));
+}
+
+/// Print a single-line CLI error to stderr in the project's standard format.
+pub fn render_error(error: &dyn std::fmt::Display) {
+    eprintln!("{} {}", "Error:".with(Color::Red), error);
+}
+
+/// Print the "no provider configured" hint shown when the agent fails to
+/// initialize. Centralized so the wording stays in sync everywhere.
+pub fn render_provider_setup_hint() {
+    eprintln!("Configure a provider and model to use agsh.");
+    eprintln!("Example: agsh --provider openai --model gpt-4o \"hello\"");
+    eprintln!("Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables.");
 }
 
 pub fn render_thinking_block(thinking: &str, show_full: bool) {

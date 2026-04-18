@@ -1,3 +1,8 @@
+//! Image format handling: detects the format of fetched/loaded bytes and,
+//! when needed, transcodes uncommon formats (TIFF, ICO, HDR, EXR, TGA, PNM,
+//! QOI, DDS, Farbfeld) into PNG so providers can accept them as multimodal
+//! input. Also encodes payloads to base64 for the API.
+
 use std::io::Cursor;
 
 use base64::Engine;

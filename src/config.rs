@@ -1,3 +1,7 @@
+//! Configuration: parses `~/.config/agsh/config.toml`, layers CLI overrides
+//! and environment variables on top, and produces a [`ResolvedConfig`] that
+//! the rest of the binary consumes.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

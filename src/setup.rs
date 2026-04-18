@@ -1,3 +1,7 @@
+//! First-launch interactive configuration wizard. Walks the user through
+//! provider selection, runs the Claude OAuth/PKCE flow when applicable, and
+//! writes the resulting `~/.config/agsh/config.toml`.
+
 use std::io::{self, Write};
 
 use base64::Engine;

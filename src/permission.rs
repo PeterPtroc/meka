@@ -1,3 +1,9 @@
+//! Permission state machine governing what tools the agent may invoke.
+//! Levels: `none` (read-only, no env info), `read` (filesystem reads),
+//! `ask` (writes prompt the user), `write` (writes go through). The level is
+//! held in an [`AtomicU8`] so the REPL can mutate it concurrently with the
+//! agent loop.
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;

@@ -1,3 +1,7 @@
+//! `spawn_agent` tool: delegates a self-contained research/exploration task
+//! to a fresh sub-agent with its own conversation history, returning the
+//! sub-agent's final report as a single tool result.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

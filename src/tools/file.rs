@@ -1,3 +1,7 @@
+//! Filesystem tools: `read_file`, `write_file`, and `edit_file`. Image files
+//! are returned as multimodal Image content blocks (transcoding to PNG when
+//! needed). Writes are gated by the active permission level.
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;

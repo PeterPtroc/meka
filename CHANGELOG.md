@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `tests/cli.rs` end-to-end smoke tests for `--version`, `--help`, unknown flags.
+- `render::render_error` and `render::render_provider_setup_hint` helpers for consistent CLI output.
+- Module-level `//!` doc comments across the codebase; CI now runs `cargo doc -D warnings`.
+- CI test job runs on Linux, macOS, and Windows so platform-specific sandbox code is exercised.
+
+### Fixed
+
+- `default_database_path` fallback no longer returns a literal `~/.local/share`; falls back to
+  `$HOME/.local/share` and surfaces a configuration error when neither is available.
+
 ## [0.11.0] - 2026-04-17
 
 ### Added

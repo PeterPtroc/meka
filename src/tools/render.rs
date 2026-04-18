@@ -1,3 +1,7 @@
+//! `render_image` tool: turns base64 image data (provided inline or read
+//! from a scratchpad entry) into a multimodal Image content block so the
+//! provider can view it.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

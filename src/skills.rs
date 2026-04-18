@@ -1,3 +1,8 @@
+//! Skill discovery and loading. Walks `~/.config/agsh/skills/<name>/SKILL.md`,
+//! parses the YAML frontmatter (description, when_to_use, allowed_tools,
+//! version, user_invocable), and exposes the resulting [`Skill`] structs to
+//! the agent for system-prompt injection and `skill` tool dispatch.
+
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;

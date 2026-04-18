@@ -1,3 +1,11 @@
+//! `agsh` — an agentic shell where you describe what you want in natural
+//! language and an LLM-backed agent decides which tools to run.
+//!
+//! The binary wires together: a [`provider`] (Claude or OpenAI), a [`session`]
+//! store backed by SQLite, a [`tools`] registry, an MCP client manager, and a
+//! [`shell`] REPL. The [`agent`] module owns the per-turn loop that streams
+//! provider output and dispatches tool calls.
+
 mod agent;
 mod cli;
 mod config;
@@ -348,12 +356,8 @@ async fn run_interactive(
     let credential = match resolve_credential(&config) {
         Ok(credential) => credential,
         Err(error) => {
-            eprintln!("Error: {}", error);
-            eprintln!("Configure a provider and model to use agsh.");
-            eprintln!("Example: agsh --provider openai --model gpt-4o \"hello\"");
-            eprintln!(
-                "Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables."
-            );
+            render::render_error(&error);
+            render::render_provider_setup_hint();
             drop(agent_event_sender);
             repl_handle.await?;
             return Ok(());
@@ -372,12 +376,8 @@ async fn run_interactive(
     {
         Ok(agent) => agent,
         Err(error) => {
-            eprintln!("Error: {}", error);
-            eprintln!("Configure a provider and model to use agsh.");
-            eprintln!("Example: agsh --provider openai --model gpt-4o \"hello\"");
-            eprintln!(
-                "Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables."
-            );
+            render::render_error(&error);
+            render::render_provider_setup_hint();
             drop(agent_event_sender);
             repl_handle.await?;
             return Ok(());
@@ -408,7 +408,7 @@ async fn run_interactive(
                         }
                     }
                     Err(error) => {
-                        eprintln!("Error: {}", error);
+                        render::render_error(&error);
                         if config.newline_before_prompt {
                             println!();
                         }
@@ -436,14 +436,14 @@ async fn run_interactive(
                                 render::render_hint("Session compacted.");
                             }
                             Err(error) => {
-                                eprintln!("Error: {}", error);
+                                render::render_error(&error);
                             }
                         }
                     }
                     shell::SlashCommand::Export => match &session_id {
                         Some(id) => {
                             if let Err(error) = export_session(&session_manager, *id, None).await {
-                                eprintln!("Error: {}", error);
+                                render::render_error(&error);
                             }
                         }
                         None => eprintln!("No active session to export."),

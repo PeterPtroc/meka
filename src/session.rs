@@ -1,3 +1,8 @@
+//! SQLite-backed session store. Persists messages, large tool outputs (so
+//! they can be referenced from the conversation by handle), OAuth tokens,
+//! MCP credentials, and a per-session lock that prevents two `agsh` processes
+//! from racing on the same conversation.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,18 +39,27 @@ pub struct SessionManager {
     connection: Arc<Connection>,
 }
 
-fn default_database_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("agsh")
-        .join("sessions.db")
+fn default_database_path() -> Result<PathBuf> {
+    // `dirs::data_dir()` honors XDG_DATA_HOME on Linux and the platform's
+    // standard data directory elsewhere. Fall back to `$HOME/.local/share`
+    // so a tilde never reaches the filesystem (which doesn't expand it).
+    let base = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))
+        .ok_or_else(|| {
+            AgshError::Config(
+                "could not determine a data directory; set XDG_DATA_HOME or HOME, \
+                 or pass an explicit session database path"
+                    .into(),
+            )
+        })?;
+    Ok(base.join("agsh").join("sessions.db"))
 }
 
 impl SessionManager {
     pub async fn open(path: Option<&Path>) -> Result<Self> {
         let database_path = match path {
             Some(path) => path.to_path_buf(),
-            None => default_database_path(),
+            None => default_database_path()?,
         };
 
         if let Some(parent) = database_path.parent() {

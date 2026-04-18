@@ -1,3 +1,7 @@
+//! Builds the system prompt and per-turn context: tool catalog, environment
+//! info (PWD, date, shell, OS), todo list, and skill summaries. Permission
+//! mode gates whether environment info is included.
+
 use crate::permission::Permission;
 use crate::provider::ToolDefinition;
 use crate::session::ToolOutputSummary;

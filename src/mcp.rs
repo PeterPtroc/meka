@@ -1,3 +1,8 @@
+//! Model Context Protocol (MCP) client integration. Manages the lifecycle of
+//! configured MCP servers (stdio child processes or streamable HTTP), exposes
+//! their tools through the regular [`crate::tools`] registry, and handles
+//! OAuth/JWT authentication for HTTP transports.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

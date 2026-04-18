@@ -1,3 +1,7 @@
+//! Interactive REPL: reedline-driven prompt loop, slash-command parsing,
+//! `!command` shell pass-through, and the channels that exchange events
+//! between the REPL thread and the agent loop.
+
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 

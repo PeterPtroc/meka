@@ -1,3 +1,7 @@
+//! Tool registry and built-in tool modules. Owns the [`ToolRegistry`] type
+//! that the agent loop consults to resolve tool names to executable handlers,
+//! plus the per-tool submodules (file, find, grep, scratchpad, shell, etc.).
+
 mod file;
 mod find;
 mod grep;

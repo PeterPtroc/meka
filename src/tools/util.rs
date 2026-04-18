@@ -1,3 +1,5 @@
+//! Small shared helpers for tool-input parsing and validation.
+
 use crate::error::{AgshError, Result};
 
 pub(super) fn require_str(

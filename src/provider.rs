@@ -1,3 +1,7 @@
+//! LLM provider abstraction. Defines the [`Provider`] trait, the shared
+//! message/content/tool types, and the [`create_provider`] factory that
+//! returns a concrete Claude or OpenAI-compatible implementation.
+
 mod claude;
 mod openai;
 

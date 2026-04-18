@@ -1,3 +1,7 @@
+//! `execute_command` tool. Spawns a shell process, optionally constrained by
+//! the platform sandbox (Landlock/sandbox-exec) when permissions are
+//! read-only, and streams stdout/stderr back to the agent.
+
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 

@@ -1,3 +1,6 @@
+//! `search_contents` tool: ripgrep-style content search powered by the
+//! `grep-*` crates. Honors `.gitignore` and supports glob filtering.
+
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 

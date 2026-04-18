@@ -1,3 +1,8 @@
+//! Scratchpad: session-scoped, persisted key/value text store. Oversized
+//! tool outputs are automatically redirected here and replaced inline with a
+//! preview + handle, keeping the conversation context bounded. Provides
+//! write/read/edit/list/delete operations plus a regex search mode.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

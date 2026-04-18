@@ -1,7 +1,9 @@
-/// Filesystem sandboxing for read-only command execution.
-///
-/// On Linux, uses Landlock LSM (kernel 5.13+) to restrict child processes
-/// to read-only filesystem access. On macOS, uses sandbox-exec.
+//! Filesystem sandboxing for read-only command execution.
+//!
+//! On Linux, uses Landlock LSM (kernel 5.13+) to restrict child processes
+//! to read-only filesystem access. On macOS, uses sandbox-exec. On other
+//! platforms, sandboxing is unavailable and shell execution is gated by the
+//! permission level alone.
 
 #[derive(Debug, Clone, Copy)]
 pub enum SandboxCapability {

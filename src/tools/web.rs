@@ -1,3 +1,6 @@
+//! Web tools: `fetch_url` (HTTP GET with HTML→markdown conversion or
+//! multimodal image return) and `web_search` (Google/Bing result scraping).
+
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
@@ -582,6 +585,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::invalid_regex,
+        reason = "intentionally invalid: tests parser rejection"
+    )]
     fn test_regex_invalid_pattern() {
         assert!(Regex::new(r"[invalid").is_err());
     }

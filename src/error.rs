@@ -1,3 +1,7 @@
+//! Crate-wide [`AgshError`] enum and [`Result`] alias. All non-binary code
+//! paths return `Result<T, AgshError>`; the `main` binary wraps these in
+//! `anyhow::Result` for top-level reporting.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

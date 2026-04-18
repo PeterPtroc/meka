@@ -1,3 +1,5 @@
+//! `find_files` tool: glob-pattern file discovery.
+
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 

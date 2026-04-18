@@ -1,3 +1,7 @@
+//! Per-turn agent loop: streams provider output, dispatches tool calls, and
+//! persists the resulting messages to the session store. Also handles
+//! mid-conversation auto-compaction when the input-token budget is exceeded.
+
 use std::sync::Arc;
 
 use tokio::sync::mpsc;

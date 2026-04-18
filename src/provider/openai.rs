@@ -1,3 +1,7 @@
+//! OpenAI-compatible provider. Targets the Chat Completions API and works
+//! with any compatible endpoint (vLLM, Together, Groq, local proxies, etc.)
+//! by way of the `--base-url` flag and `OPENAI_API_KEY`.
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

@@ -1,3 +1,7 @@
+//! Clap-derived CLI definition. Owns the top-level argument struct, the
+//! subcommand enum (`setup`, `export`, `delete`, `list`), and the small
+//! parsers for permission/render-mode flag values.
+
 use clap::Parser;
 
 use crate::permission::Permission;
@@ -10,7 +14,7 @@ pub enum Command {
     Export {
         /// Session UUID to export
         session_id: uuid::Uuid,
-        /// Output file path (default: session-<id>.md). Use "-" for stdout.
+        /// Output file path (default: `session-<id>.md`). Use "-" for stdout.
         #[arg(short, long)]
         output: Option<String>,
     },
