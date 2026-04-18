@@ -16,7 +16,7 @@ Execute a shell command and return its output.
 
 ### Behavior
 
-- Executes the command via `sh -c "<command>"` on Unix or `powershell -Command "<command>"` on Windows.
+- Executes the command via `sh -c "<command>"` on Unix, or `powershell.exe -NoProfile -NonInteractive -Command "<command>"` on Windows (same shell in both sandboxed and unsandboxed mode).
 - Captures both stdout and stderr.
 - Returns the exit code along with the output if non-zero.
 - Output is truncated to 30,000 characters. Oversized output is automatically saved to the scratchpad.
@@ -25,11 +25,12 @@ Execute a shell command and return its output.
 
 ### Read-Only Sandbox
 
-In **read mode**, commands run inside a read-only filesystem sandbox. The child process can read files and execute programs, but any attempt to write to the filesystem is blocked by the kernel:
+In **read mode**, commands run inside a filesystem sandbox that blocks writes to the user's real data. Reads and program execution still work normally:
 
-- **Linux**: Uses [Landlock LSM](https://landlock.io/) (kernel 5.13+). The child process is restricted via `landlock_restrict_self` before exec. Only `READ_FILE`, `READ_DIR`, and `EXECUTE` access rights are granted.
+- **Linux**: Uses [Landlock LSM](https://landlock.io/) (kernel 5.13+). The child process is restricted via `landlock_restrict_self` before exec. Only `READ_FILE`, `READ_DIR`, and `EXECUTE` access rights are granted — writes anywhere on the filesystem return `EACCES`.
 - **macOS**: Uses `sandbox-exec` with a SBPL profile that denies all `file-write*` operations.
-- **Windows / unsupported platforms**: Shell commands are not available in read mode. Switch to write mode to execute commands.
+- **Windows**: Spawns the child with a duplicated primary token dropped to **Low integrity** (`SECURITY_MANDATORY_LOW_RID`) via `SetTokenInformation(TokenIntegrityLevel, …)`. Writes to the home directory, `%APPDATA%`, Program Files, and system directories — any location with Medium-or-higher integrity ACLs — are blocked by the kernel. Unlike Landlock, Low integrity is not a total write-denial: the child can still write to the small residual Low-integrity-writable surface (`%LOCALAPPDATA%\Low`, `%TEMP%\Low`, any path with an explicit Low-integrity write ACE) and to files it creates itself (which inherit Low integrity). For practical purposes this matches the guarantees of `sandbox-exec` and prevents the agent from touching user data, but full "zero writes anywhere" on Windows would require Windows Sandbox or an AppContainer and is out of scope.
+- **Unsupported platforms**: Shell commands are not available in read mode — switch to write mode to execute commands without a sandbox.
 
 In **write mode**, commands run without any sandbox restrictions.
 

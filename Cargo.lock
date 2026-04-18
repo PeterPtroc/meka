@@ -54,6 +54,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.2",
  "uuid",
+ "windows-sys 0.59.0",
  "winres",
 ]
 

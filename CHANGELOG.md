@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `render::render_error` and `render::render_provider_setup_hint` helpers for consistent CLI output.
 - Module-level `//!` doc comments across the codebase; CI now runs `cargo doc -D warnings`.
 - CI test job runs on Linux, macOS, and Windows so platform-specific sandbox code is exercised.
+- Windows `execute_command` sandbox via Low-integrity token (spawned via `CreateProcessAsUserW`
+  running `powershell.exe -NoProfile -NonInteractive -Command`); blocks writes to user data,
+  drains stdout/stderr concurrently so large outputs don't deadlock on the Windows pipe buffer.
+  Sandbox token has all privileges disabled (defense-in-depth). Handle inheritance is restricted
+  to the three child-bound handles via `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, eliminating the
+  classic `CreatePipe`→`SetHandleInformation`→`CreateProcess` leak window.
+- Windows sandbox falls back to `CreateProcessWithTokenW` when `CreateProcessAsUserW` is denied
+  for missing `SE_INCREASE_QUOTA_NAME` privilege (common on locked-down accounts).
 
 ### Changed
 
@@ -23,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unlock_session` and `SessionLockGuard` are removed (drop the handle to release).
 - Schema migration drops the legacy `sessions.locked_by` column, automatically unsticking
   any session left locked by an earlier crashed process.
+- `execute_command` on Windows now invokes PowerShell with `-NoProfile -NonInteractive` in
+  both sandboxed and unsandboxed mode; no more per-user profile scripts or hangs on prompts.
+- `execute_command` no longer inherits the agent's stdin on any platform; children that read
+  stdin now see immediate EOF instead of racing the agent's own input loop.
 
 ### Fixed
 
@@ -30,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$HOME/.local/share` and surfaces a configuration error when neither is available.
 - Stuck sessions caused by PID-based locking surviving a hard kill (closed terminal, OOM,
   `SIGKILL`, etc.). Resolved by switching to OS-managed file locks.
+- Windows sandbox normal-exit path no longer hangs indefinitely when the child leaves a
+  grandchild process holding the stdout/stderr pipes open; drain is now bounded by a
+  5-second timeout and truncated output is flagged in the tool result.
 
 ## [0.11.0] - 2026-04-17
 
