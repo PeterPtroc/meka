@@ -21,9 +21,6 @@ pub enum AgshError {
     #[error("tool execution error: {tool_name}: {message}")]
     ToolExecution { tool_name: String, message: String },
 
-    #[error("session not found: {0}")]
-    SessionNotFound(uuid::Uuid),
-
     #[error("session already attached by another process: {0}")]
     SessionLocked(uuid::Uuid),
 

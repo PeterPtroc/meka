@@ -330,7 +330,8 @@ async fn run_interactive(
 
     // Resolve session resumption BEFORE spawning the REPL so the
     // "Resuming session" message appears before the first prompt.
-    let (mut session_id, mut messages) = resolve_session_resume(&session_manager, &config).await?;
+    let (mut session_id, mut messages, mut session_lock) =
+        resolve_session_resume(&session_manager, &config).await?;
 
     if !messages.is_empty() {
         reprint_last_message(&messages, config.render_mode);
@@ -415,6 +416,18 @@ async fn run_interactive(
                     }
                 }
 
+                // The first turn creates the session if one wasn't resumed;
+                // claim the file lock as soon as the ID is known so a second
+                // agsh invocation can't attach to it.
+                if session_lock.is_none()
+                    && let Some(id) = session_id
+                {
+                    match session_manager.lock_session(id) {
+                        Ok(lock) => session_lock = Some(lock),
+                        Err(error) => render::render_error(&error),
+                    }
+                }
+
                 signal_handle.abort();
 
                 if agent_event_sender
@@ -467,14 +480,14 @@ async fn run_interactive(
     drop(agent_event_sender);
     repl_handle.await?;
 
-    // Create a lock guard for the session so it gets unlocked even on panic.
-    // The guard's Drop impl spawns an async unlock task.
-    let _lock_guard = session_id.map(|id| {
-        if config.show_session_id_on_exit {
-            render::render_session_id("Leaving session", &id.to_string());
-        }
-        session::SessionLockGuard::new(session_manager, id)
-    });
+    if let Some(id) = session_id
+        && config.show_session_id_on_exit
+    {
+        render::render_session_id("Leaving session", &id.to_string());
+    }
+    // Drop after the "Leaving session" message so the lock is held until the
+    // very end; the OS releases the underlying flock when the FD closes.
+    drop(session_lock);
 
     if let Some(manager) = mcp_manager {
         manager.shutdown().await;
@@ -711,20 +724,24 @@ fn reprint_last_message(messages: &[provider::Message], render_mode: render::Ren
 async fn resolve_session_resume(
     session_manager: &SessionManager,
     config: &ResolvedConfig,
-) -> anyhow::Result<(Option<uuid::Uuid>, Vec<provider::Message>)> {
+) -> anyhow::Result<(
+    Option<uuid::Uuid>,
+    Vec<provider::Message>,
+    Option<session::SessionLock>,
+)> {
     let Some(value) = &config.continue_session else {
-        return Ok((None, Vec::new()));
+        return Ok((None, Vec::new(), None));
     };
 
     if value == "last" {
         match session_manager.last_session_id().await? {
             Some(id) => {
-                session_manager.lock_session(id).await?;
+                let lock = session_manager.lock_session(id)?;
                 render::render_session_id("Resuming session", &id.to_string());
                 let messages = load_session_messages(session_manager, id).await?;
-                Ok((Some(id), messages))
+                Ok((Some(id), messages, Some(lock)))
             }
-            None => Ok((None, Vec::new())),
+            None => Ok((None, Vec::new(), None)),
         }
     } else {
         let id: uuid::Uuid = value
@@ -733,10 +750,10 @@ async fn resolve_session_resume(
         if !session_manager.session_exists(id).await? {
             anyhow::bail!("session not found: {}", id);
         }
-        session_manager.lock_session(id).await?;
+        let lock = session_manager.lock_session(id)?;
         render::render_session_id("Resuming session", &id.to_string());
         let messages = load_session_messages(session_manager, id).await?;
-        Ok((Some(id), messages))
+        Ok((Some(id), messages, Some(lock)))
     }
 }
 

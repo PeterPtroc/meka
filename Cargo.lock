@@ -21,6 +21,7 @@ dependencies = [
  "dirs",
  "eventsource-stream",
  "fast_html2md",
+ "fd-lock",
  "futures",
  "glob",
  "grep-matcher",

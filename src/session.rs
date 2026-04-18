@@ -1,11 +1,14 @@
 //! SQLite-backed session store. Persists messages, large tool outputs (so
 //! they can be referenced from the conversation by handle), OAuth tokens,
-//! MCP credentials, and a per-session lock that prevents two `agsh` processes
-//! from racing on the same conversation.
+//! and MCP credentials. Per-session mutual exclusion is provided by an
+//! OS-level file lock ([`SessionLock`]) so the kernel reclaims it whenever
+//! the holder dies — no PID-aliveness check, no risk of stale locks.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fd_lock::{RwLock as FdRwLock, RwLockWriteGuard as FdRwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use tokio_rusqlite::Connection;
 use uuid::Uuid;
@@ -37,6 +40,22 @@ pub struct ToolOutputSummary {
 #[derive(Clone)]
 pub struct SessionManager {
     connection: Arc<Connection>,
+    lock_dir: PathBuf,
+}
+
+/// RAII handle for an exclusive per-session OS file lock. Holding this value
+/// keeps the underlying lock file descriptor open; dropping it (including
+/// when the process exits or panics) closes the FD, which causes the kernel
+/// to release the `flock`/`LockFileEx` lock automatically. There is no
+/// "stale lock" failure mode — even `SIGKILL` is safe.
+///
+/// Internally this is a self-referential struct: `_guard` borrows from
+/// `*_lock` (a `Box` for stable heap address). Field declaration order
+/// guarantees `_guard` is dropped before `_lock`, which is the safety
+/// invariant of the lifetime transmute used during construction.
+pub struct SessionLock {
+    _guard: FdRwLockWriteGuard<'static, File>,
+    _lock: Box<FdRwLock<File>>,
 }
 
 fn default_database_path() -> Result<PathBuf> {
@@ -62,9 +81,22 @@ impl SessionManager {
             None => default_database_path()?,
         };
 
-        if let Some(parent) = database_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // In-memory SQLite databases (used by tests) have no on-disk parent;
+        // give each `open()` call its own ephemeral lock dir under the system
+        // temp directory so concurrent tests don't share lock files.
+        let is_in_memory = database_path == Path::new(":memory:");
+        let lock_dir = if is_in_memory {
+            std::env::temp_dir().join(format!("agsh-test-locks-{}", Uuid::new_v4()))
+        } else {
+            if let Some(parent) = database_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("locks")
+        };
+        std::fs::create_dir_all(&lock_dir)?;
 
         let connection = Connection::open(&database_path)
             .await
@@ -72,6 +104,7 @@ impl SessionManager {
 
         let manager = Self {
             connection: Arc::new(connection),
+            lock_dir,
         };
         manager.initialize_schema().await?;
         Ok(manager)
@@ -85,7 +118,6 @@ impl SessionManager {
                         id TEXT PRIMARY KEY,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        locked_by TEXT,
                         metadata TEXT
                     );
 
@@ -131,6 +163,22 @@ impl SessionManager {
                     connection.execute_batch("DROP TABLE tool_outputs")?;
                 }
 
+                // Migration: drop the legacy `sessions.locked_by` column.
+                // Locks are now OS file locks managed via `SessionLock`, so
+                // any value left in this column is meaningless and a stale
+                // PID can permanently lock a session if the column survives.
+                let has_locked_by: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'locked_by'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
+                if has_locked_by {
+                    connection.execute_batch("ALTER TABLE sessions DROP COLUMN locked_by")?;
+                }
+
                 connection.execute_batch(
                     "CREATE TABLE IF NOT EXISTS tool_outputs (
                         session_id TEXT NOT NULL,
@@ -151,13 +199,12 @@ impl SessionManager {
     pub async fn create_session(&self) -> Result<Uuid> {
         let session_id = Uuid::new_v4();
         let now = chrono::Utc::now().to_rfc3339();
-        let pid = std::process::id().to_string();
 
         self.connection
             .call(move |connection| {
                 connection.execute(
-                    "INSERT INTO sessions (id, created_at, updated_at, locked_by) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![session_id.to_string(), now, now, pid],
+                    "INSERT INTO sessions (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id.to_string(), now, now],
                 )?;
                 Ok(())
             })
@@ -167,66 +214,54 @@ impl SessionManager {
         Ok(session_id)
     }
 
-    pub async fn lock_session(&self, session_id: Uuid) -> Result<()> {
-        let pid = std::process::id().to_string();
+    /// Acquire an exclusive OS file lock on the session. Returns a
+    /// [`SessionLock`] handle whose lifetime owns the lock; drop it (or let
+    /// the process exit) to release.
+    ///
+    /// The session must already exist in the database. Returns
+    /// [`AgshError::SessionLocked`] if another live process holds the lock.
+    pub fn lock_session(&self, session_id: Uuid) -> Result<SessionLock> {
+        let path = self.lock_dir.join(format!("{}.lock", session_id));
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| {
+                AgshError::Database(format!(
+                    "failed to open session lock file '{}': {}",
+                    path.display(),
+                    error
+                ))
+            })?;
 
-        self.connection
-            .call(move |connection| {
-                let existing_lock: Option<String> = connection
-                    .query_row(
-                        "SELECT locked_by FROM sessions WHERE id = ?1",
-                        rusqlite::params![session_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| {
-                        tokio_rusqlite::Error::Other(Box::new(AgshError::SessionNotFound(
-                            session_id,
-                        )))
-                    })?;
+        let mut lock = Box::new(FdRwLock::new(file));
+        let guard = match lock.try_write() {
+            Ok(guard) => guard,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(AgshError::SessionLocked(session_id));
+            }
+            Err(error) => {
+                return Err(AgshError::Database(format!(
+                    "failed to acquire session lock '{}': {}",
+                    path.display(),
+                    error
+                )));
+            }
+        };
 
-                if let Some(locked_pid) = existing_lock
-                    && locked_pid != pid
-                    && is_process_alive(&locked_pid)
-                {
-                    return Err(tokio_rusqlite::Error::Other(Box::new(
-                        AgshError::SessionLocked(session_id),
-                    )));
-                }
+        // SAFETY: `guard` borrows from `*lock`. We move the box (not the
+        // RwLock inside it) into the returned `SessionLock`, so the RwLock's
+        // heap address is stable for as long as the box lives. Field
+        // declaration order in `SessionLock` ensures `_guard` is dropped
+        // before `_lock`, so the borrow never outlives the borrowee.
+        let guard: FdRwLockWriteGuard<'static, File> = unsafe { std::mem::transmute(guard) };
 
-                connection.execute(
-                    "UPDATE sessions SET locked_by = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![pid, chrono::Utc::now().to_rfc3339(), session_id.to_string()],
-                )?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| match error {
-                tokio_rusqlite::Error::Other(inner) => {
-                    if let Some(agsh_error) = inner.downcast_ref::<AgshError>() {
-                        match agsh_error {
-                            AgshError::SessionNotFound(id) => AgshError::SessionNotFound(*id),
-                            AgshError::SessionLocked(id) => AgshError::SessionLocked(*id),
-                            _ => AgshError::Database(format!("failed to lock session: {}", inner)),
-                        }
-                    } else {
-                        AgshError::Database(format!("failed to lock session: {}", inner))
-                    }
-                }
-                other => AgshError::Database(format!("failed to lock session: {}", other)),
-            })
-    }
-
-    pub async fn unlock_session(&self, session_id: Uuid) -> Result<()> {
-        self.connection
-            .call(move |connection| {
-                connection.execute(
-                    "UPDATE sessions SET locked_by = NULL, updated_at = ?1 WHERE id = ?2",
-                    rusqlite::params![chrono::Utc::now().to_rfc3339(), session_id.to_string()],
-                )?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| AgshError::Database(format!("failed to unlock session: {}", error)))
+        Ok(SessionLock {
+            _guard: guard,
+            _lock: lock,
+        })
     }
 
     pub async fn save_message(&self, session_id: Uuid, role: &str, content: &str) -> Result<()> {
@@ -657,37 +692,6 @@ impl SessionManager {
     }
 }
 
-/// RAII guard that unlocks a session when dropped. Ensures the session lock
-/// is released even if the owning scope exits via panic or early return.
-pub struct SessionLockGuard {
-    session_manager: SessionManager,
-    session_id: Uuid,
-}
-
-impl SessionLockGuard {
-    pub fn new(session_manager: SessionManager, session_id: Uuid) -> Self {
-        Self {
-            session_manager,
-            session_id,
-        }
-    }
-}
-
-impl Drop for SessionLockGuard {
-    fn drop(&mut self) {
-        let manager = self.session_manager.clone();
-        let id = self.session_id;
-        // Spawn a blocking task to unlock asynchronously. This is fire-and-forget
-        // because we're in a Drop impl and can't await. The `is_process_alive`
-        // check in `lock_session` provides a secondary safety net if this fails.
-        tokio::task::spawn(async move {
-            if let Err(error) = manager.unlock_session(id).await {
-                tracing::warn!("failed to unlock session on drop: {}", error);
-            }
-        });
-    }
-}
-
 #[derive(Clone)]
 pub struct TokenStore {
     connection: Arc<Connection>,
@@ -831,32 +835,6 @@ impl SessionManager {
     }
 }
 
-fn is_process_alive(pid_str: &str) -> bool {
-    let Ok(pid) = pid_str.parse::<u32>() else {
-        return false;
-    };
-
-    #[cfg(unix)]
-    {
-        // SAFETY: `kill(pid, 0)` with signal 0 does not send a signal; it only
-        // checks whether the process exists and is reachable. The `u32 → i32`
-        // cast is safe because PIDs on Linux/macOS never exceed `i32::MAX`.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-
-    #[cfg(windows)]
-    {
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|output| {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                stdout.contains(&pid.to_string())
-            })
-            .unwrap_or(false)
-    }
-}
-
 /// Strip `<context>...</context>` tags from a stored user message,
 /// returning only the actual user input.
 pub fn strip_context_tags(text: &str) -> &str {
@@ -951,28 +929,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_locking() {
+    async fn test_session_locking_acquire_and_release() {
         let manager = test_manager().await;
         let session_id = manager
             .create_session()
             .await
             .expect("failed to create session");
 
-        manager
+        let lock = manager
             .lock_session(session_id)
-            .await
             .expect("failed to lock session");
 
-        // Same PID should be able to re-lock
-        manager
-            .lock_session(session_id)
-            .await
-            .expect("failed to re-lock session");
+        // While the lock handle is alive, a second attempt must fail.
+        match manager.lock_session(session_id) {
+            Err(AgshError::SessionLocked(id)) => assert_eq!(id, session_id),
+            other => panic!("expected SessionLocked, got {:?}", other.map(|_| "Ok(_)")),
+        }
 
-        manager
-            .unlock_session(session_id)
-            .await
-            .expect("failed to unlock session");
+        // Dropping the handle releases the OS lock; re-acquisition succeeds.
+        drop(lock);
+        let _lock2 = manager
+            .lock_session(session_id)
+            .expect("failed to re-acquire session lock after drop");
     }
 
     #[tokio::test]

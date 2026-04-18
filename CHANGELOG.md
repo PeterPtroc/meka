@@ -14,10 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Module-level `//!` doc comments across the codebase; CI now runs `cargo doc -D warnings`.
 - CI test job runs on Linux, macOS, and Windows so platform-specific sandbox code is exercised.
 
+### Changed
+
+- Session locking now uses an OS file lock (`flock`/`LockFileEx` via `fd-lock`) instead of a
+  PID stored in `sessions.locked_by`. The kernel releases the lock when the holder dies for
+  any reason, so a hard kill can no longer leave a session permanently stuck.
+- `SessionManager::lock_session` is now sync and returns a `SessionLock` RAII handle;
+  `unlock_session` and `SessionLockGuard` are removed (drop the handle to release).
+- Schema migration drops the legacy `sessions.locked_by` column, automatically unsticking
+  any session left locked by an earlier crashed process.
+
 ### Fixed
 
 - `default_database_path` fallback no longer returns a literal `~/.local/share`; falls back to
   `$HOME/.local/share` and surfaces a configuration error when neither is available.
+- Stuck sessions caused by PID-based locking surviving a hard kill (closed terminal, OOM,
+  `SIGKILL`, etc.). Resolved by switching to OS-managed file locks.
 
 ## [0.11.0] - 2026-04-17
 
