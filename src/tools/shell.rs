@@ -44,6 +44,7 @@ impl Tool for ExecuteCommandTool {
                 },
                 "required": ["command"]
             }),
+            ..Default::default()
         }
     }
 

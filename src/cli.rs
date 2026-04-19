@@ -32,6 +32,61 @@ pub enum Command {
         #[arg(short = 'n', long, default_value = "20")]
         limit: u32,
     },
+    /// Manage MCP servers (list, add, remove, reconnect, login, logout)
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum McpAction {
+    /// List all configured MCP servers
+    List,
+    /// Print the configuration for one server
+    Get { name: String },
+    /// Connect once and print `ok` if the handshake succeeds
+    Reconnect { name: String },
+    /// Force interactive OAuth for a server with `auth` configured
+    Login { name: String },
+    /// Revoke cached credentials for a server
+    Logout { name: String },
+    /// Add a server to config.toml
+    Add {
+        /// Unique server name (alphanumerics, `-`, `_` only)
+        name: String,
+        /// Transport: "stdio" or "http"
+        #[arg(long, value_parser = parse_mcp_transport)]
+        transport: crate::config::McpTransport,
+        /// Command path for stdio transport
+        #[arg(long)]
+        command: Option<String>,
+        /// Argument for stdio transport (repeat to pass multiple)
+        #[arg(long = "arg", value_name = "ARG")]
+        args: Vec<String>,
+        /// Environment variable for stdio transport (KEY=VALUE; repeat)
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// URL for http transport
+        #[arg(long)]
+        url: Option<String>,
+        /// Permission level: none, read, ask, write
+        #[arg(long)]
+        permission: Option<String>,
+    },
+    /// Remove a server from config.toml and clear stored creds
+    Remove { name: String },
+}
+
+fn parse_mcp_transport(s: &str) -> std::result::Result<crate::config::McpTransport, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "stdio" => Ok(crate::config::McpTransport::Stdio),
+        "http" => Ok(crate::config::McpTransport::Http),
+        other => Err(format!(
+            "unknown transport '{}' (expected stdio or http)",
+            other
+        )),
+    }
 }
 
 #[derive(Parser, Debug)]

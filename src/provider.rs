@@ -174,11 +174,45 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// Human-readable title for the tool, optionally set by MCP servers.
+    /// Providers may render this in UIs instead of the machine name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// MCP `tool.annotations`: hints such as `readOnlyHint`,
+    /// `destructiveHint`, `openWorldHint`. Passed through verbatim as JSON;
+    /// providers that don't recognise the field ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+    /// MCP `tool.meta` payload, forwarded verbatim so permission heuristics
+    /// and audit logs can access it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
+impl ToolDefinition {
+    /// Convenience constructor for builtin tools that don't need the
+    /// MCP-specific annotations/meta/title fields. These stay `None` so
+    /// existing call sites don't need to thread default placeholders
+    /// through their definitions.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            title: None,
+            annotations: None,
+            meta: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

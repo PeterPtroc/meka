@@ -128,6 +128,7 @@ impl Tool for ReadFileTool {
                 },
                 "required": ["path"]
             }),
+            ..Default::default()
         }
     }
 
@@ -199,6 +200,7 @@ impl Tool for ReadFileTool {
                     },
                 ],
                 is_error: false,
+                scratchpad_hint: None,
             });
         }
 
@@ -281,6 +283,7 @@ impl Tool for EditFileTool {
                 },
                 "required": ["path", "old_string", "new_string"]
             }),
+            ..Default::default()
         }
     }
 
@@ -384,6 +387,7 @@ impl Tool for WriteFileTool {
                 },
                 "required": ["path", "content"]
             }),
+            ..Default::default()
         }
     }
 

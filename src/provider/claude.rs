@@ -1293,17 +1293,17 @@ mod tests {
     fn test_claude_request_body_with_tools() {
         let provider = test_provider();
 
-        let tools = vec![ToolDefinition {
-            name: "read_file".to_string(),
-            description: "Read a file".to_string(),
-            parameters: serde_json::json!({
+        let tools = vec![ToolDefinition::new(
+            "read_file".to_string(),
+            "Read a file".to_string(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" }
                 },
                 "required": ["path"]
             }),
-        }];
+        )];
 
         let body = provider.build_request_body("", &[], &tools, false);
         let claude_tools = body["tools"].as_array().expect("tools should be array");
@@ -1788,11 +1788,11 @@ mod tests {
     #[test]
     fn test_claude_request_body_system_and_tools_together() {
         let provider = test_provider();
-        let tools = vec![ToolDefinition {
-            name: "bash".to_string(),
-            description: "Run a shell command".to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {}}),
-        }];
+        let tools = vec![ToolDefinition::new(
+            "bash".to_string(),
+            "Run a shell command".to_string(),
+            serde_json::json!({"type": "object", "properties": {}}),
+        )];
         let body =
             provider.build_request_body("system prompt", &[Message::user("hi")], &tools, true);
 
@@ -2133,16 +2133,16 @@ mod tests {
 
     fn test_tools() -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "read_file".to_string(),
-                description: "Read a file".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-            },
-            ToolDefinition {
-                name: "execute_command".to_string(),
-                description: "Run a shell command".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
-            },
+            ToolDefinition::new(
+                "read_file".to_string(),
+                "Read a file".to_string(),
+                serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+            ToolDefinition::new(
+                "execute_command".to_string(),
+                "Run a shell command".to_string(),
+                serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+            ),
         ]
     }
 
@@ -2629,16 +2629,16 @@ mod tests {
         let provider = test_provider();
 
         let tools = vec![
-            ToolDefinition {
-                name: "read_file".to_string(),
-                description: "Read a file".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-            ToolDefinition {
-                name: "write_file".to_string(),
-                description: "Write a file".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
+            ToolDefinition::new(
+                "read_file".to_string(),
+                "Read a file".to_string(),
+                serde_json::json!({"type": "object"}),
+            ),
+            ToolDefinition::new(
+                "write_file".to_string(),
+                "Write a file".to_string(),
+                serde_json::json!({"type": "object"}),
+            ),
         ];
         let body = provider.build_request_body("system", &[Message::user("hi")], &tools, false);
         let claude_tools = body["tools"].as_array().unwrap();

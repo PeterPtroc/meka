@@ -41,6 +41,7 @@ impl Tool for SkillTool {
                 },
                 "required": ["name"]
             }),
+            ..Default::default()
         }
     }
 

@@ -2,7 +2,7 @@
 //! and environment variables on top, and produces a [`ResolvedConfig`] that
 //! the rest of the binary consumes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -50,8 +50,24 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     pub auth_token: Option<String>,
     pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Optional path to an executable that, when run, prints dynamic HTTP
+    /// headers to stdout in `Name: Value\n` form. Merged over [`Self::headers`]
+    /// (dynamic wins). Useful for SSO flows where bearer tokens rotate.
+    /// The script is spawned with `AGSH_MCP_SERVER_NAME` and
+    /// `AGSH_MCP_SERVER_URL` in its environment so one helper can drive
+    /// multiple servers. Non-zero exit fails the connect.
+    pub headers_helper: Option<String>,
     pub auth: Option<McpAuthConfig>,
     pub permission: Option<String>,
+    /// Allow this server to issue `sampling/createMessage` requests. When
+    /// false (default), any such request is rejected with `METHOD_NOT_FOUND`.
+    /// Use with caution: sampling lets the server inject arbitrary messages
+    /// into your LLM context and spend your provider quota.
+    #[serde(default)]
+    pub sampling: bool,
+    /// Cap on the number of sampling calls this server may issue per agsh
+    /// session. Only meaningful when `sampling = true`. Default: 10.
+    pub sampling_limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -167,6 +183,60 @@ pub(crate) fn config_file_exists() -> bool {
     config_file_path().is_some_and(|path| path.exists())
 }
 
+/// Write `content` to `path` atomically: serialise to `<path>.tmp` in the
+/// same directory, `sync_all` the fd, then `rename` over the target. Also
+/// creates the parent directory (0700 on Unix) and chmods the final file
+/// to 0600 on Unix so `auth_token` / OAuth-derived secrets aren't
+/// world-readable regardless of the user's umask.
+pub(crate) fn write_config_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Best-effort — a pre-existing dir with different perms stays as-is.
+            if let Ok(metadata) = std::fs::metadata(parent) {
+                let mut perms = metadata.permissions();
+                if perms.mode() & 0o777 != 0o700 {
+                    perms.set_mode(0o700);
+                    let _ = std::fs::set_permissions(parent, perms);
+                }
+            }
+        }
+    }
+
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config path has no file name",
+        )
+    })?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+
+    // Create the tmp file with restrictive perms on Unix before any bytes
+    // land on disk, so a concurrent reader never sees the partial content
+    // with a looser mode.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp_path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    std::fs::rename(&tmp_path, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_path);
+    })
+}
+
 pub(crate) fn write_config_file(
     provider_name: &str,
     model: &str,
@@ -179,10 +249,6 @@ pub(crate) fn write_config_file(
             "could not determine config directory",
         )
     })?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let mut provider_table = toml::map::Map::new();
     provider_table.insert(
@@ -203,7 +269,7 @@ pub(crate) fn write_config_file(
     let content = toml::to_string_pretty(&root)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
 
-    std::fs::write(&path, content)
+    write_config_atomic(&path, &content)
 }
 
 fn load_config_file() -> ConfigFile {
@@ -751,5 +817,60 @@ Rule 2.
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         assert_eq!(resolved.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_write_config_atomic_writes_content_and_no_tmp_left() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sub").join("config.toml");
+        write_config_atomic(&path, "[x]\nk = 1\n").expect("atomic write");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "[x]\nk = 1\n"
+        );
+        // The temporary file must not be left behind after a successful write.
+        let tmp = dir.path().join("sub").join("config.toml.tmp");
+        assert!(!tmp.exists(), "temp file should not remain: {:?}", tmp);
+    }
+
+    #[test]
+    fn test_write_config_atomic_overwrites_existing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old contents that are LONGER than the new ones").expect("seed file");
+        write_config_atomic(&path, "new\n").expect("atomic overwrite");
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_config_atomic_sets_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().join("agsh");
+        let path = parent.join("config.toml");
+        write_config_atomic(&path, "x = 1\n").expect("atomic write");
+
+        let file_mode = std::fs::metadata(&path)
+            .expect("stat file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "config file should be 0600, got {:o}",
+            file_mode
+        );
+
+        let dir_mode = std::fs::metadata(&parent)
+            .expect("stat dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "config dir should be 0700, got {:o}",
+            dir_mode
+        );
     }
 }

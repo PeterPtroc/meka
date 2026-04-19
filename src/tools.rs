@@ -5,6 +5,7 @@
 mod file;
 mod find;
 mod grep;
+pub(crate) mod mcp_resources;
 mod render;
 pub(crate) mod scratchpad;
 mod shell;
@@ -32,10 +33,15 @@ use crate::session::SessionManager;
 
 pub type ReadTracker = Arc<RwLock<HashSet<PathBuf>>>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ToolOutput {
     pub content: Vec<ToolResultContent>,
     pub is_error: bool,
+    /// When `persist_oversized_results` has to spill to the scratchpad, use
+    /// this name instead of the caller-supplied tool name. Set by MCP tool
+    /// adapters so the persisted blob is namespaced as
+    /// `mcp_<server>_<remote_tool>` for easier debugging.
+    pub scratchpad_hint: Option<String>,
 }
 
 impl ToolOutput {
@@ -43,6 +49,7 @@ impl ToolOutput {
         Self {
             content: vec![ToolResultContent::Text { text: content }],
             is_error,
+            scratchpad_hint: None,
         }
     }
 }
@@ -58,21 +65,66 @@ pub trait Tool: Send + Sync {
     ) -> Result<ToolOutput>;
 }
 
+type ToolSet = Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>;
+
+/// Tool registry. Backed by an `Arc<RwLock<Vec<Arc<dyn Tool>>>>` so MCP
+/// notification handlers can swap a server's tools in place on
+/// `tools/list_changed`. Individual registrations only hold the write lock
+/// briefly; dispatch clones the matching `Arc<dyn Tool>` out of the lock
+/// before awaiting `execute`, so no lock is held across `.await`.
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: ToolSet,
     deferred: DeferredSet,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: Vec::new(),
+            tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             deferred: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+    /// Register a tool. Returns an error if another tool with the same name
+    /// is already registered. Callers that know the tool is unique (e.g.
+    /// core builtins) may `.expect()` the result; MCP registration should
+    /// log and continue so one bad server can't break startup.
+    pub fn register(&self, tool: Arc<dyn Tool>) -> Result<()> {
+        let name = tool.definition().name.clone();
+        let mut tools = self.tools.write().expect("tools lock poisoned");
+        if tools.iter().any(|t| t.definition().name == name) {
+            return Err(crate::error::AgshError::ToolRegistration {
+                message: format!("tool name '{}' is already registered", name),
+            });
+        }
+        tools.push(tool);
+        Ok(())
+    }
+
+    /// Replace every tool whose name starts with `<server_name>__` with the
+    /// supplied set. Used by `AgshClientHandler::on_tool_list_changed` to
+    /// hot-swap a server's tools without restarting the agent. Deferred
+    /// markers for removed tool names are cleared so the registry's deferred
+    /// set doesn't grow unbounded.
+    pub fn replace_server_tools(&self, server_name: &str, new_tools: Vec<Arc<dyn Tool>>) {
+        let prefix = format!("{}__", server_name);
+        let mut tools = self.tools.write().expect("tools lock poisoned");
+        let removed: Vec<String> = tools
+            .iter()
+            .filter(|t| t.definition().name.starts_with(&prefix))
+            .map(|t| t.definition().name)
+            .collect();
+        tools.retain(|t| !t.definition().name.starts_with(&prefix));
+        tools.extend(new_tools);
+        drop(tools);
+
+        if !removed.is_empty() {
+            let mut deferred = self.deferred.write().expect("deferred lock poisoned");
+            for name in &removed {
+                deferred.remove(name);
+            }
+        }
     }
 
     /// Mark a tool as deferred. Deferred tools are available for execution but
@@ -92,11 +144,13 @@ impl ToolRegistry {
             .remove(name);
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools
+            .read()
+            .expect("tools lock poisoned")
             .iter()
             .find(|tool| tool.definition().name == name)
-            .map(|tool| tool.as_ref())
+            .cloned()
     }
 
     /// Check if a tool is registered but currently deferred.
@@ -111,6 +165,8 @@ impl ToolRegistry {
     pub fn definitions_for_permission(&self, permission: Permission) -> Vec<ToolDefinition> {
         let deferred = self.deferred.read().expect("deferred lock poisoned");
         self.tools
+            .read()
+            .expect("tools lock poisoned")
             .iter()
             .filter(|tool| {
                 permission.allows(tool.required_permission())
@@ -123,6 +179,8 @@ impl ToolRegistry {
     /// Returns name+description summaries for ALL tools including deferred ones.
     pub fn all_tool_summaries(&self, permission: Permission) -> Vec<(String, String)> {
         self.tools
+            .read()
+            .expect("tools lock poisoned")
             .iter()
             .filter(|tool| permission.allows(tool.required_permission()))
             .map(|tool| {
@@ -135,34 +193,40 @@ impl ToolRegistry {
     /// Register the core tools shared by the main agent and sub-agents:
     /// file I/O, search, web, and shell execution.
     fn register_core_tools(
-        &mut self,
+        &self,
         user_agent: &str,
         shared_permission: crate::permission::SharedPermission,
         sandbox_enabled: bool,
         sandbox_capability: crate::sandbox::SandboxCapability,
     ) {
         let read_tracker: ReadTracker = Arc::new(RwLock::new(HashSet::new()));
-        self.register(Box::new(file::ReadFileTool {
+        self.register_builtin(Arc::new(file::ReadFileTool {
             read_tracker: read_tracker.clone(),
         }));
-        self.register(Box::new(file::EditFileTool { read_tracker }));
-        self.register(Box::new(file::WriteFileTool));
-        self.register(Box::new(find::FindFilesTool));
-        self.register(Box::new(grep::SearchContentsTool));
+        self.register_builtin(Arc::new(file::EditFileTool { read_tracker }));
+        self.register_builtin(Arc::new(file::WriteFileTool));
+        self.register_builtin(Arc::new(find::FindFilesTool));
+        self.register_builtin(Arc::new(grep::SearchContentsTool));
         let web_client = reqwest::Client::builder()
             .user_agent(user_agent)
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        self.register(Box::new(web::FetchUrlTool {
+        self.register_builtin(Arc::new(web::FetchUrlTool {
             client: web_client.clone(),
         }));
-        self.register(Box::new(web::WebSearchTool { client: web_client }));
-        self.register(Box::new(shell::ExecuteCommandTool {
+        self.register_builtin(Arc::new(web::WebSearchTool { client: web_client }));
+        self.register_builtin(Arc::new(shell::ExecuteCommandTool {
             sandbox_capability,
             shared_permission,
             sandbox_enabled,
         }));
+    }
+
+    /// Register a builtin tool. Builtins are statically known to be unique,
+    /// so a collision is a programmer error — panic rather than swallow.
+    fn register_builtin(&self, tool: Arc<dyn Tool>) {
+        self.register(tool).expect("builtin tool name collision");
     }
 
     pub fn build_default(
@@ -174,41 +238,41 @@ impl ToolRegistry {
         session_manager: SessionManager,
         shared_session_id: Arc<RwLock<Option<Uuid>>>,
     ) -> Self {
-        let mut registry = Self::new();
+        let registry = Self::new();
         registry.register_core_tools(
             &user_agent,
             shared_permission,
             sandbox_enabled,
             sandbox_capability,
         );
-        registry.register(Box::new(skill::SkillTool {
+        registry.register_builtin(Arc::new(skill::SkillTool {
             session_id: shared_session_id.clone(),
         }));
-        registry.register(Box::new(render::RenderImageTool {
+        registry.register_builtin(Arc::new(render::RenderImageTool {
             session_id: shared_session_id.clone(),
             session_manager: session_manager.clone(),
         }));
-        registry.register(Box::new(todo::TodoWriteTool { todo_list }));
-        registry.register(Box::new(scratchpad::ScratchpadWriteTool {
+        registry.register_builtin(Arc::new(todo::TodoWriteTool { todo_list }));
+        registry.register_builtin(Arc::new(scratchpad::ScratchpadWriteTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
-        registry.register(Box::new(scratchpad::ScratchpadReadTool {
+        registry.register_builtin(Arc::new(scratchpad::ScratchpadReadTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
         registry.mark_deferred("scratchpad_read");
-        registry.register(Box::new(scratchpad::ScratchpadEditTool {
+        registry.register_builtin(Arc::new(scratchpad::ScratchpadEditTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
         registry.mark_deferred("scratchpad_edit");
-        registry.register(Box::new(scratchpad::ScratchpadListTool {
+        registry.register_builtin(Arc::new(scratchpad::ScratchpadListTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
         registry.mark_deferred("scratchpad_list");
-        registry.register(Box::new(scratchpad::ScratchpadDeleteTool {
+        registry.register_builtin(Arc::new(scratchpad::ScratchpadDeleteTool {
             session_manager,
             session_id: shared_session_id,
         }));
@@ -224,7 +288,7 @@ impl ToolRegistry {
         sandbox_enabled: bool,
         sandbox_capability: crate::sandbox::SandboxCapability,
     ) -> Self {
-        let mut registry = Self::new();
+        let registry = Self::new();
         registry.register_core_tools(
             &user_agent,
             shared_permission,
@@ -233,7 +297,7 @@ impl ToolRegistry {
         );
         // Sub-agents don't have a session of their own — skills still load but
         // ${AGSH_SESSION_ID} stays unresolved for their invocations.
-        registry.register(Box::new(skill::SkillTool {
+        registry.register_builtin(Arc::new(skill::SkillTool {
             session_id: Arc::new(RwLock::new(None)),
         }));
         registry
@@ -309,5 +373,44 @@ mod tests {
         assert!(write_tools.iter().any(|t| t.name == "read_file"));
         assert!(write_tools.iter().any(|t| t.name == "write_file"));
         assert!(write_tools.iter().any(|t| t.name == "execute_command"));
+    }
+
+    #[tokio::test]
+    async fn test_register_duplicate_returns_error() {
+        struct DummyTool;
+        #[async_trait::async_trait]
+        impl Tool for DummyTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::new(
+                    "dup_tool".to_string(),
+                    "dummy".to_string(),
+                    serde_json::json!({}),
+                )
+            }
+            fn required_permission(&self) -> Permission {
+                Permission::Read
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+                _cancellation: CancellationToken,
+            ) -> crate::error::Result<ToolOutput> {
+                Ok(ToolOutput::text(String::new(), false))
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(DummyTool) as Arc<dyn Tool>)
+            .expect("first registration succeeds");
+        let err = registry
+            .register(Arc::new(DummyTool) as Arc<dyn Tool>)
+            .expect_err("second registration with same name must fail");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("dup_tool"),
+            "error message should mention the duplicate name, got: {}",
+            message
+        );
     }
 }

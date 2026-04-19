@@ -106,6 +106,19 @@ pub enum SlashCommand {
     Compact,
     Export,
     Cd(Option<String>),
+    /// `/mcp <server>:<prompt> [args...]` — render an MCP prompt and send
+    /// its messages as the next user turn.
+    McpPrompt {
+        server: String,
+        prompt: String,
+        args: Vec<String>,
+    },
+    /// `/mcp list` — display configured MCP servers.
+    McpList,
+    /// `/mcp reconnect <server>` — smoke-test connect for one server.
+    McpReconnect {
+        server: String,
+    },
 }
 
 pub enum ShellEvent {
@@ -128,6 +141,11 @@ pub struct ToolApprovalRequest {
 pub enum AgentToShellEvent {
     Done,
     ApprovalRequest(ToolApprovalRequest),
+    /// Server-driven elicitation — the shell prompts the user and replies
+    /// via the embedded responder channel.
+    McpElicitation(crate::mcp::elicitation::ElicitationPrompt),
+    /// Incremental progress update for a running MCP tool.
+    McpProgress(crate::mcp::progress::ProgressUpdate),
 }
 
 fn parse_slash_command(input: &str) -> Option<SlashCommand> {
@@ -145,8 +163,38 @@ fn parse_slash_command(input: &str) -> Option<SlashCommand> {
         "compact" => Some(SlashCommand::Compact),
         "export" => Some(SlashCommand::Export),
         "cd" => Some(SlashCommand::Cd(argument)),
+        "mcp" => parse_mcp_slash(argument.as_deref().unwrap_or("")),
         _ => None,
     }
+}
+
+/// Parse the argument to `/mcp …`. Shapes:
+/// - `list`                         → [`SlashCommand::McpList`]
+/// - `reconnect <server>`           → [`SlashCommand::McpReconnect`]
+/// - `<server>:<prompt> [args...]`  → [`SlashCommand::McpPrompt`]
+fn parse_mcp_slash(rest: &str) -> Option<SlashCommand> {
+    let rest = rest.trim();
+    if rest.is_empty() || rest == "list" {
+        return Some(SlashCommand::McpList);
+    }
+    if let Some(server) = rest.strip_prefix("reconnect ") {
+        return Some(SlashCommand::McpReconnect {
+            server: server.trim().to_string(),
+        });
+    }
+    // `<server>:<prompt> [args...]` — the first token is the prompt spec.
+    let mut parts = rest.split_whitespace();
+    let spec = parts.next()?;
+    let (server, prompt) = spec.split_once(':')?;
+    if server.is_empty() || prompt.is_empty() {
+        return None;
+    }
+    let args = parts.map(str::to_string).collect();
+    Some(SlashCommand::McpPrompt {
+        server: server.to_string(),
+        prompt: prompt.to_string(),
+        args,
+    })
 }
 
 fn print_help() {
@@ -243,7 +291,10 @@ pub fn run_repl(
                         Some(
                             command @ (SlashCommand::Session
                             | SlashCommand::Compact
-                            | SlashCommand::Export),
+                            | SlashCommand::Export
+                            | SlashCommand::McpPrompt { .. }
+                            | SlashCommand::McpList
+                            | SlashCommand::McpReconnect { .. }),
                         ) => {
                             if input_sender.send(ShellEvent::Command(command)).is_err() {
                                 break;
@@ -340,9 +391,148 @@ fn wait_for_agent(agent_event_receiver: &std::sync::mpsc::Receiver<AgentToShellE
             Ok(AgentToShellEvent::ApprovalRequest(request)) => {
                 handle_approval_request(&request);
             }
+            Ok(AgentToShellEvent::McpElicitation(prompt)) => {
+                handle_elicitation_prompt(prompt);
+            }
+            Ok(AgentToShellEvent::McpProgress(update)) => {
+                render_progress_update(&update);
+            }
             Err(_) => return false,
         }
     }
+}
+
+/// Render an MCP progress update as a one-line status overwrite on stderr
+/// so the user sees long-running tool calls advancing.
+fn render_progress_update(update: &crate::mcp::progress::ProgressUpdate) {
+    let line = format_progress_update(update);
+    eprint!("{}", line);
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+}
+
+/// Pure formatter for a progress line. Sanitises server-controlled
+/// strings (`message`, `server_name`, `tool_name`) so an MCP server can't
+/// inject ANSI escapes to clear the screen or spoof the permission prompt.
+/// Split out from `render_progress_update` so it's testable.
+fn format_progress_update(update: &crate::mcp::progress::ProgressUpdate) -> String {
+    let message = update
+        .message
+        .as_deref()
+        .map(crate::mcp::sanitize::sanitize_text)
+        .unwrap_or_default();
+    let server = crate::mcp::sanitize::sanitize_text(&update.server_name);
+    let tool = crate::mcp::sanitize::sanitize_text(&update.tool_name);
+    let body = match update.total {
+        Some(total) if total > 0.0 => format!(
+            "\r[mcp:{}/{}] {:.0}/{:.0} {}",
+            server, tool, update.progress, total, message
+        ),
+        _ => format!(
+            "\r[mcp:{}/{}] {:.0} {}",
+            server, tool, update.progress, message
+        ),
+    };
+    // Pad with a few spaces so the next print clears trailing chars from
+    // any longer previous line.
+    format!("{}     ", body)
+}
+
+/// Route a structured/url elicitation request to the user. For forms, walks
+/// the JSON Schema one property at a time, collecting input. For URLs, opens
+/// the browser and waits for the user to confirm.
+fn handle_elicitation_prompt(prompt: crate::mcp::elicitation::ElicitationPrompt) {
+    use crate::mcp::elicitation::{ElicitationKind, ElicitationResponse};
+    use crate::mcp::sanitize::sanitize_text;
+    // Server-controlled strings get stripped of control/format codepoints
+    // before they reach the terminal. Without this a malicious server could
+    // ship ANSI escapes to clear the screen or RTL overrides to spoof the
+    // field the user thinks they're filling in.
+    eprintln!(
+        "[mcp elicit: {}] {}",
+        sanitize_text(&prompt.server_name),
+        sanitize_text(&prompt.message)
+    );
+
+    let response = match &prompt.kind {
+        ElicitationKind::Url { url } => {
+            eprint!(
+                "Open {} in your browser? [Y/n/s=skip]: ",
+                sanitize_text(url)
+            );
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                ElicitationResponse::Decline
+            } else {
+                match line.trim().to_ascii_lowercase().as_str() {
+                    "" | "y" | "yes" => {
+                        if let Err(error) = open::that(url) {
+                            eprintln!("failed to open browser: {}", error);
+                        }
+                        ElicitationResponse::Accept { content: None }
+                    }
+                    "s" | "skip" => ElicitationResponse::Cancel,
+                    _ => ElicitationResponse::Decline,
+                }
+            }
+        }
+        ElicitationKind::Form { schema } => {
+            let mut filled = serde_json::Map::new();
+            if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+                for (field_name, field_schema) in properties {
+                    let description = field_schema
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let ty = field_schema
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("string");
+                    let hint = if description.is_empty() {
+                        ty
+                    } else {
+                        description
+                    };
+                    eprint!(
+                        "  {} ({}): ",
+                        sanitize_text(field_name),
+                        sanitize_text(hint)
+                    );
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line).is_err() {
+                        break;
+                    }
+                    let value = line.trim().to_string();
+                    if value.is_empty() {
+                        continue;
+                    }
+                    let parsed = match ty {
+                        "boolean" => match value.to_ascii_lowercase().as_str() {
+                            "true" | "yes" | "y" => serde_json::Value::Bool(true),
+                            "false" | "no" | "n" => serde_json::Value::Bool(false),
+                            _ => serde_json::Value::String(value),
+                        },
+                        "integer" | "number" => value
+                            .parse::<f64>()
+                            .ok()
+                            .and_then(serde_json::Number::from_f64)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::String(value)),
+                        _ => serde_json::Value::String(value),
+                    };
+                    filled.insert(field_name.clone(), parsed);
+                }
+            }
+            ElicitationResponse::Accept {
+                content: Some(serde_json::Value::Object(filled)),
+            }
+        }
+    };
+    let _ = prompt.responder.send(response);
 }
 
 fn handle_approval_request(request: &ToolApprovalRequest) {
@@ -549,5 +739,150 @@ mod tests {
     fn test_shorten_path_with_tilde_non_home() {
         let path = std::path::Path::new("/tmp/something");
         assert_eq!(shorten_path_with_tilde(path), "/tmp/something");
+    }
+
+    #[test]
+    fn test_format_progress_update_strips_ansi_escapes() {
+        let update = crate::mcp::progress::ProgressUpdate {
+            server_name: "svr".to_string(),
+            tool_name: "tool".to_string(),
+            tool_use_id: None,
+            message: Some("\x1b[2Jspoofed\x1b[H".to_string()),
+            progress: 1.0,
+            total: Some(4.0),
+        };
+        let line = format_progress_update(&update);
+        assert!(
+            !line.contains('\x1b'),
+            "ANSI escape leaked into progress line: {:?}",
+            line
+        );
+        assert!(line.contains("spoofed"));
+        assert!(line.contains("[mcp:svr/tool]"));
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_empty_is_list() {
+        assert!(matches!(
+            parse_slash_command("/mcp"),
+            Some(SlashCommand::McpList)
+        ));
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_explicit_list() {
+        assert!(matches!(
+            parse_slash_command("/mcp list"),
+            Some(SlashCommand::McpList)
+        ));
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_reconnect_with_server() {
+        match parse_slash_command("/mcp reconnect postgres") {
+            Some(SlashCommand::McpReconnect { server }) => assert_eq!(server, "postgres"),
+            other => panic!("expected McpReconnect, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_reconnect_without_server_is_none() {
+        // Bare `reconnect` with no server name: neither the reconnect arm nor
+        // the `<server>:<prompt>` arm matches, so the command is rejected
+        // rather than silently firing against some default.
+        assert!(parse_slash_command("/mcp reconnect").is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_prompt_no_args() {
+        match parse_slash_command("/mcp postgres:schema") {
+            Some(SlashCommand::McpPrompt {
+                server,
+                prompt,
+                args,
+            }) => {
+                assert_eq!(server, "postgres");
+                assert_eq!(prompt, "schema");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected McpPrompt, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_prompt_with_args() {
+        match parse_slash_command("/mcp pg:query table=users limit=10") {
+            Some(SlashCommand::McpPrompt {
+                server,
+                prompt,
+                args,
+            }) => {
+                assert_eq!(server, "pg");
+                assert_eq!(prompt, "query");
+                assert_eq!(args, vec!["table=users", "limit=10"]);
+            }
+            other => panic!("expected McpPrompt, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_empty_server_rejected() {
+        assert!(parse_slash_command("/mcp :prompt").is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_empty_prompt_rejected() {
+        assert!(parse_slash_command("/mcp server:").is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_multiple_colons_splits_on_first() {
+        // `split_once` returns the first colon, so prompt names can contain
+        // further colons.
+        match parse_slash_command("/mcp srv:ns:prompt") {
+            Some(SlashCommand::McpPrompt { server, prompt, .. }) => {
+                assert_eq!(server, "srv");
+                assert_eq!(prompt, "ns:prompt");
+            }
+            other => panic!("expected McpPrompt, got {:?}", option_label(&other)),
+        }
+    }
+
+    /// Short debug label — SlashCommand doesn't implement Debug so we map
+    /// the few variants we care about manually to keep assertion messages
+    /// readable.
+    fn option_label(cmd: &Option<SlashCommand>) -> &'static str {
+        match cmd {
+            None => "None",
+            Some(SlashCommand::Exit) => "Exit",
+            Some(SlashCommand::Help) => "Help",
+            Some(SlashCommand::Clear) => "Clear",
+            Some(SlashCommand::Session) => "Session",
+            Some(SlashCommand::Permission(_)) => "Permission",
+            Some(SlashCommand::Compact) => "Compact",
+            Some(SlashCommand::Export) => "Export",
+            Some(SlashCommand::Cd(_)) => "Cd",
+            Some(SlashCommand::McpList) => "McpList",
+            Some(SlashCommand::McpReconnect { .. }) => "McpReconnect",
+            Some(SlashCommand::McpPrompt { .. }) => "McpPrompt",
+        }
+    }
+
+    #[test]
+    fn test_format_progress_update_strips_rtl_override_in_names() {
+        // Defensive: even though server/tool names are normalised at
+        // registration time, this confirms the renderer can't be tricked
+        // by a handler that someday forgets to normalise.
+        let update = crate::mcp::progress::ProgressUpdate {
+            server_name: "sv\u{202E}r".to_string(),
+            tool_name: "t\u{200B}ool".to_string(),
+            tool_use_id: None,
+            message: None,
+            progress: 0.5,
+            total: None,
+        };
+        let line = format_progress_update(&update);
+        assert!(!line.contains('\u{202E}'));
+        assert!(!line.contains('\u{200B}'));
     }
 }

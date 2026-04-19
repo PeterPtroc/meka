@@ -51,6 +51,7 @@ impl Tool for SearchContentsTool {
                 },
                 "required": ["pattern"]
             }),
+            ..Default::default()
         }
     }
 

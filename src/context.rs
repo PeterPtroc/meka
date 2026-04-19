@@ -17,6 +17,7 @@ pub fn build_system_prompt(
     deferred_tools: &[(String, String)],
     skills: &[Skill],
     user_instructions: Option<&str>,
+    mcp_server_instructions: &[(String, String)],
 ) -> String {
     let mut prompt = String::new();
 
@@ -95,6 +96,21 @@ pub fn build_system_prompt(
             prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
         }
         prompt.push('\n');
+    }
+
+    // MCP server instructions: each connected server can advertise a block
+    // during `initialize` describing usage tips / mental model for its tools.
+    // Immutable for the lifetime of the connection, so we splice into the
+    // system prompt once per turn.
+    if !mcp_server_instructions.is_empty() {
+        prompt.push_str("## MCP Server Instructions\n\n");
+        prompt.push_str(
+            "Each configured MCP server may provide setup-specific instructions about its \
+             tools. Treat them as context for how to use that server's namespace.\n\n",
+        );
+        for (server, body) in mcp_server_instructions {
+            prompt.push_str(&format!("### {}\n\n{}\n\n", server, body.trim_end()));
+        }
     }
 
     if !deferred_tools.is_empty() {
@@ -282,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_none_mode() {
-        let prompt = build_system_prompt(Permission::None, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::None, &[], false, &[], &[], None, &[]);
         assert!(prompt.contains("NO tools available"));
         assert!(prompt.contains("Shift+Tab"));
         assert!(!prompt.contains("## Environment"));
@@ -290,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_read_mode_with_sandbox() {
-        let prompt = build_system_prompt(Permission::Read, &[], true, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Read, &[], true, &[], &[], None, &[]);
         assert!(prompt.contains("READ-ONLY"));
         assert!(prompt.contains("read-only sandboxed"));
         assert!(prompt.contains("CANNOT write"));
@@ -298,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_read_mode_without_sandbox() {
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None, &[]);
         assert!(prompt.contains("READ-ONLY"));
         assert!(prompt.contains("CANNOT write"));
         assert!(prompt.contains("execute shell commands"));
@@ -307,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_write_mode() {
-        let prompt = build_system_prompt(Permission::Write, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Write, &[], false, &[], &[], None, &[]);
         assert!(prompt.contains("FULL access"));
         assert!(prompt.contains("destructive"));
     }
@@ -315,19 +331,19 @@ mod tests {
     #[test]
     fn test_system_prompt_with_tools() {
         let tools = vec![
-            ToolDefinition {
-                name: "read_file".to_string(),
-                description: "Read file contents".to_string(),
-                parameters: serde_json::json!({}),
-            },
-            ToolDefinition {
-                name: "execute_command".to_string(),
-                description: "Run a shell command".to_string(),
-                parameters: serde_json::json!({}),
-            },
+            ToolDefinition::new(
+                "read_file".to_string(),
+                "Read file contents".to_string(),
+                serde_json::json!({}),
+            ),
+            ToolDefinition::new(
+                "execute_command".to_string(),
+                "Run a shell command".to_string(),
+                serde_json::json!({}),
+            ),
         ];
 
-        let prompt = build_system_prompt(Permission::Write, &tools, false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Write, &tools, false, &[], &[], None, &[]);
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("execute_command"));
         assert!(prompt.contains("Available Tools"));
@@ -335,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_has_environment() {
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None, &[]);
         assert!(prompt.contains("Environment"));
         assert!(!prompt.contains("Working Directory:"));
         assert!(!prompt.contains("Date:"));
@@ -344,7 +360,7 @@ mod tests {
     #[test]
     fn test_system_prompt_lists_skills() {
         let skills = vec![sample_skill("setup-server"), sample_skill("deploy-app")];
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &skills, None);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &skills, None, &[]);
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("**setup-server**"));
         assert!(prompt.contains("setup-server description"));
@@ -355,14 +371,14 @@ mod tests {
     #[test]
     fn test_system_prompt_omits_skills_in_none_mode() {
         let skills = vec![sample_skill("setup-server")];
-        let prompt = build_system_prompt(Permission::None, &[], false, &[], &skills, None);
+        let prompt = build_system_prompt(Permission::None, &[], false, &[], &skills, None, &[]);
         assert!(!prompt.contains("## Skills"));
         assert!(!prompt.contains("setup-server"));
     }
 
     #[test]
     fn test_system_prompt_omits_skills_section_when_empty() {
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None, &[]);
         assert!(!prompt.contains("## Skills"));
     }
 
@@ -375,6 +391,7 @@ mod tests {
             &[],
             &[],
             Some("Never use pip. Always prefer uv."),
+            &[],
         );
         assert!(prompt.contains("## User Instructions"));
         assert!(prompt.contains("Never use pip. Always prefer uv."));
@@ -383,20 +400,22 @@ mod tests {
 
     #[test]
     fn test_system_prompt_includes_user_instructions_in_none_mode() {
-        let prompt = build_system_prompt(Permission::None, &[], false, &[], &[], Some("Rule X"));
+        let prompt =
+            build_system_prompt(Permission::None, &[], false, &[], &[], Some("Rule X"), &[]);
         assert!(prompt.contains("## User Instructions"));
         assert!(prompt.contains("Rule X"));
     }
 
     #[test]
     fn test_system_prompt_omits_user_instructions_when_none() {
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None);
+        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], None, &[]);
         assert!(!prompt.contains("## User Instructions"));
     }
 
     #[test]
     fn test_system_prompt_omits_user_instructions_when_whitespace() {
-        let prompt = build_system_prompt(Permission::Read, &[], false, &[], &[], Some("   \n"));
+        let prompt =
+            build_system_prompt(Permission::Read, &[], false, &[], &[], Some("   \n"), &[]);
         assert!(!prompt.contains("## User Instructions"));
     }
 
@@ -467,5 +486,32 @@ mod tests {
         assert!(result.contains("[Scratchpad entries]"));
         assert!(result.contains("\"log\""));
         assert!(!result.contains("[Environment context]"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_mcp_server_instructions() {
+        let instructions = vec![
+            (
+                "fs".to_string(),
+                "Call `fs__read` before `fs__write`.".to_string(),
+            ),
+            (
+                "db".to_string(),
+                "All queries run in read-only mode.".to_string(),
+            ),
+        ];
+        let prompt =
+            build_system_prompt(Permission::Write, &[], false, &[], &[], None, &instructions);
+        assert!(prompt.contains("## MCP Server Instructions"));
+        assert!(prompt.contains("### fs"));
+        assert!(prompt.contains("Call `fs__read` before `fs__write`."));
+        assert!(prompt.contains("### db"));
+        assert!(prompt.contains("All queries run in read-only mode."));
+    }
+
+    #[test]
+    fn test_system_prompt_omits_mcp_server_instructions_when_empty() {
+        let prompt = build_system_prompt(Permission::Write, &[], false, &[], &[], None, &[]);
+        assert!(!prompt.contains("## MCP Server Instructions"));
     }
 }

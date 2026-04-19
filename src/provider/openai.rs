@@ -507,17 +507,17 @@ mod tests {
         let provider =
             OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
-        let tools = vec![ToolDefinition {
-            name: "read_file".to_string(),
-            description: "Read a file".to_string(),
-            parameters: serde_json::json!({
+        let tools = vec![ToolDefinition::new(
+            "read_file".to_string(),
+            "Read a file".to_string(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" }
                 },
                 "required": ["path"]
             }),
-        }];
+        )];
 
         let body = provider.build_request_body("", &[], &tools, false);
         let openai_tools = body["tools"].as_array().expect("tools should be array");
@@ -762,10 +762,10 @@ mod tests {
         let provider =
             OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
 
-        let tools = vec![ToolDefinition {
-            name: "write_file".to_string(),
-            description: "Create or overwrite a file".to_string(),
-            parameters: serde_json::json!({
+        let tools = vec![ToolDefinition::new(
+            "write_file".to_string(),
+            "Create or overwrite a file".to_string(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
@@ -773,7 +773,7 @@ mod tests {
                 },
                 "required": ["path", "content"]
             }),
-        }];
+        )];
 
         let body = provider.build_request_body("", &[], &tools, false);
         let openai_tools = body["tools"].as_array().expect("tools should be array");

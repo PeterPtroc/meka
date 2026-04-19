@@ -49,6 +49,7 @@ impl Tool for RenderImageTool {
                     }
                 }
             }),
+            ..Default::default()
         }
     }
 

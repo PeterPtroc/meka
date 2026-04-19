@@ -100,6 +100,7 @@ impl Tool for FetchUrlTool {
                 },
                 "required": ["url"]
             }),
+            ..Default::default()
         }
     }
 
@@ -273,6 +274,7 @@ impl Tool for WebSearchTool {
                 },
                 "required": ["query"]
             }),
+            ..Default::default()
         }
     }
 

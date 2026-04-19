@@ -335,18 +335,91 @@ An array of MCP server configurations. Each entry defines a server to connect to
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Unique name for this server. Used as namespace prefix for tools (`name__tool`). Must not contain `__`. |
+| `name` | Yes | Unique name for this server. Used as namespace prefix for tools (`name__tool`). Must match `[A-Za-z0-9_-]+`, must not contain `__`, and must not be `agsh`, `ide`, or start with `mcp_`. |
 | `transport` | Yes | Transport type: `"stdio"` (spawn subprocess) or `"http"` (streamable HTTP). |
-| `command` | Stdio only | Path or name of the executable to spawn. |
+| `command` | Stdio only | Path or name of the executable to spawn. On Windows, `npx` / `.cmd` / `.bat` / `.ps1` are auto-wrapped in `cmd /c`. |
 | `args` | No | Arguments to pass to the command. |
 | `env` | No | Environment variables to set for the spawned process (stdio only). |
 | `url` | HTTP only | URL of the MCP server endpoint. |
 | `auth_token` | No | Bearer token for HTTP authentication (sent as `Authorization: Bearer <token>`). |
 | `auth` | No | OAuth authentication configuration (see below). Mutually exclusive with `auth_token`. |
 | `headers` | No | Custom HTTP headers to include with every request (HTTP only). |
+| `headers_helper` | No | Path to an executable whose stdout (`Name: Value\n` lines) is merged over `headers` at connect-time (HTTP only). Executed with `AGSH_MCP_SERVER_NAME` / `AGSH_MCP_SERVER_URL` in env; 15 s timeout. |
 | `permission` | No | Permission level required to use this server's tools: `"none"`, `"read"` (default), or `"write"`. |
+| `sampling` | No | Allow this server to call `sampling/createMessage` against your configured LLM provider. Default `false` (reject). Enabling this lets a compromised server inject arbitrary messages into your LLM context and burn your provider quota — opt in per-server, deliberately. |
+| `sampling_limit` | No | Cap on sampling calls per agsh session from this server when `sampling = true`. Default `10`. Requests beyond the limit return an `INTERNAL_ERROR` to the server. |
 
 MCP tools are registered with namespaced names in the format `servername__toolname` to prevent collisions with built-in tools or between servers.
+
+Tool and resource descriptions returned from MCP servers are truncated at 2048 characters to keep the system prompt bounded.
+
+### Environment variable substitution
+
+Every string field listed above (command, args, env values, url, headers values, auth_token) supports `${VAR}` and `${VAR:-default}` expansion from the process environment. Missing variables with no default leave the literal `${VAR}` in place and log a warning at startup. Use this to avoid committing secrets:
+
+```toml
+[[mcp.servers]]
+name = "github"
+transport = "http"
+url = "https://mcp.github.com"
+auth_token = "${GITHUB_MCP_TOKEN}"
+```
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGSH_MCP_TOOL_TIMEOUT` | `600000` ms (600 s) | Per-call timeout for MCP tools. Triggers `notifications/cancelled` on expiry. |
+
+### `agsh mcp` CLI
+
+Manage configured servers without editing `config.toml` by hand:
+
+| Command | Action |
+|---|---|
+| `agsh mcp list` | Print all configured servers. |
+| `agsh mcp get <name>` | Print full details for one server. |
+| `agsh mcp add <name> --transport {stdio\|http} [--command ...] [--arg ...] [--env KEY=VALUE] [--url ...] [--permission ...]` | Persist a server into `config.toml` (preserves existing formatting/comments via `toml_edit`). |
+| `agsh mcp remove <name>` | Delete the server entry and clear stored credentials. |
+| `agsh mcp reconnect <name>` | Smoke-test a connect; prints `ok` or the error. |
+| `agsh mcp login <name>` | Force interactive OAuth for a server with `auth` configured. |
+| `agsh mcp logout <name>` | Call the provider's `revocation_endpoint` (RFC 7009) best-effort, then clear stored credentials + auth-probe cache. |
+
+Inside the REPL, `/mcp list`, `/mcp reconnect <server>`, and `/mcp <server>:<prompt> [args...]` provide the same lookup + a way to invoke MCP prompts as a user turn.
+
+### Resources and prompts
+
+In addition to tools, agsh exposes MCP resources and prompts through four builtin tools (deferred — the agent activates them when needed):
+
+| Builtin | Purpose |
+|---------|---------|
+| `list_mcp_resources` | List resources from one or every configured server. |
+| `read_mcp_resource` | Read a resource by `server` + `uri`; text inline, binary base64-encoded. |
+| `list_mcp_prompts` | List prompts from one or every configured server, including their declared arguments. |
+| `get_mcp_prompt` | Render a prompt by `server` + `name` with optional `arguments`; returns `<role>: <text>` lines. |
+| `subscribe_mcp_resource` | Subscribe to `resources/updated` notifications for a specific URI. |
+| `unsubscribe_mcp_resource` | Cancel a prior subscription. |
+| `list_mcp_resource_updates` | Print every resource that has been reported as updated since the session started. |
+
+### Connection lifecycle
+
+- **Reconnection** is automatic for all transports (stdio, plain HTTP, OAuth-authenticated HTTP) when the transport closes mid-session. HTTP transports use exponential backoff (1s, 2s, 4s, 8s, 16s, capped 30s, max 5 attempts); stdio gets one immediate retry. The reconnect runs on a blocking thread to work around an upstream rmcp bug where the auth future is `!Send`.
+- **Session-expired recovery**: rmcp 1.5 transparently re-initialises HTTP sessions on 404 / JSON-RPC `-32001`. agsh relies on this; no per-call handling is required.
+- **Cancellation**: when the agent cancels a tool call (e.g. Ctrl-C), agsh sends `notifications/cancelled` to the server with the in-flight request id so the server can stop work.
+- **Timeouts**: tool calls default to 600 s; override with `AGSH_MCP_TOOL_TIMEOUT` in ms.
+- **Tool list refresh**: on `tools/list_changed`, agsh re-discovers the server's tools and hot-swaps them in the registry — no restart needed.
+- **Progress notifications**: MCP tool calls attach a per-request `progressToken`; incoming `notifications/progress` render as a live status line under the tool invocation.
+- **Server instructions**: `InitializeResult.instructions` is captured once per connection and spliced into the system prompt (sanitised + truncated to 2048 chars) under `## MCP Server Instructions`.
+- **Auth-probe cache**: 401 responses are cached for 15 minutes so a restart after a failed auth flow skips the unauthenticated probe and goes straight to OAuth. Cleared by `agsh mcp logout`.
+- `resources/list_changed`, `prompts/list_changed`, and `resources/updated` notifications are logged at `info`/`debug` level.
+
+### Server-to-client features
+
+| Feature | agsh behaviour |
+|---------|----------------|
+| `roots/list` | Returns a single root: `file://<current-working-directory>` with the directory basename as the name. |
+| `elicitation/create` | Always responds with `Decline` and logs a warning — interactive form/URL input is not wired into the REPL. |
+| `sampling/createMessage` | Rejected with `METHOD_NOT_FOUND` unless the server has `sampling = true` in its config. When allowed, the current provider handles the request; per-session `sampling_limit` caps how many times each server may invoke it. |
 
 ### `[mcp.servers.auth]`
 
@@ -361,7 +434,7 @@ OAuth authentication for HTTP MCP servers. Set `type` to choose the authenticati
 | `resource` | No | Resource parameter ([RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707)), client_credentials only |
 | `signing_key_path` | JWT only | Path to PEM private key file |
 | `signing_algorithm` | No | JWT signing algorithm: `RS256` (default), `RS384`, `RS512`, `ES256`, `ES384` |
-| `redirect_port` | No | Local port for OAuth authorization code callback (default: `8400`), oauth only |
+| `redirect_port` | No | Local port for OAuth authorization code callback. When omitted, agsh binds to a random ephemeral port (recommended). `oauth` only. |
 
 ### Examples
 

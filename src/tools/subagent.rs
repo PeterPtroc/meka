@@ -53,6 +53,7 @@ impl Tool for SpawnAgentTool {
                 },
                 "required": ["prompt"]
             }),
+            ..Default::default()
         }
     }
 

@@ -46,6 +46,7 @@ impl Tool for FindFilesTool {
                 },
                 "required": ["pattern"]
             }),
+            ..Default::default()
         }
     }
 

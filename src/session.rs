@@ -239,6 +239,12 @@ impl SessionManager {
                         created_at TEXT NOT NULL,
                         PRIMARY KEY (session_id, name),
                         FOREIGN KEY (session_id) REFERENCES sessions(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS mcp_auth_cache (
+                        server_name TEXT PRIMARY KEY,
+                        needs_auth INTEGER NOT NULL,
+                        cached_at INTEGER NOT NULL
                     );",
                 )?;
 
@@ -840,6 +846,84 @@ impl TokenStore {
             })
     }
 
+    /// Load a cached needs-auth verdict for an MCP server, or `None` if
+    /// there is no entry or it is older than `ttl`.
+    pub async fn load_auth_probe(
+        &self,
+        server_name: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Option<bool>> {
+        let server_name = server_name.to_string();
+        let ttl_seconds = ttl.as_secs() as i64;
+        let now = chrono::Utc::now().timestamp();
+        self.connection
+            .call(move |connection| {
+                let result = connection.query_row(
+                    "SELECT needs_auth, cached_at FROM mcp_auth_cache WHERE server_name = ?1",
+                    rusqlite::params![server_name],
+                    |row| {
+                        let needs_auth: i64 = row.get(0)?;
+                        let cached_at: i64 = row.get(1)?;
+                        Ok((needs_auth != 0, cached_at))
+                    },
+                );
+                match result {
+                    // Strict `<` so a zero-duration TTL behaves as "never
+                    // cache" instead of "cache for the rest of this second".
+                    Ok((needs_auth, cached_at)) if now - cached_at < ttl_seconds => {
+                        Ok(Some(needs_auth))
+                    }
+                    Ok(_) => Ok(None),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to load MCP auth probe cache: {}", error))
+            })
+    }
+
+    /// Persist a needs-auth verdict for an MCP server (TTL is enforced at
+    /// load time, so we just record the current timestamp here).
+    pub async fn save_auth_probe(&self, server_name: &str, needs_auth: bool) -> Result<()> {
+        let server_name = server_name.to_string();
+        let now = chrono::Utc::now().timestamp();
+        self.connection
+            .call(move |connection| {
+                connection.execute(
+                    "INSERT INTO mcp_auth_cache (server_name, needs_auth, cached_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(server_name) DO UPDATE SET
+                         needs_auth = excluded.needs_auth,
+                         cached_at = excluded.cached_at",
+                    rusqlite::params![server_name, if needs_auth { 1_i64 } else { 0_i64 }, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to save MCP auth probe cache: {}", error))
+            })
+    }
+
+    /// Remove any cached needs-auth verdict for an MCP server.
+    pub async fn clear_auth_probe(&self, server_name: &str) -> Result<()> {
+        let server_name = server_name.to_string();
+        self.connection
+            .call(move |connection| {
+                connection.execute(
+                    "DELETE FROM mcp_auth_cache WHERE server_name = ?1",
+                    rusqlite::params![server_name],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to clear MCP auth probe cache: {}", error))
+            })
+    }
+
     pub async fn save_oauth_token(
         &self,
         provider: &str,
@@ -1293,5 +1377,133 @@ mod tests {
             .expect("failed to enforce");
         assert_eq!(deleted, 0);
         assert!(manager.session_exists(session_id).await.expect("failed"));
+    }
+
+    // --- MCP TokenStore tests ---
+    // Exercise the methods backing `agsh mcp login/logout` and the auth-probe
+    // cache that skips unauthenticated connects after a 401. In-memory DB
+    // keeps each case hermetic.
+
+    #[tokio::test]
+    async fn mcp_credentials_round_trip() {
+        let manager = test_manager().await;
+        let store = manager.token_store();
+
+        assert!(
+            store
+                .load_mcp_credentials("srv")
+                .await
+                .expect("load absent")
+                .is_none(),
+            "no credentials should exist yet"
+        );
+
+        store
+            .save_mcp_credentials("srv", r#"{"tokens":{"access_token":"at1"}}"#)
+            .await
+            .expect("save");
+        assert_eq!(
+            store
+                .load_mcp_credentials("srv")
+                .await
+                .expect("load")
+                .as_deref(),
+            Some(r#"{"tokens":{"access_token":"at1"}}"#)
+        );
+
+        // Upsert: second save replaces the first.
+        store
+            .save_mcp_credentials("srv", r#"{"tokens":{"access_token":"at2"}}"#)
+            .await
+            .expect("save again");
+        assert_eq!(
+            store
+                .load_mcp_credentials("srv")
+                .await
+                .expect("load")
+                .as_deref(),
+            Some(r#"{"tokens":{"access_token":"at2"}}"#)
+        );
+
+        store.clear_mcp_credentials("srv").await.expect("clear");
+        assert!(
+            store
+                .load_mcp_credentials("srv")
+                .await
+                .expect("load after clear")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_credentials_are_scoped_per_server() {
+        let manager = test_manager().await;
+        let store = manager.token_store();
+        store
+            .save_mcp_credentials("a", "alpha")
+            .await
+            .expect("save a");
+        store
+            .save_mcp_credentials("b", "beta")
+            .await
+            .expect("save b");
+        store.clear_mcp_credentials("a").await.expect("clear a");
+        assert!(store.load_mcp_credentials("a").await.unwrap().is_none());
+        assert_eq!(
+            store.load_mcp_credentials("b").await.unwrap().as_deref(),
+            Some("beta")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_probe_round_trip_and_scoping() {
+        let manager = test_manager().await;
+        let store = manager.token_store();
+        let ttl = std::time::Duration::from_secs(3600);
+
+        assert!(store.load_auth_probe("srv", ttl).await.unwrap().is_none());
+
+        store.save_auth_probe("srv", true).await.expect("save true");
+        assert_eq!(store.load_auth_probe("srv", ttl).await.unwrap(), Some(true));
+
+        // Upsert — flip the verdict.
+        store
+            .save_auth_probe("srv", false)
+            .await
+            .expect("save false");
+        assert_eq!(
+            store.load_auth_probe("srv", ttl).await.unwrap(),
+            Some(false)
+        );
+
+        // A different server name is unaffected.
+        assert!(store.load_auth_probe("other", ttl).await.unwrap().is_none());
+
+        store.clear_auth_probe("srv").await.expect("clear");
+        assert!(store.load_auth_probe("srv", ttl).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_probe_honours_ttl() {
+        let manager = test_manager().await;
+        let store = manager.token_store();
+        store.save_auth_probe("srv", true).await.expect("save");
+        // A TTL of 0 seconds must treat any entry as stale.
+        assert!(
+            store
+                .load_auth_probe("srv", std::time::Duration::from_secs(0))
+                .await
+                .unwrap()
+                .is_none(),
+            "entry should be stale under zero TTL"
+        );
+        // A large TTL still returns the same entry.
+        assert_eq!(
+            store
+                .load_auth_probe("srv", std::time::Duration::from_secs(3600))
+                .await
+                .unwrap(),
+            Some(true)
+        );
     }
 }

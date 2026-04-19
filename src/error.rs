@@ -21,6 +21,9 @@ pub enum AgshError {
     #[error("tool execution error: {tool_name}: {message}")]
     ToolExecution { tool_name: String, message: String },
 
+    #[error("tool registration error: {message}")]
+    ToolRegistration { message: String },
+
     #[error("session already attached by another process: {0}")]
     SessionLocked(uuid::Uuid),
 

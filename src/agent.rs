@@ -43,6 +43,14 @@ pub struct Agent {
     shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
     approval_sender: Option<std::sync::mpsc::Sender<crate::shell::AgentToShellEvent>>,
     last_input_tokens: std::sync::atomic::AtomicU64,
+    /// Per-turn map of `tool_use_id` → scratchpad-name hint. Populated by
+    /// MCP tool adapters so oversized-output persistence uses
+    /// `mcp_<server>_<tool>` instead of the plain tool name. Cleared
+    /// between turns by `persist_oversized_results`.
+    scratchpad_hints: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Optional MCP client manager; used to read server-supplied
+    /// `InitializeResult.instructions` for inclusion in the system prompt.
+    mcp_manager: Option<Arc<crate::mcp::McpClientManager>>,
 }
 
 impl Agent {
@@ -67,7 +75,15 @@ impl Agent {
             shared_session_id,
             approval_sender,
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
+            scratchpad_hints: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            mcp_manager: None,
         }
+    }
+
+    /// Attach the MCP client manager so server-supplied `initialize`
+    /// instructions can be injected into each turn's system prompt.
+    pub fn set_mcp_manager(&mut self, manager: Arc<crate::mcp::McpClientManager>) {
+        self.mcp_manager = Some(manager);
     }
 
     pub async fn run_turn(
@@ -132,6 +148,11 @@ impl Agent {
         let tools = self.available_tools(permission);
         let deferred_tools = self.deferred_tool_summaries(permission);
         let skills = crate::skills::discover_skills();
+        let mcp_instructions = self
+            .mcp_manager
+            .as_ref()
+            .map(|manager| manager.server_instructions())
+            .unwrap_or_default();
         let system_prompt = context::build_system_prompt(
             permission,
             &tools,
@@ -139,6 +160,7 @@ impl Agent {
             &deferred_tools,
             &skills,
             self.options.user_instructions.as_deref(),
+            &mcp_instructions,
         );
 
         let base_messages = truncate_messages_for_context(messages, self.options.context_messages);
@@ -241,16 +263,24 @@ impl Agent {
                             tracing::warn!("failed to save explicit scratchpad results: {}", error);
                         }
 
+                        let hints_snapshot = {
+                            let guard = self.scratchpad_hints.read().await;
+                            guard.clone()
+                        };
                         if let Err(error) = crate::tools::scratchpad::persist_oversized_results(
                             &self.session_manager,
                             sid,
                             &assistant_message,
                             &mut tool_results,
+                            &hints_snapshot,
                         )
                         .await
                         {
                             tracing::warn!("failed to persist oversized tool results: {}", error);
                         }
+                        // Drop the per-turn hints so a long session doesn't
+                        // accumulate entries for tool calls that already ran.
+                        self.scratchpad_hints.write().await.clear();
 
                         let result_message = Message {
                             role: Role::User,
@@ -493,6 +523,14 @@ impl Agent {
                     spacing.after_todo_list();
                 }
 
+                // Stash scratchpad-naming hints on a per-turn map keyed by
+                // tool_use_id so persist_oversized_results can use the
+                // MCP-style `mcp_<server>_<tool>` name instead of the
+                // plain tool name.
+                if let Some(hint) = output.scratchpad_hint.clone() {
+                    self.scratchpad_hints.write().await.insert(id.clone(), hint);
+                }
+
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: output.content,
@@ -548,11 +586,11 @@ impl Agent {
 
         if permission == crate::permission::Permission::Ask {
             return self
-                .execute_with_approval(tool, name, input, cancellation)
+                .execute_with_approval(&*tool, name, input, cancellation)
                 .await;
         }
 
-        Self::run_tool(tool, input, cancellation).await
+        Self::run_tool(&*tool, input, cancellation).await
     }
 
     async fn execute_with_approval(

@@ -150,13 +150,16 @@ pub async fn save_explicit_scratchpad_results(
 }
 
 /// Check each text block in tool results. If oversized, persist to DB
-/// and replace with a preview + handle. Auto-generates names like
-/// `{tool_name}_{N}`.
+/// and replace with a preview + handle. Names are derived from the tool
+/// call's `scratchpad_hint` (MCP adapters) or the tool name otherwise, with
+/// a numeric suffix on collision. `hints` is typically the per-turn map
+/// owned by the agent — empty is fine.
 pub async fn persist_oversized_results(
     session_manager: &SessionManager,
     session_id: Uuid,
     assistant_message: &Message,
     results: &mut [ContentBlock],
+    hints: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let tool_use_map = build_tool_use_map(assistant_message);
     let mut counter: usize = 0;
@@ -168,10 +171,12 @@ pub async fn persist_oversized_results(
             ..
         } = block
         {
-            let tool_name = tool_use_map
-                .get(tool_use_id.as_str())
-                .map(|(name, _)| name.as_str())
-                .unwrap_or("unknown");
+            let base_name = hints.get(tool_use_id.as_str()).cloned().unwrap_or_else(|| {
+                tool_use_map
+                    .get(tool_use_id.as_str())
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
 
             for item in content.iter_mut() {
                 if let ToolResultContent::Text { text } = item {
@@ -180,7 +185,7 @@ pub async fn persist_oversized_results(
                     }
 
                     counter += 1;
-                    let name = format!("{}_{}", tool_name, counter);
+                    let name = format!("{}_{}", base_name, counter);
 
                     session_manager
                         .save_tool_output(session_id, &name, text)
@@ -229,6 +234,7 @@ impl Tool for ScratchpadWriteTool {
                 },
                 "required": ["name", "content"]
             }),
+            ..Default::default()
         }
     }
 
@@ -312,6 +318,7 @@ impl Tool for ScratchpadReadTool {
                 },
                 "required": ["name"]
             }),
+            ..Default::default()
         }
     }
 
@@ -464,6 +471,7 @@ impl Tool for ScratchpadEditTool {
                 },
                 "required": ["name"]
             }),
+            ..Default::default()
         }
     }
 
@@ -592,6 +600,7 @@ impl Tool for ScratchpadListTool {
                 "type": "object",
                 "properties": {}
             }),
+            ..Default::default()
         }
     }
 
@@ -652,6 +661,7 @@ impl Tool for ScratchpadDeleteTool {
                 },
                 "required": ["name"]
             }),
+            ..Default::default()
         }
     }
 
@@ -749,9 +759,15 @@ mod tests {
             is_error: false,
         }];
 
-        persist_oversized_results(&manager, session_id, &assistant_msg, &mut results)
-            .await
-            .expect("persist");
+        persist_oversized_results(
+            &manager,
+            session_id,
+            &assistant_msg,
+            &mut results,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("persist");
 
         if let ContentBlock::ToolResult { content, .. } = &results[0] {
             let text = ContentBlock::tool_result_text_content(content);
@@ -786,9 +802,15 @@ mod tests {
             is_error: false,
         }];
 
-        persist_oversized_results(&manager, session_id, &assistant_msg, &mut results)
-            .await
-            .expect("persist");
+        persist_oversized_results(
+            &manager,
+            session_id,
+            &assistant_msg,
+            &mut results,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("persist");
 
         if let ContentBlock::ToolResult { content, .. } = &results[0] {
             assert_eq!(ContentBlock::tool_result_text_content(content), small_text);

@@ -163,6 +163,7 @@ pub(crate) fn build_image_tool_output(
             },
         ],
         is_error: false,
+        scratchpad_hint: None,
     }
 }
 

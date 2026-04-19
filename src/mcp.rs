@@ -3,43 +3,410 @@
 //! their tools through the regular [`crate::tools`] registry, and handles
 //! OAuth/JWT authentication for HTTP transports.
 
+pub mod cli;
+pub mod elicitation;
+pub mod env;
+pub mod progress;
+pub mod resource_updates;
+pub mod sanitize;
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use rmcp::ErrorData as McpError;
+use rmcp::handler::client::ClientHandler;
+use rmcp::model::{
+    CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest,
+    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestParams,
+    CreateMessageResult, ErrorCode, GetPromptRequestParams, GetPromptResult, ListRootsResult, Meta,
+    ProgressNotificationParam, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
+    Role, Root, SamplingMessage, SamplingMessageContent, ServerResult,
+};
+use rmcp::service::{NotificationContext, PeerRequestOptions, RequestContext, ServiceError};
 use rmcp::transport::auth::OAuthState;
 use rmcp::transport::{
     AuthClient, AuthError, AuthorizationManager, ClientCredentialsConfig, CredentialStore,
     StoredCredentials,
 };
+use rmcp::{Peer, RoleClient};
 use tokio::process::Command;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{McpAuthConfig, McpServerConfig, McpTransport};
 use crate::error::{AgshError, Result};
 use crate::permission::Permission;
-use crate::provider::ToolDefinition;
+use crate::provider::{Provider, ToolDefinition};
 use crate::session::TokenStore;
-use crate::tools::{Tool, ToolOutput};
+use crate::tools::{Tool, ToolOutput, ToolRegistry};
 
-type McpRunningService = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+/// Cap MCP-provided text (tool descriptions, resource/prompt descriptions) to
+/// this many characters so a chatty server can't blow up the system prompt.
+/// Mirrors Claude Code's `MAX_MCP_DESCRIPTION_LENGTH`.
+pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
+
+/// Cap on base64 payload size for an MCP image tool-result block. A server
+/// returning a giant image would otherwise be cloned verbatim, forwarded to
+/// the provider, billed against the user's API quota, and risk OOM. Mirrors
+/// the 10 MiB body cap on `fetch_url`.
+pub const MAX_MCP_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Wall-clock timeout on `provider.complete` calls invoked from a server's
+/// `sampling/createMessage` request. Without it, a hung provider keeps the
+/// MCP request open forever; with it, the server gets a timely error and
+/// the sampling slot is freed.
+pub const MCP_SAMPLING_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Allow-list of image MIME types passed straight through to the provider.
+/// Anything else (notably `image/svg+xml`, which can embed script/link
+/// elements) is converted to a text placeholder.
+pub const ALLOWED_IMAGE_MIME_TYPES: &[&str] =
+    &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Cache TTL for MCP "needs auth" probe verdicts. A value of 15 min matches
+/// Claude Code's `MCP_AUTH_CACHE_TTL_MS` and keeps a restart after a failed
+/// auth flow from re-probing servers in a tight loop.
+pub const MCP_AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Best-effort revoke of a stored OAuth access/refresh token for an MCP
+/// server. Looks up the stored credentials, discovers the provider's
+/// revocation endpoint via the OAuth authorization server metadata, and
+/// posts `token=…&token_type_hint=access_token` per RFC 7009. Errors are
+/// propagated so the caller can log them; local credential cleanup should
+/// run regardless.
+pub async fn revoke_stored_token(
+    token_store: &TokenStore,
+    server_name: &str,
+) -> std::result::Result<(), String> {
+    let Some(json) = token_store
+        .load_mcp_credentials(server_name)
+        .await
+        .map_err(|error| format!("load credentials: {}", error))?
+    else {
+        return Ok(());
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|error| format!("stored credentials are not valid JSON: {}", error))?;
+    let issuer = parsed
+        .get("server_url")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("issuer").and_then(|v| v.as_str()))
+        .ok_or_else(|| "stored credentials missing issuer/server_url".to_string())?;
+    let access_token = parsed
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str());
+    let client_id = parsed
+        .get("client")
+        .and_then(|c| c.get("client_id"))
+        .and_then(|v| v.as_str());
+
+    let Some(access_token) = access_token else {
+        return Ok(());
+    };
+
+    // Discover the revocation endpoint. RFC 8414 says it lives under
+    // /.well-known/oauth-authorization-server; many providers also expose it
+    // under /.well-known/openid-configuration. Try OAuth first.
+    //
+    // Threat model: the `issuer` URL comes from credentials we stored during
+    // the original auth flow, so we trust the origin. We do NOT trust the
+    // network path or any redirect: reqwest follows redirects by default,
+    // which would let a MITM redirect the metadata fetch to an attacker host
+    // and coax us into POSTing the access token there. Redirects are turned
+    // off, the response body is size-capped, and the returned
+    // `revocation_endpoint` is pinned to the same host as the issuer.
+    const METADATA_BODY_CAP: usize = 256 * 1024;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("build http client: {}", error))?;
+
+    let base = issuer.trim_end_matches('/');
+    let candidates = [
+        format!("{}/.well-known/oauth-authorization-server", base),
+        format!("{}/.well-known/openid-configuration", base),
+    ];
+    let mut revocation_endpoint: Option<String> = None;
+    for url in &candidates {
+        let Ok(response) = http.get(url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        // Read bytes before parsing so we can size-cap: reqwest's own
+        // Content-Length is server-supplied and therefore untrusted.
+        let Ok(bytes) = response.bytes().await else {
+            continue;
+        };
+        if let Some(endpoint) = extract_revocation_endpoint(&bytes, METADATA_BODY_CAP) {
+            revocation_endpoint = Some(endpoint);
+            break;
+        }
+    }
+
+    let Some(endpoint) = revocation_endpoint else {
+        return Err(format!(
+            "server '{}' does not advertise a revocation_endpoint",
+            server_name
+        ));
+    };
+
+    validate_revocation_endpoint_origin(issuer, &endpoint)?;
+
+    // Build application/x-www-form-urlencoded body manually so we don't need
+    // an extra dependency. `form_urlencoded` uses %-encoded UTF-8, same as
+    // `percent_encoding::NON_ALPHANUMERIC`.
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+    let mut body = format!("token={}&token_type_hint=access_token", enc(access_token));
+    if let Some(id) = client_id {
+        body.push_str("&client_id=");
+        body.push_str(&enc(id));
+    }
+
+    let response = http
+        .post(&endpoint)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| format!("revoke POST failed: {}", error))?;
+    // RFC 7009: successful revocation is 200 OK with an empty body;
+    // unknown tokens also return 200 OK. Non-2xx is a genuine failure.
+    if !response.status().is_success() {
+        return Err(format!(
+            "revoke POST returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    Ok(())
+}
+
+/// Parse an OAuth authorization-server metadata JSON document and return
+/// the `revocation_endpoint` string, if any. Rejects bodies larger than
+/// `max_bytes` and invalid JSON. Split from [`revoke_stored_token`] so the
+/// size-cap and extraction logic are testable without a live HTTP server.
+fn extract_revocation_endpoint(bytes: &[u8], max_bytes: usize) -> Option<String> {
+    if bytes.len() > max_bytes {
+        return None;
+    }
+    let metadata = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    metadata
+        .get("revocation_endpoint")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Verify that `endpoint` has the same scheme, host, and effective port as
+/// `issuer`. Prevents a compromised metadata document from redirecting the
+/// access-token POST to an attacker-controlled host.
+fn validate_revocation_endpoint_origin(
+    issuer: &str,
+    endpoint: &str,
+) -> std::result::Result<(), String> {
+    let issuer_url = reqwest::Url::parse(issuer)
+        .map_err(|error| format!("stored issuer '{}' is not a valid URL: {}", issuer, error))?;
+    let endpoint_url = reqwest::Url::parse(endpoint).map_err(|error| {
+        format!(
+            "revocation_endpoint '{}' is not a valid URL: {}",
+            endpoint, error
+        )
+    })?;
+    if endpoint_url.scheme() != issuer_url.scheme()
+        || endpoint_url.host_str() != issuer_url.host_str()
+        || endpoint_url.port_or_known_default() != issuer_url.port_or_known_default()
+    {
+        return Err(format!(
+            "revocation_endpoint '{}' is on a different origin than issuer '{}'; refusing to send token",
+            endpoint, issuer
+        ));
+    }
+    Ok(())
+}
+
+type McpRunningService = rmcp::service::RunningService<RoleClient, AgshClientHandler>;
 
 pub struct McpClientManager {
-    servers: HashMap<String, Arc<McpRunningService>>,
+    servers: HashMap<String, Arc<ServerEntry>>,
+}
+
+/// Holds the live service for a single MCP server plus reconnection state.
+/// Wrapped in an [`Arc`] and shared between the manager, per-server tool
+/// adapters, and the resource/prompt builtin tools so they all see the
+/// current service after a reconnect.
+pub struct ServerEntry {
+    server_name: String,
+    config: McpServerConfig,
+    token_store: Option<TokenStore>,
+    client_context: Arc<McpClientContext>,
+    service: RwLock<Arc<McpRunningService>>,
+    reconnect_lock: Mutex<()>,
+    /// Optional `InitializeResult.instructions` captured at connect-time.
+    /// Immutable for the lifetime of the connection per the MCP spec.
+    instructions: OnceLock<Option<String>>,
+}
+
+impl ServerEntry {
+    /// Returns the server's `InitializeResult.instructions` (sanitised +
+    /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`]) if the server advertised
+    /// one during the handshake.
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.get().and_then(|opt| opt.as_deref())
+    }
+}
+
+impl ServerEntry {
+    async fn current_peer(&self) -> Peer<RoleClient> {
+        self.service.read().await.peer().clone()
+    }
+
+    /// Attempt to reconnect this server with exponential backoff. Serialised
+    /// via `reconnect_lock` so concurrent tool calls don't stampede. If
+    /// another caller already reopened the transport, returns immediately.
+    ///
+    /// Schedule: 1s, 2s, 4s, 8s, 16s, capped at 30s, max 5 attempts. Only
+    /// remote (HTTP) transports go through backoff — a dead stdio child has
+    /// to be respawned and retry-after-sleep doesn't help.
+    ///
+    /// The connect future itself can be `!Send` for OAuth-authenticated
+    /// servers (rmcp 1.5 holds a `form_urlencoded::Serializer` across an
+    /// await in its auth module, whose `Option<&dyn Fn(&str) -> Cow<[u8]>>`
+    /// closure slot is not `Sync`). To keep `Tool::execute`'s `Send` bound
+    /// satisfied, we drive the reconnect on a `spawn_blocking` thread using
+    /// the outer runtime's `Handle`.
+    async fn reconnect(self: &Arc<Self>) -> Result<()> {
+        let _guard = self.reconnect_lock.lock().await;
+
+        if !self.service.read().await.peer().is_transport_closed() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "MCP server '{}' transport closed, attempting reconnect",
+            self.server_name
+        );
+
+        let max_attempts: u32 = match self.config.transport {
+            McpTransport::Stdio => 1,
+            McpTransport::Http => 5,
+        };
+        let mut last_error: Option<AgshError> = None;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                // 1s, 2s, 4s, 8s, 16s, capped at 30s.
+                let delay_secs = std::cmp::min(30u64, 1u64 << (attempt - 1));
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            }
+            let handle = tokio::runtime::Handle::current();
+            let server_name = self.server_name.clone();
+            let config = self.config.clone();
+            let token_store = self.token_store.clone();
+            let client_context = Arc::clone(&self.client_context);
+
+            let result = tokio::task::spawn_blocking(move || {
+                handle.block_on(connect_server(
+                    &server_name,
+                    &config,
+                    token_store.as_ref(),
+                    &client_context,
+                ))
+            })
+            .await;
+
+            match result {
+                Ok(Ok(new_service)) => {
+                    *self.service.write().await = Arc::new(new_service);
+                    tracing::info!(
+                        "reconnected to MCP server '{}' on attempt {}",
+                        self.server_name,
+                        attempt + 1
+                    );
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        "MCP server '{}' reconnect attempt {} failed: {}",
+                        self.server_name,
+                        attempt + 1,
+                        error
+                    );
+                    last_error = Some(error);
+                }
+                Err(join_error) => {
+                    tracing::warn!(
+                        "MCP server '{}' reconnect task join error on attempt {}: {}",
+                        self.server_name,
+                        attempt + 1,
+                        join_error
+                    );
+                    last_error = Some(AgshError::McpConnection {
+                        server_name: self.server_name.clone(),
+                        message: format!("reconnect task join error: {}", join_error),
+                    });
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| AgshError::McpConnection {
+            server_name: self.server_name.clone(),
+            message: format!("exhausted {} reconnect attempts", max_attempts),
+        }))
+    }
 }
 
 impl McpClientManager {
     pub async fn connect_all(
         configs: &[McpServerConfig],
         token_store: Option<&TokenStore>,
+        client_context: Arc<McpClientContext>,
     ) -> Result<Self> {
         let mut servers = HashMap::new();
 
-        for config in configs {
+        for original_config in configs {
+            // Apply env-var substitution (`${VAR}` / `${VAR:-default}`) once,
+            // up-front, so the rest of the pipeline sees only resolved values.
+            let mut config = original_config.clone();
+            let missing = crate::mcp::env::expand_server_config(&mut config);
+            if !missing.is_empty() {
+                tracing::warn!(
+                    "MCP server '{}': unresolved env vars {:?} left literal in config",
+                    config.name,
+                    missing
+                );
+            }
+
             if config.name.is_empty() {
                 return Err(AgshError::McpConnection {
                     server_name: "(empty)".to_string(),
                     message: "server name must not be empty".to_string(),
+                });
+            }
+
+            // Reject anything that would collide with agsh-internal names or
+            // our `<server>__<tool>` namespace separator.
+            if crate::mcp::sanitize::is_reserved_server_name(&config.name) {
+                return Err(AgshError::McpConnection {
+                    server_name: config.name.clone(),
+                    message: "server name is reserved (agsh, ide, or mcp_*)".to_string(),
+                });
+            }
+
+            let normalised = crate::mcp::sanitize::normalize_server_name(&config.name);
+            if normalised != config.name {
+                return Err(AgshError::McpConnection {
+                    server_name: config.name.clone(),
+                    message: format!(
+                        "server name contains characters not allowed in tool prefixes (would normalise to '{}')",
+                        normalised
+                    ),
                 });
             }
 
@@ -58,22 +425,71 @@ impl McpClientManager {
                 });
             }
 
-            let service = match connect_server(config, token_store).await {
-                Ok(service) => service,
-                Err(error) => {
-                    tracing::warn!(
-                        "failed to connect to MCP server '{}': {}",
-                        config.name,
-                        error
-                    );
-                    continue;
-                }
-            };
+            let service =
+                match connect_server(&config.name, &config, token_store, &client_context).await {
+                    Ok(service) => service,
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to connect to MCP server '{}': {}",
+                            config.name,
+                            error
+                        );
+                        continue;
+                    }
+                };
             tracing::info!("connected to MCP server '{}'", config.name);
-            servers.insert(config.name.clone(), Arc::new(service));
+            let instructions_slot: OnceLock<Option<String>> = OnceLock::new();
+            let captured = service
+                .peer()
+                .peer_info()
+                .and_then(|info| info.instructions.as_ref())
+                .map(|raw| {
+                    crate::mcp::truncate(
+                        &crate::mcp::sanitize::sanitize_text(raw),
+                        MAX_MCP_DESCRIPTION_LENGTH,
+                    )
+                });
+            let _ = instructions_slot.set(captured);
+
+            let entry = Arc::new(ServerEntry {
+                server_name: config.name.clone(),
+                config: config.clone(),
+                token_store: token_store.cloned(),
+                client_context: Arc::clone(&client_context),
+                service: RwLock::new(Arc::new(service)),
+                reconnect_lock: Mutex::new(()),
+                instructions: instructions_slot,
+            });
+            servers.insert(config.name.clone(), entry);
         }
 
         Ok(Self { servers })
+    }
+
+    pub fn server_entry(&self, server_name: &str) -> Option<Arc<ServerEntry>> {
+        self.servers.get(server_name).cloned()
+    }
+
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers.keys().cloned().collect()
+    }
+
+    /// Returns `(server_name, instructions)` pairs for every connected server
+    /// that advertised an `InitializeResult.instructions` string during the
+    /// handshake. Already sanitised and truncated to
+    /// [`MAX_MCP_DESCRIPTION_LENGTH`]. Used by the agent loop to splice MCP
+    /// server instructions into the system prompt.
+    pub fn server_instructions(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (name, entry) in &self.servers {
+            if let Some(text) = entry.instructions() {
+                if !text.trim().is_empty() {
+                    out.push((name.clone(), text.to_string()));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     pub async fn discover_tools_for_server(
@@ -81,37 +497,77 @@ impl McpClientManager {
         server_name: &str,
         permission_str: Option<&str>,
     ) -> Result<Vec<McpToolAdapter>> {
-        let Some(service) = self.servers.get(server_name) else {
+        let Some(entry) = self.servers.get(server_name) else {
             return Ok(Vec::new());
         };
 
         let permission = parse_server_permission(server_name, permission_str)?;
 
-        let tools =
-            service
-                .peer()
-                .list_all_tools()
-                .await
-                .map_err(|error| AgshError::McpConnection {
-                    server_name: server_name.to_string(),
-                    message: format!("list_tools failed: {}", error),
-                })?;
+        let peer = entry.current_peer().await;
+        let tools = peer
+            .list_all_tools()
+            .await
+            .map_err(|error| AgshError::McpConnection {
+                server_name: server_name.to_string(),
+                message: format!("list_tools failed: {}", error),
+            })?;
 
         let mut adapters = Vec::new();
         for tool in tools {
-            let namespaced_name = format!("{}__{}", server_name, tool.name);
-            let description = tool.description.map(|d| d.into_owned()).unwrap_or_default();
-            let parameters = serde_json::to_value(&*tool.input_schema)
-                .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
+            // Sanitise the tool's advertised name defensively — rare in the
+            // wild, but a server returning `my.tool` or anything with
+            // Unicode would cause the provider to reject the schema.
+            let sanitised_tool_name =
+                crate::mcp::sanitize::normalize_server_name(tool.name.as_ref());
+            let namespaced_name = format!("{}__{}", server_name, sanitised_tool_name);
+
+            let raw_description = tool
+                .description
+                .as_ref()
+                .map(|d| d.as_ref().to_string())
+                .unwrap_or_default();
+            let description = truncate(
+                &crate::mcp::sanitize::sanitize_text(&raw_description),
+                MAX_MCP_DESCRIPTION_LENGTH,
+            );
+
+            let parameters = match serde_json::to_value(&*tool.input_schema) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        "MCP server '{}' tool '{}' has unserializable input schema ({}); \
+                         skipping registration",
+                        server_name,
+                        tool.name,
+                        error
+                    );
+                    continue;
+                }
+            };
+
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .and_then(|ann| serde_json::to_value(ann).ok());
+            let meta = tool
+                .meta
+                .as_ref()
+                .and_then(|m| serde_json::to_value(m).ok());
+            let title = tool
+                .title
+                .as_ref()
+                .map(|t| crate::mcp::sanitize::sanitize_text(t));
 
             adapters.push(McpToolAdapter {
                 namespaced_name,
-                server_name: server_name.to_string(),
                 remote_tool_name: tool.name.into_owned(),
                 description,
                 parameters,
                 permission,
-                service: Arc::clone(service),
+                entry: Arc::clone(entry),
+                annotations,
+                meta,
+                title,
             });
         }
 
@@ -119,21 +575,59 @@ impl McpClientManager {
     }
 
     pub async fn shutdown(self) {
-        for (server_name, service) in self.servers {
+        /// Max time to wait for in-flight tool calls to complete before we
+        /// drop the shared service Arc and let the drop-guard cancel it.
+        const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+        /// Max time to wait for `RunningService::close` to finish after the
+        /// shared references are released.
+        const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+        for (server_name, entry) in self.servers {
+            let Ok(entry) = Arc::try_unwrap(entry) else {
+                tracing::debug!(
+                    "MCP server '{}' entry still referenced; relying on drop guard for cleanup",
+                    server_name
+                );
+                continue;
+            };
+
+            let service = entry.service.into_inner();
+
+            // In-flight tool calls hold their own Arc<RunningService> clone.
+            // Wait up to `SHUTDOWN_GRACE` for those to complete so the normal
+            // `RunningService::close` path can run instead of falling straight
+            // to the drop-guard abort.
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while Arc::strong_count(&service) > 1 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+
             match Arc::try_unwrap(service) {
-                Ok(service) => {
-                    if let Err(error) = service.cancel().await {
-                        tracing::warn!(
-                            "failed to shut down MCP server '{}': {}",
-                            server_name,
-                            error
-                        );
+                Ok(mut owned_service) => {
+                    match owned_service.close_with_timeout(CLOSE_TIMEOUT).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            tracing::warn!(
+                                "MCP server '{}' shutdown timed out after {:?}",
+                                server_name,
+                                CLOSE_TIMEOUT
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "failed to shut down MCP server '{}': {}",
+                                server_name,
+                                error
+                            );
+                        }
                     }
                 }
                 Err(_arc) => {
-                    tracing::warn!(
-                        "MCP server '{}' still has outstanding references, dropping",
-                        server_name
+                    tracing::debug!(
+                        "MCP server '{}' still had in-flight calls after {:?} grace; \
+                         relying on drop guard for cleanup",
+                        server_name,
+                        SHUTDOWN_GRACE
                     );
                 }
             }
@@ -141,11 +635,56 @@ impl McpClientManager {
     }
 }
 
+/// Build a [`Command`] for a stdio MCP server, wrapping shell shims in
+/// `cmd /c` on Windows so `npx`, `*.cmd`, and `*.bat` executables can be
+/// launched directly as a command string. Unix paths pass through unchanged.
+pub fn build_stdio_command(command_str: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        let lower = command_str.to_ascii_lowercase();
+        let is_shim = lower == "npx"
+            || lower == "yarn"
+            || lower == "pnpm"
+            || lower.ends_with(".cmd")
+            || lower.ends_with(".bat")
+            || lower.ends_with(".ps1");
+        if is_shim {
+            // `cmd /c <command> <args...>` — Windows wraps argument quoting.
+            // We don't try to shell-quote the args; the `Command` API does
+            // the OS-appropriate escaping via CreateProcess's lpCommandLine.
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/c").arg(command_str).args(args);
+            return cmd;
+        }
+    }
+    let _ = (command_str, args);
+    let mut cmd = Command::new(command_str);
+    cmd.args(args);
+    cmd
+}
+
+/// Connect to an MCP server, dispatching to the auth or no-auth path. This
+/// function is only called from top-level startup code (e.g. `connect_all`)
+/// where a `Send` future isn't required — the OAuth path pulls in an rmcp
+/// auth future that is `!Send`.
+/// Connect to an MCP server. The returned future is `!Send` when the server
+/// config uses OAuth (rmcp 1.5's auth module holds a `!Sync` closure across
+/// an await). Callers that need a `Send` future (e.g. `Tool::execute` during
+/// reconnect) drive this on a `spawn_blocking` thread via
+/// [`ServerEntry::reconnect`].
 async fn connect_server(
+    server_name: &str,
     config: &McpServerConfig,
     token_store: Option<&TokenStore>,
+    client_context: &Arc<McpClientContext>,
 ) -> Result<McpRunningService> {
     use rmcp::ServiceExt;
+
+    let handler = AgshClientHandler::new(
+        server_name.to_string(),
+        SamplingPolicy::from_config(config),
+        Arc::clone(client_context),
+    );
 
     match config.transport {
         McpTransport::Stdio => {
@@ -154,29 +693,29 @@ async fn connect_server(
                     .command
                     .as_deref()
                     .ok_or_else(|| AgshError::McpConnection {
-                        server_name: config.name.clone(),
+                        server_name: server_name.to_string(),
                         message: "stdio transport requires 'command' field".to_string(),
                     })?;
 
-            let mut command = Command::new(command_str);
-            if let Some(args) = &config.args {
-                command.args(args);
-            }
+            let args_vec: Vec<String> = config.args.clone().unwrap_or_default();
+            let command = build_stdio_command(command_str, &args_vec);
+            let mut command = command;
             if let Some(env) = &config.env {
                 command.envs(env);
             }
 
             let transport = rmcp::transport::TokioChildProcess::new(command).map_err(|error| {
                 AgshError::McpConnection {
-                    server_name: config.name.clone(),
+                    server_name: server_name.to_string(),
                     message: format!("failed to spawn process: {}", error),
                 }
             })?;
 
-            ().serve(transport)
+            handler
+                .serve(transport)
                 .await
                 .map_err(|error| AgshError::McpConnection {
-                    server_name: config.name.clone(),
+                    server_name: server_name.to_string(),
                     message: format!("handshake failed: {}", error),
                 })
         }
@@ -185,59 +724,246 @@ async fn connect_server(
                 .url
                 .as_deref()
                 .ok_or_else(|| AgshError::McpConnection {
-                    server_name: config.name.clone(),
+                    server_name: server_name.to_string(),
                     message: "http transport requires 'url' field".to_string(),
                 })?;
 
-            let mut transport_config =
-                rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
-
-            if let Some(token) = &config.auth_token {
-                transport_config = transport_config.auth_header(token.clone());
-            }
-
-            if let Some(headers) = &config.headers {
-                let mut header_map = std::collections::HashMap::new();
-                for (key, value) in headers {
-                    let header_name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                        .map_err(|error| AgshError::McpConnection {
-                            server_name: config.name.clone(),
-                            message: format!("invalid header name '{}': {}", key, error),
-                        })?;
-                    let header_value =
-                        reqwest::header::HeaderValue::from_str(value).map_err(|error| {
-                            AgshError::McpConnection {
-                                server_name: config.name.clone(),
-                                message: format!("invalid header value for '{}': {}", key, error),
-                            }
-                        })?;
-                    header_map.insert(header_name, header_value);
+            // Consult the auth-probe cache: if a prior connect returned 401
+            // recently and we have no stored creds, skip the unauthenticated
+            // probe and drive straight into the OAuth flow. The cache entry
+            // is cleared on a successful connect below.
+            if config.auth.is_some() {
+                if let Some(store) = token_store {
+                    match store.load_auth_probe(server_name, MCP_AUTH_CACHE_TTL).await {
+                        Ok(Some(true)) => {
+                            tracing::info!(
+                                "MCP server '{}': cached 'needs-auth' verdict (<{:?} old), going straight to OAuth",
+                                server_name,
+                                MCP_AUTH_CACHE_TTL
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::debug!(
+                            "auth probe cache lookup for '{}' failed: {}",
+                            server_name,
+                            error
+                        ),
+                    }
                 }
-                transport_config = transport_config.custom_headers(header_map);
             }
+
+            let transport_config = build_http_transport_config(server_name, config)?;
 
             if let Some(auth_config) = &config.auth {
                 connect_http_with_oauth(
-                    &config.name,
+                    server_name,
                     url,
                     auth_config,
                     transport_config,
                     token_store,
+                    handler,
                 )
                 .await
             } else {
                 let transport =
                     rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
 
-                ().serve(transport)
+                handler
+                    .serve(transport)
                     .await
                     .map_err(|error| AgshError::McpConnection {
-                        server_name: config.name.clone(),
+                        server_name: server_name.to_string(),
                         message: format!("HTTP connection failed: {}", error),
                     })
             }
         }
     }
+}
+
+/// Build the shared HTTP transport config (URL, bearer token, custom headers)
+/// used by both the auth and no-auth paths.
+fn build_http_transport_config(
+    server_name: &str,
+    config: &McpServerConfig,
+) -> Result<rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig> {
+    let url = config
+        .url
+        .as_deref()
+        .ok_or_else(|| AgshError::McpConnection {
+            server_name: server_name.to_string(),
+            message: "http transport requires 'url' field".to_string(),
+        })?;
+
+    let mut transport_config =
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+
+    if let Some(token) = &config.auth_token {
+        transport_config = transport_config.auth_header(token.clone());
+    }
+
+    // Merge dynamic headers from the optional `headers_helper` script on
+    // top of the static `headers` map (dynamic values override static ones).
+    let mut merged_headers: std::collections::HashMap<String, String> =
+        config.headers.clone().unwrap_or_default();
+    if let Some(script) = &config.headers_helper {
+        let dynamic = run_headers_helper(server_name, url, script)?;
+        merged_headers.extend(dynamic);
+    }
+
+    if !merged_headers.is_empty() {
+        let mut header_map = std::collections::HashMap::new();
+        for (key, value) in &merged_headers {
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
+                    AgshError::McpConnection {
+                        server_name: server_name.to_string(),
+                        message: format!("invalid header name '{}': {}", key, error),
+                    }
+                })?;
+            let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                AgshError::McpConnection {
+                    server_name: server_name.to_string(),
+                    message: format!("invalid header value for '{}': {}", key, error),
+                }
+            })?;
+            header_map.insert(header_name, header_value);
+        }
+        transport_config = transport_config.custom_headers(header_map);
+    }
+
+    Ok(transport_config)
+}
+
+/// Execute `headers_helper` and parse its stdout as an `Name: Value\n`
+/// stream, returning a map merged into the HTTP transport's custom headers.
+///
+/// The script is spawned synchronously (it's a startup-path helper, not
+/// called per-request) with a 15-second wall-clock timeout. `AGSH_MCP_SERVER_NAME`
+/// and `AGSH_MCP_SERVER_URL` are injected so one helper can serve multiple
+/// servers.
+fn run_headers_helper(
+    server_name: &str,
+    url: &str,
+    script: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use std::process::Stdio;
+    let err_ctx = |msg: String| AgshError::McpConnection {
+        server_name: server_name.to_string(),
+        message: msg,
+    };
+
+    // Resolve the script path. If it's relative and doesn't exist as-is,
+    // try resolving against the agsh config directory for safety (same place
+    // config.toml lives).
+    let script_path = std::path::Path::new(script);
+    let resolved: std::path::PathBuf = if script_path.is_absolute() || script_path.exists() {
+        script_path.to_path_buf()
+    } else if let Some(config_dir) = dirs::config_dir() {
+        let candidate = config_dir.join("agsh").join(script);
+        if candidate.exists() {
+            candidate
+        } else {
+            script_path.to_path_buf()
+        }
+    } else {
+        script_path.to_path_buf()
+    };
+
+    let mut command = std::process::Command::new(&resolved);
+    command
+        .env("AGSH_MCP_SERVER_NAME", server_name)
+        .env("AGSH_MCP_SERVER_URL", url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        err_ctx(format!(
+            "headers_helper '{}' spawn failed: {}",
+            script, error
+        ))
+    })?;
+
+    // Poll for exit with a 15-second budget. std::process::Child doesn't
+    // expose a blocking wait_timeout, so loop on try_wait with a short sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return Err(err_ctx(format!(
+                        "headers_helper '{}' timed out after 15s",
+                        script
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(err_ctx(format!(
+                    "headers_helper '{}' wait failed: {}",
+                    script, error
+                )));
+            }
+        }
+    };
+
+    // Caps on how much helper output we're willing to buffer. stdout is the
+    // header list (rarely more than a few KiB); stderr is surfaced verbatim
+    // in the error message so keep it tight.
+    const MAX_HELPER_STDOUT_BYTES: u64 = 64 * 1024;
+    const MAX_HELPER_STDERR_BYTES: u64 = 4 * 1024;
+
+    if !status.success() {
+        let mut stderr_buf = Vec::new();
+        if let Some(stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr
+                .take(MAX_HELPER_STDERR_BYTES)
+                .read_to_end(&mut stderr_buf);
+        }
+        let stderr_text = String::from_utf8_lossy(&stderr_buf);
+        return Err(err_ctx(format!(
+            "headers_helper '{}' exited with status {}: {}",
+            script,
+            status.code().unwrap_or(-1),
+            stderr_text.trim()
+        )));
+    }
+
+    let mut stdout_buf = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        use std::io::Read;
+        pipe.take(MAX_HELPER_STDOUT_BYTES)
+            .read_to_end(&mut stdout_buf)
+            .map_err(|error| {
+                err_ctx(format!(
+                    "headers_helper '{}' stdout read failed: {}",
+                    script, error
+                ))
+            })?;
+    }
+    let stdout = String::from_utf8_lossy(&stdout_buf);
+
+    parse_header_lines(&stdout)
+        .map_err(|msg| err_ctx(format!("headers_helper '{}' output: {}", script, msg)))
+}
+
+fn parse_header_lines(
+    text: &str,
+) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+    let mut out = std::collections::HashMap::new();
+    for (line_no, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| format!("line {} missing ':' separator", line_no + 1))?;
+        out.insert(name.trim().to_string(), value.trim().to_string());
+    }
+    Ok(out)
 }
 
 async fn connect_http_with_oauth(
@@ -246,6 +972,7 @@ async fn connect_http_with_oauth(
     auth_config: &McpAuthConfig,
     transport_config: rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig,
     token_store: Option<&TokenStore>,
+    handler: AgshClientHandler,
 ) -> Result<McpRunningService> {
     use rmcp::ServiceExt;
 
@@ -296,7 +1023,7 @@ async fn connect_http_with_oauth(
                 client_id.as_deref(),
                 client_secret.as_deref(),
                 scopes.as_deref(),
-                redirect_port.unwrap_or(8400),
+                *redirect_port,
                 token_store,
             )
             .await?
@@ -307,7 +1034,8 @@ async fn connect_http_with_oauth(
     let transport =
         rmcp::transport::StreamableHttpClientTransport::with_client(auth_client, transport_config);
 
-    ().serve(transport)
+    handler
+        .serve(transport)
         .await
         .map_err(|error| AgshError::McpConnection {
             server_name: server_name.to_string(),
@@ -362,6 +1090,7 @@ async fn authenticate_client_credentials_jwt(
     scopes: Option<&[String]>,
     resource: Option<&str>,
 ) -> Result<AuthorizationManager> {
+    require_private_key_permissions(server_name, signing_key_path)?;
     let signing_key = std::fs::read(signing_key_path).map_err(|error| AgshError::McpAuth {
         server_name: server_name.to_string(),
         message: format!(
@@ -404,6 +1133,38 @@ async fn authenticate_client_credentials_jwt(
         })
 }
 
+/// On Unix, refuse to read a JWT signing key that is group- or world-
+/// accessible. Matches the 0600-only policy already applied to the session
+/// DB and config.toml: if the key can be read by another local user, a
+/// local attacker can forge JWTs to the MCP server and impersonate us.
+///
+/// No-op on non-Unix: Windows uses ACLs and we don't try to audit them.
+fn require_private_key_permissions(server_name: &str, path: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(path).map_err(|error| AgshError::McpAuth {
+            server_name: server_name.to_string(),
+            message: format!("failed to stat signing key '{}': {}", path, error),
+        })?;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(AgshError::McpAuth {
+                server_name: server_name.to_string(),
+                message: format!(
+                    "signing key '{}' has permissions {:o}; must be 0600 (group/other bits must be clear)",
+                    path, mode
+                ),
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (server_name, path);
+    }
+    Ok(())
+}
+
 fn parse_jwt_signing_algorithm(
     server_name: &str,
     algorithm: Option<&str>,
@@ -432,10 +1193,31 @@ async fn authenticate_oauth_authorization_code(
     client_id: Option<&str>,
     client_secret: Option<&str>,
     scopes: Option<&[String]>,
-    redirect_port: u16,
+    redirect_port: Option<u16>,
     token_store: Option<&TokenStore>,
 ) -> Result<AuthorizationManager> {
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", redirect_port);
+    // Bind the callback listener up-front so we can support a random ephemeral
+    // port (`redirect_port = None` → bind 0) and learn the actual port before
+    // constructing `redirect_uri`. This avoids the "port 8400 already in use"
+    // failure mode and lets multiple concurrent agsh sessions coexist.
+    let bind_port = redirect_port.unwrap_or(0);
+    let callback_listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", bind_port))
+        .await
+        .map_err(|error| AgshError::McpAuth {
+            server_name: server_name.to_string(),
+            message: format!(
+                "failed to bind callback server on port {}: {}",
+                bind_port, error
+            ),
+        })?;
+    let actual_port = callback_listener
+        .local_addr()
+        .map_err(|error| AgshError::McpAuth {
+            server_name: server_name.to_string(),
+            message: format!("callback listener local_addr failed: {}", error),
+        })?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", actual_port);
     let scope_strings: Vec<String> = scopes.map(|s| s.to_vec()).unwrap_or_default();
 
     let mut manager = AuthorizationManager::new(url)
@@ -565,8 +1347,8 @@ async fn authenticate_oauth_authorization_code(
     }
     eprintln!("If the browser didn't open, visit:\n  {}", auth_url);
 
-    // Start callback server and wait for the authorization code
-    let (code, state) = run_oauth_callback_server(redirect_port)
+    // Wait for the authorization code on our pre-bound listener.
+    let (code, state) = await_oauth_callback(callback_listener)
         .await
         .map_err(|error| AgshError::McpAuth {
             server_name: server_name.to_string(),
@@ -590,78 +1372,179 @@ async fn authenticate_oauth_authorization_code(
         })
 }
 
-async fn run_oauth_callback_server(port: u16) -> std::result::Result<(String, String), String> {
+/// Max bytes we're willing to read from a single HTTP callback request
+/// before giving up. Large enough to handle big `Cookie:` headers (which can
+/// exceed 4 KiB), small enough to cap a resource-exhaustion attempt.
+const CALLBACK_READ_CAP: usize = 64 * 1024;
+/// End-of-headers marker for HTTP/1.x.
+const CRLF_CRLF: &[u8] = b"\r\n\r\n";
+
+async fn await_oauth_callback(
+    listener: tokio::net::TcpListener,
+) -> std::result::Result<(String, String), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|error| format!("failed to bind callback server on port {}: {}", port, error))?;
+    let overall_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
 
-    let timeout = tokio::time::Duration::from_secs(120);
+    loop {
+        let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("authorization timed out after 120 seconds".to_string());
+        }
 
-    let (mut stream, _addr) = tokio::time::timeout(timeout, listener.accept())
-        .await
-        .map_err(|_| "authorization timed out after 120 seconds".to_string())?
-        .map_err(|error| format!("failed to accept connection: {}", error))?;
+        let accept_result = tokio::time::timeout(remaining, listener.accept()).await;
+        let (mut stream, _addr) = match accept_result {
+            Err(_) => return Err("authorization timed out after 120 seconds".to_string()),
+            Ok(Err(error)) => return Err(format!("failed to accept connection: {}", error)),
+            Ok(Ok(pair)) => pair,
+        };
 
-    let mut buffer = vec![0u8; 4096];
-    let bytes_read = stream
-        .read(&mut buffer)
-        .await
-        .map_err(|error| format!("failed to read request: {}", error))?;
+        // Read until we've seen CRLF-CRLF (end of request headers) or hit the
+        // byte cap. Browsers sometimes send favicon / preflight requests to
+        // the callback origin; if the path isn't `/callback?...`, respond
+        // with a minimal 404 so the browser stops retrying and keep waiting.
+        let mut buffer = Vec::with_capacity(4096);
+        let mut temp = [0u8; 4096];
+        let headers_complete = loop {
+            if buffer.windows(CRLF_CRLF.len()).any(|w| w == CRLF_CRLF) {
+                break true;
+            }
+            if buffer.len() >= CALLBACK_READ_CAP {
+                break false;
+            }
+            let read_remaining =
+                overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if read_remaining.is_zero() {
+                return Err("authorization timed out after 120 seconds".to_string());
+            }
+            match tokio::time::timeout(read_remaining, stream.read(&mut temp)).await {
+                Err(_) => return Err("authorization timed out after 120 seconds".to_string()),
+                Ok(Err(error)) => return Err(format!("failed to read request: {}", error)),
+                Ok(Ok(0)) => break buffer.windows(CRLF_CRLF.len()).any(|w| w == CRLF_CRLF),
+                Ok(Ok(n)) => buffer.extend_from_slice(&temp[..n]),
+            }
+        };
 
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+        if !headers_complete {
+            tracing::debug!(
+                "OAuth callback: dropped request with incomplete/oversized headers \
+                 ({} bytes)",
+                buffer.len()
+            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            continue;
+        }
 
-    // Parse the GET request line to extract query parameters
-    // Expected: GET /callback?code=...&state=... HTTP/1.1
-    let (code, state) = parse_callback_query(&request)?;
-
-    let response_body = "<!DOCTYPE html><html><body>\
-        <h1>Authorization successful</h1>\
-        <p>You can close this tab and return to agsh.</p>\
-        </body></html>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        response_body.len(),
-        response_body
-    );
-
-    if let Err(error) = stream.write_all(response.as_bytes()).await {
-        tracing::debug!("failed to send callback response: {}", error);
+        let request = String::from_utf8_lossy(&buffer);
+        match parse_callback_query(&request) {
+            Ok((code, state)) => {
+                let response_body = "<!DOCTYPE html><html><body>\
+                    <h1>Authorization successful</h1>\
+                    <p>You can close this tab and return to agsh.</p>\
+                    </body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                if let Err(error) = stream.write_all(response.as_bytes()).await {
+                    tracing::debug!("failed to send callback response: {}", error);
+                }
+                return Ok((code, state));
+            }
+            Err(CallbackParseError::NotCallbackPath) => {
+                // Almost certainly a browser preflight or favicon request.
+                // Respond 404 and keep waiting for the real callback.
+                tracing::debug!("OAuth callback: ignored non-callback request on callback port");
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                continue;
+            }
+            Err(CallbackParseError::Malformed(message)) => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+                return Err(message);
+            }
+        }
     }
-
-    Ok((code, state))
 }
 
-fn parse_callback_query(request: &str) -> std::result::Result<(String, String), String> {
-    let first_line = request.lines().next().ok_or("empty HTTP request")?;
+#[derive(Debug)]
+enum CallbackParseError {
+    /// Request wasn't to /callback at all (e.g. /favicon.ico, /).
+    NotCallbackPath,
+    /// Request targets /callback but failed to parse (missing code/state, etc).
+    Malformed(String),
+}
+
+fn parse_callback_query(
+    request: &str,
+) -> std::result::Result<(String, String), CallbackParseError> {
+    let first_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| CallbackParseError::Malformed("empty HTTP request".into()))?;
 
     let path = first_line
         .split_whitespace()
         .nth(1)
-        .ok_or("malformed HTTP request line")?;
+        .ok_or_else(|| CallbackParseError::Malformed("malformed HTTP request line".into()))?;
 
-    let query_string = path
-        .split_once('?')
-        .map(|(_, query)| query)
-        .ok_or("no query parameters in callback URL")?;
+    // Compare path component only, case-insensitive, anchored to /callback.
+    // `/` or `/favicon.ico` fall through to `NotCallbackPath`.
+    let (path_component, query_string) = match path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path, ""),
+    };
+    if !path_component.eq_ignore_ascii_case("/callback") {
+        return Err(CallbackParseError::NotCallbackPath);
+    }
+    if query_string.is_empty() {
+        return Err(CallbackParseError::Malformed(
+            "no query parameters in callback URL".into(),
+        ));
+    }
 
     let mut code = None;
     let mut state = None;
+    let mut error_param: Option<String> = None;
 
     for pair in query_string.split('&') {
-        if let Some((key, value)) = pair.split_once('=') {
-            match key {
-                "code" => code = Some(value.to_string()),
-                "state" => state = Some(value.to_string()),
-                _ => {}
-            }
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let decoded = percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .into_owned();
+        match key {
+            "code" => code = Some(decoded),
+            "state" => state = Some(decoded),
+            "error" => error_param = Some(decoded),
+            _ => {}
         }
     }
 
-    let code = code.ok_or("missing 'code' parameter in callback")?;
-    let state = state.ok_or("missing 'state' parameter in callback")?;
+    if let Some(error) = error_param {
+        // Strip Cc/Cf so a hostile authorization server can't inject ANSI
+        // escapes or RTL overrides through the error message.
+        return Err(CallbackParseError::Malformed(format!(
+            "authorization server returned error: {}",
+            crate::mcp::sanitize::sanitize_text(&error)
+        )));
+    }
+
+    let code = code.ok_or_else(|| {
+        CallbackParseError::Malformed("missing 'code' parameter in callback".into())
+    })?;
+    let state = state.ok_or_else(|| {
+        CallbackParseError::Malformed("missing 'state' parameter in callback".into())
+    })?;
 
     Ok((code, state))
 }
@@ -739,14 +1622,705 @@ fn parse_server_permission(server_name: &str, permission_str: Option<&str>) -> R
         })
 }
 
+/// Shared context threaded into every [`AgshClientHandler`] so notification
+/// callbacks and server-to-client requests (sampling, list_roots, elicitation)
+/// can reach the rest of the agent. All slots are optional because the
+/// handler is constructed before the agent/provider exist — they are filled
+/// in post-construction by `main.rs` using the `set_*` helpers.
+#[derive(Default)]
+pub struct McpClientContext {
+    /// LLM provider used to serve `sampling/createMessage` requests. Only
+    /// consulted when a server has `sampling = true` in its config.
+    provider: OnceLock<Arc<dyn Provider>>,
+    /// Tool registry to hot-swap when a server emits `tools/list_changed`.
+    registry: OnceLock<ToolRegistry>,
+    /// Weak reference to the MCP manager so the notification callback can
+    /// rediscover tools without creating an Arc cycle through the handler.
+    manager: OnceLock<Weak<McpClientManager>>,
+}
+
+impl McpClientContext {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set_provider(&self, provider: Arc<dyn Provider>) {
+        if self.provider.set(provider).is_err() {
+            tracing::warn!("MCP client context: provider already set");
+        }
+    }
+
+    pub fn set_registry(&self, registry: ToolRegistry) {
+        if self.registry.set(registry).is_err() {
+            tracing::warn!("MCP client context: registry already set");
+        }
+    }
+
+    pub fn set_manager(&self, manager: Weak<McpClientManager>) {
+        if self.manager.set(manager).is_err() {
+            tracing::warn!("MCP client context: manager already set");
+        }
+    }
+}
+
+/// Permission for each server to issue sampling requests. Mirrors the
+/// `sampling` / `sampling_limit` fields on `McpServerConfig`.
+#[derive(Clone)]
+pub struct SamplingPolicy {
+    allowed: bool,
+    limit: u32,
+    count: Arc<AtomicU32>,
+}
+
+impl SamplingPolicy {
+    fn from_config(config: &McpServerConfig) -> Self {
+        Self {
+            allowed: config.sampling,
+            limit: config.sampling_limit.unwrap_or(10),
+            count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
+/// Client-side MCP handler. Dispatches server-initiated requests
+/// (`sampling/createMessage`, `roots/list`, `elicitation/create`) and
+/// notifications (`tools/list_changed`, etc.) to the rest of the agent via
+/// the shared [`McpClientContext`].
+#[derive(Clone)]
+pub struct AgshClientHandler {
+    server_name: Arc<str>,
+    sampling: SamplingPolicy,
+    context: Arc<McpClientContext>,
+}
+
+impl AgshClientHandler {
+    pub fn new(
+        server_name: String,
+        sampling: SamplingPolicy,
+        context: Arc<McpClientContext>,
+    ) -> Self {
+        Self {
+            server_name: Arc::from(server_name),
+            sampling,
+            context,
+        }
+    }
+}
+
+impl ClientHandler for AgshClientHandler {
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let server_name: String = self.server_name.as_ref().to_string();
+        let manager = self.context.manager.get().and_then(|weak| weak.upgrade());
+        let registry = self.context.registry.get().cloned();
+
+        async move {
+            tracing::info!("MCP server '{}' sent tools/list_changed", server_name);
+            let (Some(manager), Some(registry)) = (manager, registry) else {
+                tracing::debug!(
+                    "tool list refresh skipped — context not yet wired for '{}'",
+                    server_name
+                );
+                return;
+            };
+
+            // The permission override from config.toml is the same one used at
+            // startup; re-read it from the original server config so we don't
+            // accidentally elevate or demote on refresh.
+            let permission_str = manager
+                .servers
+                .get(&server_name)
+                .and_then(|e| e.config.permission.clone());
+
+            match manager
+                .discover_tools_for_server(&server_name, permission_str.as_deref())
+                .await
+            {
+                Ok(adapters) => {
+                    let new_tools: Vec<Arc<dyn Tool>> = adapters
+                        .into_iter()
+                        .map(|a| Arc::new(a) as Arc<dyn Tool>)
+                        .collect();
+                    let new_names: Vec<String> =
+                        new_tools.iter().map(|t| t.definition().name).collect();
+                    registry.replace_server_tools(&server_name, new_tools);
+                    // Mark freshly-registered tools as deferred so they match
+                    // the behaviour of the initial startup registration.
+                    for name in new_names {
+                        registry.mark_deferred(&name);
+                    }
+                    tracing::info!("MCP server '{}' tool registry refreshed", server_name);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to refresh tools for MCP server '{}': {}",
+                        server_name,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    fn on_resource_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let server = Arc::clone(&self.server_name);
+        async move {
+            tracing::debug!("MCP server '{}' sent resources/list_changed", server);
+        }
+    }
+
+    fn on_prompt_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let server = Arc::clone(&self.server_name);
+        async move {
+            tracing::debug!("MCP server '{}' sent prompts/list_changed", server);
+        }
+    }
+
+    fn on_resource_updated(
+        &self,
+        params: rmcp::model::ResourceUpdatedNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let server = Arc::clone(&self.server_name);
+        async move {
+            tracing::info!(
+                "MCP server '{}' reported resource updated: {}",
+                server,
+                params.uri
+            );
+            crate::mcp::resource_updates::record(server.as_ref(), &params.uri);
+        }
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        async move {
+            crate::mcp::progress::dispatch(params);
+        }
+    }
+
+    fn on_logging_message(
+        &self,
+        params: rmcp::model::LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let server = Arc::clone(&self.server_name);
+        async move {
+            tracing::debug!(
+                "MCP server '{}' log [{:?}]: {}",
+                server,
+                params.level,
+                params.data
+            );
+        }
+    }
+
+    fn list_roots(
+        &self,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = std::result::Result<ListRootsResult, McpError>> + Send + '_ {
+        async move {
+            let cwd = std::env::current_dir().map_err(|error| {
+                McpError::internal_error(format!("current dir unavailable: {}", error), None)
+            })?;
+            let uri = url::Url::from_directory_path(&cwd).map_err(|_| {
+                McpError::internal_error(
+                    format!("failed to convert {:?} to file:// URL", cwd),
+                    None,
+                )
+            })?;
+            let name = cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("root")
+                .to_string();
+            Ok(ListRootsResult::new(vec![
+                Root::new(uri.as_str()).with_name(name),
+            ]))
+        }
+    }
+
+    fn create_elicitation(
+        &self,
+        request: CreateElicitationRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = std::result::Result<CreateElicitationResult, McpError>> + Send + '_
+    {
+        let server = Arc::clone(&self.server_name);
+        async move {
+            use crate::mcp::elicitation::{
+                ElicitationKind, ElicitationPrompt, ElicitationResponse,
+            };
+
+            let (kind, message) = match &request {
+                CreateElicitationRequestParams::FormElicitationParams {
+                    message,
+                    requested_schema,
+                    ..
+                } => {
+                    let schema = serde_json::to_value(requested_schema)
+                        .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+                    (ElicitationKind::Form { schema }, message.clone())
+                }
+                CreateElicitationRequestParams::UrlElicitationParams { message, url, .. } => {
+                    (ElicitationKind::Url { url: url.clone() }, message.clone())
+                }
+            };
+
+            // 60-second user-response timeout so a distracted user can't stall
+            // an MCP tool call forever. Matches the elicitation deadline used
+            // for the ToolApprovalRequest channel in shell.rs.
+            let (responder, receiver) = std::sync::mpsc::sync_channel::<ElicitationResponse>(1);
+            let prompt = ElicitationPrompt {
+                server_name: server.as_ref().to_string(),
+                kind,
+                message,
+                responder,
+            };
+
+            if !crate::mcp::elicitation::send_prompt(prompt) {
+                tracing::warn!(
+                    "MCP server '{}' requested elicitation but no shell sink is installed; declining",
+                    server
+                );
+                return Ok(ElicitationResponse::Decline.into_result());
+            }
+
+            // Elicitations are standard MCP *requests*, so a `Decline`
+            // response IS how the server learns the user didn't answer —
+            // no separate `notifications/cancelled` is appropriate here
+            // (cancellation notifications are for long-running requests
+            // we started, not for server-initiated elicitations).
+            let response = tokio::task::spawn_blocking(move || {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .unwrap_or(ElicitationResponse::Decline)
+            })
+            .await
+            .unwrap_or(ElicitationResponse::Decline);
+
+            Ok(response.into_result())
+        }
+    }
+
+    fn create_message(
+        &self,
+        params: CreateMessageRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = std::result::Result<CreateMessageResult, McpError>> + Send + '_ {
+        let server_name = Arc::clone(&self.server_name);
+        let policy = self.sampling.clone();
+        let provider = self.context.provider.get().cloned();
+
+        async move {
+            if !policy.allowed {
+                tracing::info!(
+                    "MCP server '{}' requested sampling/createMessage — rejected (sampling=false)",
+                    server_name
+                );
+                return Err(McpError::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    "sampling is not enabled for this MCP server in agsh's config",
+                    None,
+                ));
+            }
+
+            let current = policy.count.fetch_add(1, Ordering::SeqCst);
+            if current >= policy.limit {
+                tracing::warn!(
+                    "MCP server '{}' exceeded sampling_limit ({})",
+                    server_name,
+                    policy.limit
+                );
+                return Err(McpError::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "sampling_limit ({}) exhausted for server '{}'",
+                        policy.limit, server_name
+                    ),
+                    None,
+                ));
+            }
+
+            let Some(provider) = provider else {
+                return Err(McpError::internal_error(
+                    "sampling provider not wired (agent not yet started)",
+                    None,
+                ));
+            };
+
+            tracing::info!(
+                "MCP server '{}' sampling/createMessage: {} messages, max_tokens={}",
+                server_name,
+                params.messages.len(),
+                params.max_tokens
+            );
+
+            let (system_prompt, converted) = convert_sampling_params(&params).map_err(|error| {
+                // The slot was reserved for a call that never reached the
+                // provider; free it so a well-formed retry isn't rejected.
+                policy.count.fetch_sub(1, Ordering::SeqCst);
+                McpError::invalid_params(format!("sampling conversion failed: {}", error), None)
+            })?;
+
+            // Sampling calls out to the provider with no MCP tools exposed —
+            // the server asked for pure reasoning, not tool-use. The empty
+            // tool list forces the provider into a plain text completion.
+            // Bounded by `MCP_SAMPLING_PROVIDER_TIMEOUT` so a hung provider
+            // can't pin the MCP request open indefinitely.
+            let completion = tokio::time::timeout(
+                MCP_SAMPLING_PROVIDER_TIMEOUT,
+                provider.complete(&system_prompt, &converted, &[]),
+            )
+            .await;
+
+            let (assistant_message, _stop_reason, _usage) = match completion {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => {
+                    // Provider returned an error before the timeout elapsed —
+                    // no quota was really consumed on our side, so hand the
+                    // sampling slot back.
+                    policy.count.fetch_sub(1, Ordering::SeqCst);
+                    return Err(McpError::internal_error(
+                        format!("provider completion failed: {}", error),
+                        None,
+                    ));
+                }
+                Err(_) => {
+                    policy.count.fetch_sub(1, Ordering::SeqCst);
+                    return Err(McpError::internal_error(
+                        format!(
+                            "provider completion timed out after {}s",
+                            MCP_SAMPLING_PROVIDER_TIMEOUT.as_secs()
+                        ),
+                        None,
+                    ));
+                }
+            };
+
+            let text = assistant_message.text_content();
+            let message = SamplingMessage::assistant_text(text);
+            Ok(CreateMessageResult::new(
+                message,
+                provider.name().to_string(),
+            ))
+        }
+    }
+}
+
+/// Convert MCP `CreateMessageRequestParams` into the provider's
+/// `(system_prompt, Vec<Message>)` shape, flattening text content.
+/// Non-text sampling content (image, audio, tool_use, tool_result) is
+/// replaced with a placeholder string — none of agsh's providers accept
+/// these inside sampling calls.
+fn convert_sampling_params(
+    params: &CreateMessageRequestParams,
+) -> std::result::Result<(String, Vec<crate::provider::Message>), String> {
+    use crate::provider::{ContentBlock, Message, Role as ProviderRole};
+
+    // Defensive sanitisation: the system prompt is server-controlled and
+    // gets forwarded to the configured provider. Strip any Unicode Cc/Cf
+    // codepoints so a hostile server can't smuggle terminal escapes or
+    // homographs into our provider call.
+    let system_prompt = params
+        .system_prompt
+        .as_deref()
+        .map(crate::mcp::sanitize::sanitize_text)
+        .unwrap_or_default();
+
+    let mut messages = Vec::with_capacity(params.messages.len());
+    for sampling_message in &params.messages {
+        let role = match sampling_message.role {
+            Role::User => ProviderRole::User,
+            Role::Assistant => ProviderRole::Assistant,
+        };
+        let mut text = String::new();
+        for content_item in sampling_message.content.iter() {
+            match content_item {
+                SamplingMessageContent::Text(t) => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&t.text);
+                }
+                SamplingMessageContent::Image(_) => text.push_str("[image content omitted]"),
+                SamplingMessageContent::Audio(_) => text.push_str("[audio content omitted]"),
+                SamplingMessageContent::ToolUse(_) => text.push_str("[tool_use content omitted]"),
+                SamplingMessageContent::ToolResult(_) => {
+                    text.push_str("[tool_result content omitted]")
+                }
+            }
+        }
+        messages.push(Message {
+            role,
+            content: vec![ContentBlock::Text { text }],
+        });
+    }
+
+    Ok((system_prompt, messages))
+}
+
+/// Truncate a string to `max_chars` Unicode scalar values, appending an
+/// ellipsis marker if truncation occurred. Operates on `char` boundaries so
+/// the result is always valid UTF-8.
+pub fn truncate(text: &str, max_chars: usize) -> String {
+    let mut count = 0usize;
+    let mut byte_end = text.len();
+    for (idx, _) in text.char_indices() {
+        if count == max_chars {
+            byte_end = idx;
+            break;
+        }
+        count += 1;
+    }
+    if byte_end < text.len() {
+        let mut truncated = String::with_capacity(byte_end + 3);
+        truncated.push_str(&text[..byte_end]);
+        truncated.push_str("...");
+        truncated
+    } else {
+        text.to_string()
+    }
+}
+
+/// List all resources advertised by a server. Returned verbatim from the
+/// current peer; no caching is done here.
+pub async fn list_resources(entry: &Arc<ServerEntry>) -> Result<Vec<Resource>> {
+    let peer = entry.current_peer().await;
+    match peer.list_all_resources().await {
+        Ok(resources) => Ok(resources),
+        Err(ServiceError::TransportClosed) => {
+            entry.reconnect().await?;
+            let peer = entry.current_peer().await;
+            peer.list_all_resources()
+                .await
+                .map_err(|error| AgshError::McpConnection {
+                    server_name: entry.server_name.clone(),
+                    message: format!("list_resources failed: {}", error),
+                })
+        }
+        Err(error) => Err(AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("list_resources failed: {}", error),
+        }),
+    }
+}
+
+pub async fn read_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<ReadResourceResult> {
+    let params = ReadResourceRequestParams::new(uri.clone());
+    let peer = entry.current_peer().await;
+    match peer.read_resource(params.clone()).await {
+        Ok(result) => Ok(result),
+        Err(ServiceError::TransportClosed) => {
+            entry.reconnect().await?;
+            let peer = entry.current_peer().await;
+            peer.read_resource(params)
+                .await
+                .map_err(|error| AgshError::McpConnection {
+                    server_name: entry.server_name.clone(),
+                    message: format!("read_resource({}) failed: {}", uri, error),
+                })
+        }
+        Err(error) => Err(AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("read_resource({}) failed: {}", uri, error),
+        }),
+    }
+}
+
+pub async fn list_prompts(entry: &Arc<ServerEntry>) -> Result<Vec<Prompt>> {
+    let peer = entry.current_peer().await;
+    match peer.list_all_prompts().await {
+        Ok(prompts) => Ok(prompts),
+        Err(ServiceError::TransportClosed) => {
+            entry.reconnect().await?;
+            let peer = entry.current_peer().await;
+            peer.list_all_prompts()
+                .await
+                .map_err(|error| AgshError::McpConnection {
+                    server_name: entry.server_name.clone(),
+                    message: format!("list_prompts failed: {}", error),
+                })
+        }
+        Err(error) => Err(AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("list_prompts failed: {}", error),
+        }),
+    }
+}
+
+pub async fn subscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<()> {
+    let peer = entry.current_peer().await;
+    let params = rmcp::model::SubscribeRequestParams::new(uri.clone());
+    peer.subscribe(params)
+        .await
+        .map_err(|error| AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("subscribe({}) failed: {}", uri, error),
+        })
+}
+
+pub async fn unsubscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<()> {
+    let peer = entry.current_peer().await;
+    let params = rmcp::model::UnsubscribeRequestParams::new(uri.clone());
+    peer.unsubscribe(params)
+        .await
+        .map_err(|error| AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("unsubscribe({}) failed: {}", uri, error),
+        })
+}
+
+pub async fn get_prompt(
+    entry: &Arc<ServerEntry>,
+    name: String,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<GetPromptResult> {
+    let mut params = GetPromptRequestParams::new(name.clone());
+    params.arguments = arguments;
+
+    let peer = entry.current_peer().await;
+    match peer.get_prompt(params.clone()).await {
+        Ok(result) => Ok(result),
+        Err(ServiceError::TransportClosed) => {
+            entry.reconnect().await?;
+            let peer = entry.current_peer().await;
+            peer.get_prompt(params)
+                .await
+                .map_err(|error| AgshError::McpConnection {
+                    server_name: entry.server_name.clone(),
+                    message: format!("get_prompt({}) failed: {}", name, error),
+                })
+        }
+        Err(error) => Err(AgshError::McpConnection {
+            server_name: entry.server_name.clone(),
+            message: format!("get_prompt({}) failed: {}", name, error),
+        }),
+    }
+}
+
 pub struct McpToolAdapter {
     namespaced_name: String,
-    server_name: String,
     remote_tool_name: String,
     description: String,
     parameters: serde_json::Value,
     permission: Permission,
-    service: Arc<McpRunningService>,
+    entry: Arc<ServerEntry>,
+    /// `tool.annotations` and `tool.meta` captured from the remote
+    /// server. Surfaced to the provider as hints (read-only / destructive)
+    /// and round-tripped back in `_meta` so the MCP server can correlate
+    /// client-side context.
+    annotations: Option<serde_json::Value>,
+    meta: Option<serde_json::Value>,
+    title: Option<String>,
+}
+
+impl McpToolAdapter {
+    /// Resolves a per-call tool-call timeout. Respects `AGSH_MCP_TOOL_TIMEOUT`
+    /// (milliseconds) when set, otherwise falls back to 600 seconds — long
+    /// enough for a database index rebuild but short enough that a hung
+    /// server isn't invisible.
+    fn tool_call_timeout() -> std::time::Duration {
+        std::env::var("AGSH_MCP_TOOL_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(std::time::Duration::from_secs(600))
+    }
+
+    async fn call_tool_once(
+        &self,
+        mut params: CallToolRequestParams,
+        cancellation: CancellationToken,
+        tool_use_id: Option<String>,
+    ) -> std::result::Result<rmcp::model::CallToolResult, ServiceError> {
+        // Per-call progress token: allows the server to emit
+        // `notifications/progress` updates that route back to our shell UI.
+        let (progress_token, _progress_guard) = crate::mcp::progress::register(
+            self.entry.server_name.clone(),
+            self.remote_tool_name.clone(),
+            tool_use_id.clone(),
+        );
+        let mut meta = Meta::new();
+        meta.set_progress_token(progress_token);
+        if let Some(id) = &tool_use_id {
+            meta.0
+                .insert("agsh/toolUseId".to_string(), serde_json::json!(id));
+        }
+        params.meta = Some(meta);
+
+        let peer = self.entry.current_peer().await;
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+        let handle = peer
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await?;
+        let request_id = handle.id.clone();
+
+        let timeout = Self::tool_call_timeout();
+        // Cap how long we wait on the best-effort cancellation notification
+        // so a hung transport can't block Ctrl-C handling or shutdown.
+        const CANCEL_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+        let notify_cancel = |reason: &'static str| {
+            let peer = peer.clone();
+            let request_id = request_id.clone();
+            let server_name = self.entry.server_name.clone();
+            async move {
+                let send = peer.notify_cancelled(CancelledNotificationParam {
+                    request_id,
+                    reason: Some(reason.to_string()),
+                });
+                match tokio::time::timeout(CANCEL_NOTIFY_TIMEOUT, send).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(
+                            "failed to send cancellation notification to '{}': {}",
+                            server_name,
+                            error
+                        );
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "cancellation notification to '{}' timed out after {}s",
+                            server_name,
+                            CANCEL_NOTIFY_TIMEOUT.as_secs()
+                        );
+                    }
+                }
+            }
+        };
+
+        tokio::select! {
+            response = handle.await_response() => {
+                match response? {
+                    ServerResult::CallToolResult(result) => Ok(result),
+                    _ => Err(ServiceError::UnexpectedResponse),
+                }
+            }
+            _ = cancellation.cancelled() => {
+                notify_cancel("user interrupt").await;
+                Err(ServiceError::Cancelled {
+                    reason: Some("user interrupt".to_string()),
+                })
+            }
+            _ = tokio::time::sleep(timeout) => {
+                notify_cancel("timeout").await;
+                Err(ServiceError::Cancelled {
+                    reason: Some(format!("timed out after {}s", timeout.as_secs())),
+                })
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -756,6 +2330,9 @@ impl Tool for McpToolAdapter {
             name: self.namespaced_name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
+            title: self.title.clone(),
+            annotations: self.annotations.clone(),
+            meta: self.meta.clone(),
         }
     }
 
@@ -770,44 +2347,228 @@ impl Tool for McpToolAdapter {
     ) -> Result<ToolOutput> {
         let arguments = input.as_object().cloned();
 
-        let mut call_params =
-            rmcp::model::CallToolRequestParams::new(self.remote_tool_name.clone());
-        call_params.arguments = arguments;
+        let params = {
+            let mut p = CallToolRequestParams::new(self.remote_tool_name.clone());
+            p.arguments = arguments;
+            p
+        };
 
-        let result = tokio::select! {
-            result = self.service.peer().call_tool(call_params) => {
-                result.map_err(|error| AgshError::McpToolExecution {
-                    server_name: self.server_name.clone(),
+        let is_timeout = |error: &ServiceError| matches!(error, ServiceError::Cancelled { reason: Some(reason) } if reason.starts_with("timed out"));
+
+        // First attempt. On TransportClosed, reconnect and retry once.
+        let result = match self
+            .call_tool_once(params.clone(), cancellation.clone(), None)
+            .await
+        {
+            Ok(result) => result,
+            Err(ServiceError::Cancelled { reason })
+                if reason.as_deref() == Some("user interrupt") =>
+            {
+                return Err(AgshError::Interrupted);
+            }
+            Err(error) if is_timeout(&error) => {
+                return Err(AgshError::McpToolExecution {
+                    server_name: self.entry.server_name.clone(),
                     tool_name: self.remote_tool_name.clone(),
                     message: error.to_string(),
-                })?
+                });
             }
-            _ = cancellation.cancelled() => {
-                return Err(AgshError::Interrupted);
+            Err(ServiceError::TransportClosed) => {
+                self.entry.reconnect().await?;
+                match self.call_tool_once(params, cancellation, None).await {
+                    Ok(result) => result,
+                    Err(ServiceError::Cancelled { reason })
+                        if reason.as_deref() == Some("user interrupt") =>
+                    {
+                        return Err(AgshError::Interrupted);
+                    }
+                    Err(error) => {
+                        return Err(AgshError::McpToolExecution {
+                            server_name: self.entry.server_name.clone(),
+                            tool_name: self.remote_tool_name.clone(),
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                // If the server rejected us with a 401/Unauthorized, persist
+                // the `needs-auth` verdict so the next startup skips the
+                // unauthenticated probe and goes straight to OAuth. The user
+                // must re-authenticate via `agsh mcp login <name>`.
+                let text = error.to_string().to_ascii_lowercase();
+                if text.contains("401") || text.contains("unauthorized") {
+                    if let Some(store) = &self.entry.token_store {
+                        if let Err(cache_err) =
+                            store.save_auth_probe(&self.entry.server_name, true).await
+                        {
+                            tracing::debug!(
+                                "failed to save auth probe cache for '{}': {}",
+                                self.entry.server_name,
+                                cache_err
+                            );
+                        } else {
+                            tracing::warn!(
+                                "MCP server '{}' returned 401 — marked as needing auth. Run 'agsh mcp login {}' to re-authenticate.",
+                                self.entry.server_name,
+                                self.entry.server_name
+                            );
+                        }
+                    }
+                }
+                return Err(AgshError::McpToolExecution {
+                    server_name: self.entry.server_name.clone(),
+                    tool_name: self.remote_tool_name.clone(),
+                    message: error.to_string(),
+                });
             }
         };
 
-        let content = result
-            .content
-            .iter()
-            .map(|content_item| match &content_item.raw {
-                rmcp::model::RawContent::Text(text_content) => text_content.text.clone(),
-                rmcp::model::RawContent::Image(_) => "[image content]".to_string(),
-                rmcp::model::RawContent::Audio(_) => "[audio content]".to_string(),
-                rmcp::model::RawContent::Resource(resource) => {
-                    format!("[embedded resource: {:?}]", resource.resource)
-                }
-                rmcp::model::RawContent::ResourceLink(resource) => {
-                    format!("[resource link: {}]", resource.uri)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
         let is_error = result.is_error.unwrap_or(false);
+        let mut content = convert_tool_result_content(&result.content);
 
-        Ok(ToolOutput::text(content, is_error))
+        // If the server included structured_content, append it as a fenced
+        // JSON block so providers can reason over it without needing a
+        // dedicated ToolResultContent variant. Matches Claude Code's
+        // pragmatic passthrough.
+        if let Some(structured) = &result.structured_content {
+            let pretty = serde_json::to_string_pretty(structured).unwrap_or_default();
+            if !pretty.is_empty() {
+                let appended =
+                    format!("\n\n---\n**Structured content:**\n```json\n{}\n```", pretty);
+                content.push(crate::provider::ToolResultContent::Text { text: appended });
+            }
+        }
+
+        // Unicode sanitisation on every text block that came from the server.
+        for block in content.iter_mut() {
+            if let crate::provider::ToolResultContent::Text { text } = block {
+                *text = crate::mcp::sanitize::sanitize_text(text);
+            }
+        }
+
+        Ok(ToolOutput {
+            content,
+            is_error,
+            scratchpad_hint: Some(format!(
+                "mcp_{}_{}",
+                self.entry.server_name, self.remote_tool_name
+            )),
+        })
     }
+}
+
+/// Map MCP `CallToolResult.content` items to agsh's provider-layer
+/// `ToolResultContent` blocks. Text stays text; images pass through as
+/// multimodal blocks so providers like Claude and GPT-4o can see them;
+/// audio, embedded resources, and resource links collapse to informative
+/// text placeholders (no provider accepts them as tool-result blocks yet).
+fn convert_tool_result_content(
+    items: &[rmcp::model::Content],
+) -> Vec<crate::provider::ToolResultContent> {
+    use crate::provider::{ImageSource, ToolResultContent};
+
+    let mut blocks: Vec<ToolResultContent> = Vec::new();
+    let mut text_buf = String::new();
+
+    let flush_text = |buf: &mut String, out: &mut Vec<ToolResultContent>| {
+        if !buf.is_empty() {
+            out.push(ToolResultContent::Text {
+                text: std::mem::take(buf),
+            });
+        }
+    };
+
+    for item in items {
+        match &item.raw {
+            rmcp::model::RawContent::Text(text_content) => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(&text_content.text);
+            }
+            rmcp::model::RawContent::Image(image) => {
+                let mime_ok = ALLOWED_IMAGE_MIME_TYPES
+                    .iter()
+                    .any(|allowed| image.mime_type.eq_ignore_ascii_case(allowed));
+                let size_ok = image.data.len() <= MAX_MCP_IMAGE_BYTES;
+                if !mime_ok {
+                    if !text_buf.is_empty() {
+                        text_buf.push('\n');
+                    }
+                    text_buf.push_str(&format!(
+                        "[image suppressed: mime type '{}' not in allow-list]",
+                        image.mime_type
+                    ));
+                } else if !size_ok {
+                    if !text_buf.is_empty() {
+                        text_buf.push('\n');
+                    }
+                    text_buf.push_str(&format!(
+                        "[image suppressed: {} base64 bytes exceeds {} byte limit]",
+                        image.data.len(),
+                        MAX_MCP_IMAGE_BYTES
+                    ));
+                } else {
+                    flush_text(&mut text_buf, &mut blocks);
+                    blocks.push(ToolResultContent::Image {
+                        source: ImageSource {
+                            source_type: "base64".to_string(),
+                            media_type: image.mime_type.clone(),
+                            data: image.data.clone(),
+                        },
+                    });
+                }
+            }
+            rmcp::model::RawContent::Audio(audio) => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(&format!(
+                    "[audio content: {}, {} base64 bytes — agsh does not yet pass audio to the provider]",
+                    audio.mime_type,
+                    audio.data.len()
+                ));
+            }
+            rmcp::model::RawContent::Resource(resource) => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                match &resource.resource {
+                    rmcp::model::ResourceContents::TextResourceContents { uri, text, .. } => {
+                        text_buf.push_str(&format!("--- {}\n{}", uri, text));
+                    }
+                    rmcp::model::ResourceContents::BlobResourceContents {
+                        uri,
+                        mime_type,
+                        blob,
+                        ..
+                    } => {
+                        text_buf.push_str(&format!(
+                            "[embedded blob resource: {} ({}), {} base64 bytes]",
+                            uri,
+                            mime_type.as_deref().unwrap_or("application/octet-stream"),
+                            blob.len()
+                        ));
+                    }
+                }
+            }
+            rmcp::model::RawContent::ResourceLink(link) => {
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(&format!("[resource link: {}]", link.uri));
+            }
+        }
+    }
+
+    flush_text(&mut text_buf, &mut blocks);
+    if blocks.is_empty() {
+        blocks.push(ToolResultContent::Text {
+            text: String::new(),
+        });
+    }
+    blocks
 }
 
 #[cfg(test)]
@@ -860,24 +2621,217 @@ mod tests {
     #[test]
     fn test_parse_callback_query_missing_code() {
         let request = "GET /callback?state=xyz789 HTTP/1.1\r\n";
-        let result = parse_callback_query(request);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("code"));
+        let err = parse_callback_query(request).expect_err("should fail");
+        match err {
+            CallbackParseError::Malformed(m) => assert!(m.contains("code")),
+            other => panic!("expected Malformed, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_parse_callback_query_missing_state() {
         let request = "GET /callback?code=abc123 HTTP/1.1\r\n";
-        let result = parse_callback_query(request);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("state"));
+        let err = parse_callback_query(request).expect_err("should fail");
+        match err {
+            CallbackParseError::Malformed(m) => assert!(m.contains("state")),
+            other => panic!("expected Malformed, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_parse_callback_query_no_query_string() {
         let request = "GET /callback HTTP/1.1\r\n";
-        let result = parse_callback_query(request);
-        assert!(result.is_err());
+        let err = parse_callback_query(request).expect_err("should fail");
+        match err {
+            CallbackParseError::Malformed(_) => {}
+            other => panic!("expected Malformed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_callback_query_ignores_favicon() {
+        let request = "GET /favicon.ico HTTP/1.1\r\n";
+        let err = parse_callback_query(request).expect_err("should fail");
+        assert!(matches!(err, CallbackParseError::NotCallbackPath));
+    }
+
+    #[test]
+    fn test_parse_callback_query_ignores_root() {
+        let request = "GET / HTTP/1.1\r\n";
+        let err = parse_callback_query(request).expect_err("should fail");
+        assert!(matches!(err, CallbackParseError::NotCallbackPath));
+    }
+
+    #[test]
+    fn test_parse_callback_query_url_decodes_state() {
+        let request = "GET /callback?code=abc&state=xyz%3D%3D HTTP/1.1\r\n";
+        let (code, state) = parse_callback_query(request).expect("should parse");
+        assert_eq!(code, "abc");
+        assert_eq!(state, "xyz==");
+    }
+
+    #[test]
+    fn test_parse_callback_query_surfaces_oauth_error() {
+        let request = "GET /callback?error=access_denied HTTP/1.1\r\n";
+        let err = parse_callback_query(request).expect_err("should fail");
+        match err {
+            CallbackParseError::Malformed(m) => {
+                assert!(m.contains("access_denied"));
+            }
+            other => panic!("expected Malformed with error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_revocation_endpoint_returns_string() {
+        let body = br#"{"revocation_endpoint":"https://auth.example.com/revoke","other":"x"}"#;
+        assert_eq!(
+            extract_revocation_endpoint(body, 1024),
+            Some("https://auth.example.com/revoke".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_revocation_endpoint_rejects_oversize_body() {
+        let body = br#"{"revocation_endpoint":"https://auth.example.com/revoke"}"#;
+        assert!(extract_revocation_endpoint(body, 8).is_none());
+    }
+
+    #[test]
+    fn extract_revocation_endpoint_returns_none_without_field() {
+        let body = br#"{"issuer":"https://auth.example.com"}"#;
+        assert!(extract_revocation_endpoint(body, 1024).is_none());
+    }
+
+    #[test]
+    fn extract_revocation_endpoint_rejects_malformed_json() {
+        assert!(extract_revocation_endpoint(b"not json", 1024).is_none());
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_accepts_same_origin() {
+        validate_revocation_endpoint_origin(
+            "https://auth.example.com",
+            "https://auth.example.com/revoke",
+        )
+        .expect("same host should pass");
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_accepts_same_origin_with_path() {
+        validate_revocation_endpoint_origin(
+            "https://auth.example.com/realms/r",
+            "https://auth.example.com/realms/r/protocol/openid-connect/revoke",
+        )
+        .expect("subpath on same host should pass");
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_rejects_different_host() {
+        let err = validate_revocation_endpoint_origin(
+            "https://auth.example.com",
+            "https://attacker.com/steal",
+        )
+        .expect_err("cross-host should be rejected");
+        assert!(err.contains("different origin"));
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_rejects_http_to_https_downgrade() {
+        let err = validate_revocation_endpoint_origin(
+            "https://auth.example.com",
+            "http://auth.example.com/revoke",
+        )
+        .expect_err("scheme change should be rejected");
+        assert!(err.contains("different origin"));
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_rejects_different_port() {
+        let err = validate_revocation_endpoint_origin(
+            "https://auth.example.com",
+            "https://auth.example.com:8443/revoke",
+        )
+        .expect_err("port change should be rejected");
+        assert!(err.contains("different origin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_private_key_permissions_rejects_world_readable() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let mut f = std::fs::File::create(&key_path).expect("create key");
+        f.write_all(b"---BEGIN---").expect("write");
+        drop(f);
+        // 0644 — readable by other users.
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644");
+        let err = require_private_key_permissions("srv", key_path.to_str().unwrap())
+            .expect_err("loose perms must be rejected");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("0600") || message.contains("permissions"),
+            "unexpected error: {}",
+            message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_private_key_permissions_accepts_0600() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let mut f = std::fs::File::create(&key_path).expect("create key");
+        f.write_all(b"---BEGIN---").expect("write");
+        drop(f);
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+        require_private_key_permissions("srv", key_path.to_str().unwrap()).expect("0600 must pass");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_private_key_permissions_reports_missing_file() {
+        let err = require_private_key_permissions("srv", "/nonexistent/key.pem")
+            .expect_err("missing file must error");
+        let message = format!("{}", err);
+        assert!(message.contains("stat signing key") || message.contains("key"));
+    }
+
+    #[test]
+    fn validate_revocation_endpoint_rejects_malformed_urls() {
+        assert!(
+            validate_revocation_endpoint_origin("not-a-url", "https://auth.example.com/revoke")
+                .is_err()
+        );
+        assert!(
+            validate_revocation_endpoint_origin("https://auth.example.com", "also-not-a-url")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_callback_query_sanitises_oauth_error() {
+        // A malicious authorization server includes an ANSI escape and an
+        // RTL override in its `error` parameter. The resulting error message
+        // must not carry those codepoints to the terminal.
+        let request = "GET /callback?error=bad%1B%5B2Jstuff%E2%80%AErtl HTTP/1.1\r\n";
+        let err = parse_callback_query(request).expect_err("should fail");
+        match err {
+            CallbackParseError::Malformed(m) => {
+                assert!(!m.contains('\u{001B}'), "ANSI escape leaked: {:?}", m);
+                assert!(!m.contains('\u{202E}'), "RTL override leaked: {:?}", m);
+                assert!(m.contains("bad"));
+                assert!(m.contains("stuff"));
+                assert!(m.contains("rtl"));
+            }
+            other => panic!("expected Malformed with error, got {:?}", other),
+        }
     }
 
     #[test]
@@ -896,5 +2850,223 @@ mod tests {
     #[test]
     fn test_parse_jwt_signing_algorithm_invalid() {
         assert!(parse_jwt_signing_algorithm("test", Some("HS256")).is_err());
+    }
+
+    #[test]
+    fn test_sampling_policy_rejects_when_disabled() {
+        let policy = SamplingPolicy {
+            allowed: false,
+            limit: 10,
+            count: Arc::new(AtomicU32::new(0)),
+        };
+        assert!(!policy.allowed);
+    }
+
+    #[test]
+    fn test_sampling_policy_limit_enforcement() {
+        let policy = SamplingPolicy {
+            allowed: true,
+            limit: 2,
+            count: Arc::new(AtomicU32::new(0)),
+        };
+        // Simulate three requests; only first two should be under the limit.
+        assert!(policy.count.fetch_add(1, Ordering::SeqCst) < policy.limit);
+        assert!(policy.count.fetch_add(1, Ordering::SeqCst) < policy.limit);
+        assert!(policy.count.fetch_add(1, Ordering::SeqCst) >= policy.limit);
+    }
+
+    #[test]
+    fn test_convert_sampling_params_flattens_text() {
+        let mut params = rmcp::model::CreateMessageRequestParams::new(
+            vec![
+                SamplingMessage::user_text("hello"),
+                SamplingMessage::assistant_text("world"),
+            ],
+            100,
+        );
+        params.system_prompt = Some("you are a test".to_string());
+        let (system_prompt, messages) = convert_sampling_params(&params).unwrap();
+        assert_eq!(system_prompt, "you are a test");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, crate::provider::Role::User);
+        assert_eq!(messages[1].role, crate::provider::Role::Assistant);
+    }
+
+    #[test]
+    fn test_convert_tool_result_content_text_only() {
+        use rmcp::model::{Content, RawContent, RawTextContent};
+        let items = vec![
+            Content::new(
+                RawContent::Text(RawTextContent {
+                    text: "hello".to_string(),
+                    meta: None,
+                }),
+                None,
+            ),
+            Content::new(
+                RawContent::Text(RawTextContent {
+                    text: "world".to_string(),
+                    meta: None,
+                }),
+                None,
+            ),
+        ];
+        let blocks = convert_tool_result_content(&items);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            crate::provider::ToolResultContent::Text { text } => {
+                assert_eq!(text, "hello\nworld");
+            }
+            other => panic!("expected Text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_result_content_image_passthrough() {
+        use rmcp::model::{Content, RawContent, RawImageContent};
+        let items = vec![Content::new(
+            RawContent::Image(RawImageContent {
+                data: "BASE64DATA".to_string(),
+                mime_type: "image/png".to_string(),
+                meta: None,
+            }),
+            None,
+        )];
+        let blocks = convert_tool_result_content(&items);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            crate::provider::ToolResultContent::Image { source } => {
+                assert_eq!(source.source_type, "base64");
+                assert_eq!(source.media_type, "image/png");
+                assert_eq!(source.data, "BASE64DATA");
+            }
+            other => panic!("expected Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_result_content_image_rejects_disallowed_mime() {
+        use rmcp::model::{Content, RawContent, RawImageContent};
+        let items = vec![Content::new(
+            RawContent::Image(RawImageContent {
+                data: "BASE64DATA".to_string(),
+                mime_type: "image/svg+xml".to_string(),
+                meta: None,
+            }),
+            None,
+        )];
+        let blocks = convert_tool_result_content(&items);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            crate::provider::ToolResultContent::Text { text } => {
+                assert!(text.contains("image suppressed"));
+                assert!(text.contains("image/svg+xml"));
+            }
+            other => panic!("expected Text placeholder, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_result_content_image_rejects_oversize() {
+        use rmcp::model::{Content, RawContent, RawImageContent};
+        let oversized = "X".repeat(MAX_MCP_IMAGE_BYTES + 1);
+        let items = vec![Content::new(
+            RawContent::Image(RawImageContent {
+                data: oversized,
+                mime_type: "image/png".to_string(),
+                meta: None,
+            }),
+            None,
+        )];
+        let blocks = convert_tool_result_content(&items);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            crate::provider::ToolResultContent::Text { text } => {
+                assert!(text.contains("image suppressed"));
+                assert!(text.contains("exceeds"));
+            }
+            other => panic!("expected Text placeholder, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_sampling_params_sanitises_system_prompt() {
+        let mut params = rmcp::model::CreateMessageRequestParams::new(
+            vec![SamplingMessage::user_text("hi")],
+            32,
+        );
+        // RTL override + ANSI escape must both be stripped.
+        params.system_prompt = Some("safe\u{202E}evil\x1b[2J".to_string());
+        let (system_prompt, _) = convert_sampling_params(&params).unwrap();
+        assert!(!system_prompt.contains('\u{202E}'));
+        assert!(!system_prompt.contains('\x1b'));
+        assert!(system_prompt.contains("safe"));
+        assert!(system_prompt.contains("evil"));
+    }
+
+    #[test]
+    fn test_convert_tool_result_content_mixed_keeps_ordering() {
+        use rmcp::model::{Content, RawContent, RawImageContent, RawTextContent};
+        let items = vec![
+            Content::new(
+                RawContent::Text(RawTextContent {
+                    text: "before".to_string(),
+                    meta: None,
+                }),
+                None,
+            ),
+            Content::new(
+                RawContent::Image(RawImageContent {
+                    data: "IMG".to_string(),
+                    mime_type: "image/png".to_string(),
+                    meta: None,
+                }),
+                None,
+            ),
+            Content::new(
+                RawContent::Text(RawTextContent {
+                    text: "after".to_string(),
+                    meta: None,
+                }),
+                None,
+            ),
+        ];
+        let blocks = convert_tool_result_content(&items);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(
+            blocks[0],
+            crate::provider::ToolResultContent::Text { .. }
+        ));
+        assert!(matches!(
+            blocks[1],
+            crate::provider::ToolResultContent::Image { .. }
+        ));
+        assert!(matches!(
+            blocks[2],
+            crate::provider::ToolResultContent::Text { .. }
+        ));
+    }
+
+    #[test]
+    fn test_truncate_under_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_over_limit() {
+        assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_unicode_boundary() {
+        // Three emoji, each multiple bytes: truncation should cut on char boundary.
+        let input = "🦀🦀🦀🦀🦀";
+        let out = truncate(input, 2);
+        assert_eq!(out, "🦀🦀...");
     }
 }

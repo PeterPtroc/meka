@@ -67,6 +67,7 @@ impl Tool for TodoWriteTool {
                 },
                 "required": ["tasks"]
             }),
+            ..Default::default()
         }
     }
 

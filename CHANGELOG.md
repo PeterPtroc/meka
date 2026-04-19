@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `agsh mcp` CLI: `list`, `get`, `add`, `remove`, `reconnect`, `login`, `logout` subcommands.
+- `/mcp` REPL commands: `list`, `reconnect <server>`, `<server>:<prompt> [args...]`.
+- Server `InitializeResult.instructions` spliced into the system prompt each turn.
+- Progress notifications forwarded to the REPL as a live status line under the running tool call.
+- Form + URL elicitation — the shell prompts the user and returns typed values to the server.
+- Tool annotations / `_meta` / `structuredContent` preserved through to the provider.
+- Builtin MCP resource/prompt tools for list/read, subscribe/unsubscribe, and get-prompt flows.
+- OAuth token revocation via `agsh mcp logout` (RFC 7009) + 15-min auth-probe cache for 401s.
+- Tool-call timeout (`AGSH_MCP_TOOL_TIMEOUT`, default 600s) with best-effort cancellation.
+- Exponential-backoff reconnect for HTTP MCP (5 attempts, 1s → 30s); stdio retries once.
+- `${VAR}` / `${VAR:-default}` expansion across MCP command, args, env, url, headers, auth_token.
+- `headers_helper` config field: per-server script emits dynamic HTTP headers at connect-time.
+- Windows stdio: auto-wrap `npx`, `.cmd`, `.bat`, `.ps1` commands in `cmd /c`.
+- Unicode + server-name sanitisation of MCP strings; `agsh`, `ide`, `mcp_*` names rejected.
+- `sampling/createMessage` server-to-client flow, opt-in via `sampling = true` + `sampling_limit`.
+- `roots/list` advertises the agsh current working directory.
+- MCP image tool-result content reaches providers as image blocks instead of `[image content]`.
+- OAuth callback listener binds to an ephemeral port when `redirect_port` is omitted.
+- Ctrl-C now sends `notifications/cancelled` to the server with the in-flight request id.
+- Dynamic tool list refresh on `tools/list_changed` — new tools picked up without restart.
+
+### Security
+
+- MCP progress + elicitation strings sanitised before hitting the terminal — blocks ANSI/RTL spoofing.
+- MCP tool-result images capped at 10 MiB and restricted to PNG/JPEG/GIF/WebP; else a text placeholder.
+- MCP sampling `system_prompt` stripped of Cc/Cf codepoints before reaching the provider.
+- `read_mcp_resource` + `get_mcp_prompt` + list tools sanitise server-supplied text and URIs.
+- `read_mcp_resource` total output capped at 10 MiB; oversized chunks replaced with a marker.
+- `headers_helper` stdout capped at 64 KiB, stderr at 4 KiB, to contain helper misbehaviour.
+- OAuth token revocation rejects redirects, caps metadata responses at 256 KiB, and pins the
+  `revocation_endpoint` to the issuer's origin before sending the access token.
+- OAuth callback `error=…` query parameter is stripped of Cc/Cf codepoints before display.
+- JWT signing key files are rejected on Unix when group/other permission bits are set (must be 0600).
+- MCP cancellation notifications now time out after 2 s so a hung transport can't stall Ctrl-C.
+- `agsh mcp add`/`remove` writes config.toml atomically and chmods it 0600 (dir 0700) on Unix.
+- `agsh mcp add` propagates config-read errors instead of silently treating them as an empty file.
+
+### Fixed
+
+- `${VAR}` expansion for MCP config preserves multi-byte UTF-8 (previously corrupted non-ASCII).
+- MCP tools with an unserializable input schema are skipped with a warning.
+- OAuth-authenticated MCP transports now reconnect cleanly mid-session.
+- MCP `sampling/createMessage` now has a 60 s provider timeout and refunds the sampling slot on error.
+- `agsh mcp remove` now clears that server's entries from the resource-update ledger.
+- MCP auth-probe cache with `ttl = 0` now correctly treats every entry as stale (was "fresh for current second").
+
 ## [0.12.0] - 2026-04-18
 
 ### Security

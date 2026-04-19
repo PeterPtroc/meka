@@ -56,21 +56,26 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
 
     // Handle subcommands that don't need full config resolution
-    if let Some(command) = cli.command {
-        return runtime.block_on(async {
+    if cli.command.is_some() {
+        let cli_ref = &cli;
+        return runtime.block_on(async move {
             let session_manager = SessionManager::open(None).await?;
+            let command = cli_ref.command.as_ref().expect("checked above");
             match command {
                 cli::Command::Setup => {
                     let token_store = session_manager.token_store();
                     setup::run_setup(&token_store).await
                 }
                 cli::Command::Export { session_id, output } => {
-                    export_session(&session_manager, session_id, output.as_deref()).await
+                    export_session(&session_manager, *session_id, output.as_deref()).await
                 }
                 cli::Command::Delete { session_ids, all } => {
-                    delete_sessions(&session_manager, &session_ids, all).await
+                    delete_sessions(&session_manager, session_ids, *all).await
                 }
-                cli::Command::List { limit } => list_sessions(&session_manager, limit).await,
+                cli::Command::List { limit } => list_sessions(&session_manager, *limit).await,
+                cli::Command::Mcp { action } => {
+                    run_mcp_subcommand(&session_manager, action, cli_ref).await
+                }
             }
         });
     }
@@ -135,17 +140,42 @@ async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
         tracing::warn!("failed to save OAuth token to database: {}", error);
     }
 
+    let mcp_context = mcp::McpClientContext::new();
     let mcp_manager = if !config.mcp_servers.is_empty() {
-        Some(mcp::McpClientManager::connect_all(&config.mcp_servers, Some(&token_store)).await?)
+        let manager = Arc::new(
+            mcp::McpClientManager::connect_all(
+                &config.mcp_servers,
+                Some(&token_store),
+                Arc::clone(&mcp_context),
+            )
+            .await?,
+        );
+        mcp_context.set_manager(Arc::downgrade(&manager));
+        Some(manager)
     } else {
         None
     };
 
     if let Some(prompt) = config.prompt.clone() {
-        return run_oneshot(config, session_manager, token_store, prompt, mcp_manager).await;
+        return run_oneshot(
+            config,
+            session_manager,
+            token_store,
+            prompt,
+            mcp_manager,
+            mcp_context,
+        )
+        .await;
     }
 
-    run_interactive(config, session_manager, token_store, mcp_manager).await
+    run_interactive(
+        config,
+        session_manager,
+        token_store,
+        mcp_manager,
+        mcp_context,
+    )
+    .await
 }
 
 async fn create_agent_from_config(
@@ -154,7 +184,8 @@ async fn create_agent_from_config(
     shared_permission: SharedPermission,
     token_store: TokenStore,
     credential: AuthCredential,
-    mcp_manager: Option<&mcp::McpClientManager>,
+    mcp_manager: Option<&Arc<mcp::McpClientManager>>,
+    mcp_context: Option<&Arc<mcp::McpClientContext>>,
     approval_sender: Option<std::sync::mpsc::Sender<shell::AgentToShellEvent>>,
 ) -> anyhow::Result<Agent> {
     config.validate()?;
@@ -198,7 +229,7 @@ async fn create_agent_from_config(
     let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
-    let mut tool_registry = ToolRegistry::build_default(
+    let tool_registry = ToolRegistry::build_default(
         config.user_agent.clone(),
         shared_permission.clone(),
         config.sandbox,
@@ -209,16 +240,18 @@ async fn create_agent_from_config(
     );
 
     // Register the sub-agent tool with access to the provider
-    tool_registry.register(Box::new(crate::tools::subagent::SpawnAgentTool {
-        provider: Arc::clone(&provider),
-        parent_permission: shared_permission.clone(),
-        tool_builder_params: crate::tools::subagent::ToolBuilderParams {
-            user_agent: config.user_agent.clone(),
-            sandbox_enabled: config.sandbox,
-            sandbox_capability,
-        },
-        user_instructions: config.user_instructions.clone(),
-    }));
+    tool_registry
+        .register(Arc::new(crate::tools::subagent::SpawnAgentTool {
+            provider: Arc::clone(&provider),
+            parent_permission: shared_permission.clone(),
+            tool_builder_params: crate::tools::subagent::ToolBuilderParams {
+                user_agent: config.user_agent.clone(),
+                sandbox_enabled: config.sandbox,
+                sandbox_capability,
+            },
+            user_instructions: config.user_instructions.clone(),
+        }))
+        .expect("builtin subagent tool name collision");
 
     if let Some(manager) = mcp_manager {
         for mcp_config in &config.mcp_servers {
@@ -228,13 +261,30 @@ async fn create_agent_from_config(
             for tool in mcp_tools {
                 use crate::tools::Tool as _;
                 let name = tool.definition().name.clone();
-                tool_registry.register(Box::new(tool));
-                tool_registry.mark_deferred(&name);
+                match tool_registry.register(Arc::new(tool)) {
+                    Ok(()) => tool_registry.mark_deferred(&name),
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to register MCP tool '{}': {}; skipping",
+                            name,
+                            error
+                        );
+                    }
+                }
             }
         }
+        crate::tools::mcp_resources::register_all(&tool_registry, Arc::clone(manager));
     }
 
-    Ok(Agent::new(
+    // Now that provider and registry exist, publish them on the MCP client
+    // context so notification handlers (`tools/list_changed`) and sampling
+    // callbacks (`sampling/createMessage`) can reach them.
+    if let Some(context) = mcp_context {
+        context.set_provider(Arc::clone(&provider));
+        context.set_registry(tool_registry.clone());
+    }
+
+    let mut agent = Agent::new(
         provider,
         tool_registry,
         session_manager,
@@ -261,7 +311,11 @@ async fn create_agent_from_config(
         todo_list,
         shared_session_id,
         approval_sender,
-    ))
+    );
+    if let Some(manager) = mcp_manager {
+        agent.set_mcp_manager(Arc::clone(manager));
+    }
+    Ok(agent)
 }
 
 async fn run_oneshot(
@@ -269,7 +323,8 @@ async fn run_oneshot(
     session_manager: SessionManager,
     token_store: TokenStore,
     prompt: String,
-    mcp_manager: Option<mcp::McpClientManager>,
+    mcp_manager: Option<Arc<mcp::McpClientManager>>,
+    mcp_context: Arc<mcp::McpClientContext>,
 ) -> anyhow::Result<()> {
     let shared_permission = SharedPermission::new(config.permission);
     let credential = resolve_credential(&config)?;
@@ -280,6 +335,7 @@ async fn run_oneshot(
         token_store,
         credential,
         mcp_manager.as_ref(),
+        Some(&mcp_context),
         None,
     )
     .await?;
@@ -314,7 +370,7 @@ async fn run_oneshot(
     }
 
     if let Some(manager) = mcp_manager {
-        manager.shutdown().await;
+        shutdown_mcp_manager(manager).await;
     }
 
     Ok(())
@@ -324,7 +380,8 @@ async fn run_interactive(
     config: ResolvedConfig,
     session_manager: SessionManager,
     token_store: TokenStore,
-    mcp_manager: Option<mcp::McpClientManager>,
+    mcp_manager: Option<Arc<mcp::McpClientManager>>,
+    mcp_context: Arc<mcp::McpClientContext>,
 ) -> anyhow::Result<()> {
     let shared_permission = SharedPermission::new(config.permission);
 
@@ -341,6 +398,19 @@ async fn run_interactive(
     let (agent_event_sender, agent_event_receiver) =
         std::sync::mpsc::channel::<shell::AgentToShellEvent>();
     let approval_sender = agent_event_sender.clone();
+
+    // Wire progress/elicitation notifications from MCP handlers through the
+    // same agent→shell channel so the REPL can render them inline.
+    {
+        let sender_for_progress = agent_event_sender.clone();
+        mcp::progress::set_ui_sink(Box::new(move |update| {
+            let _ = sender_for_progress.send(shell::AgentToShellEvent::McpProgress(update));
+        }));
+        let sender_for_elicitation = agent_event_sender.clone();
+        mcp::elicitation::set_shell_sink(Some(Box::new(move |prompt| {
+            let _ = sender_for_elicitation.send(shell::AgentToShellEvent::McpElicitation(prompt));
+        })));
+    }
 
     let repl_permission = shared_permission.clone();
     let show_path_in_prompt = config.show_path_in_prompt;
@@ -368,9 +438,10 @@ async fn run_interactive(
         &config,
         session_manager.clone(),
         shared_permission,
-        token_store,
+        token_store.clone(),
         credential,
         mcp_manager.as_ref(),
+        Some(&mcp_context),
         Some(approval_sender),
     )
     .await
@@ -461,6 +532,107 @@ async fn run_interactive(
                         }
                         None => eprintln!("No active session to export."),
                     },
+                    shell::SlashCommand::McpList => {
+                        if let Err(error) = mcp::cli::run_list(&config.mcp_servers).await {
+                            render::render_error(&error);
+                        }
+                    }
+                    shell::SlashCommand::McpReconnect { server } => {
+                        if let Err(error) =
+                            mcp::cli::run_reconnect(&config.mcp_servers, &token_store, &server)
+                                .await
+                        {
+                            render::render_error(&error);
+                        }
+                    }
+                    shell::SlashCommand::McpPrompt {
+                        server,
+                        prompt: prompt_name,
+                        args,
+                    } => match mcp_manager.as_ref() {
+                        Some(manager) => {
+                            let entry = manager.server_entry(&server);
+                            let Some(entry) = entry else {
+                                eprintln!(
+                                    "unknown MCP server '{}'; configured: {:?}",
+                                    server,
+                                    manager.server_names()
+                                );
+                                continue;
+                            };
+                            // Map positional args to declared prompt argument
+                            // names (lookup via prompts/list).
+                            let arg_names = match mcp::list_prompts(&entry).await {
+                                Ok(prompts) => prompts
+                                    .into_iter()
+                                    .find(|p| p.name == prompt_name)
+                                    .and_then(|p| p.arguments)
+                                    .map(|args| {
+                                        args.into_iter().map(|a| a.name).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default(),
+                                Err(error) => {
+                                    eprintln!("list_prompts failed: {}", error);
+                                    Vec::new()
+                                }
+                            };
+                            let mut arguments: Option<serde_json::Map<String, serde_json::Value>> =
+                                None;
+                            if !arg_names.is_empty() {
+                                let mut map = serde_json::Map::new();
+                                for (i, name) in arg_names.iter().enumerate() {
+                                    if let Some(value) = args.get(i) {
+                                        map.insert(
+                                            name.clone(),
+                                            serde_json::Value::String(value.clone()),
+                                        );
+                                    }
+                                }
+                                arguments = Some(map);
+                            }
+                            match mcp::get_prompt(&entry, prompt_name.clone(), arguments).await {
+                                Ok(result) => {
+                                    // Render the prompt messages as a single
+                                    // user turn — same shape as the
+                                    // `get_mcp_prompt` tool output.
+                                    let mut body = String::new();
+                                    for message in &result.messages {
+                                        let role = match message.role {
+                                            rmcp::model::PromptMessageRole::User => "user",
+                                            rmcp::model::PromptMessageRole::Assistant => {
+                                                "assistant"
+                                            }
+                                        };
+                                        if let rmcp::model::PromptMessageContent::Text { text } =
+                                            &message.content
+                                        {
+                                            body.push_str(&format!("{}: {}\n", role, text));
+                                        }
+                                    }
+                                    let user_input = body.trim().to_string();
+                                    if !user_input.is_empty() {
+                                        if let Err(error) = agent
+                                            .run_turn(
+                                                &mut session_id,
+                                                &mut messages,
+                                                user_input,
+                                                CancellationToken::new(),
+                                            )
+                                            .await
+                                        {
+                                            render::render_error(&error);
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("get_prompt failed: {}", error);
+                                }
+                            }
+                        }
+                        None => {
+                            eprintln!("no MCP servers configured");
+                        }
+                    },
                     _ => {}
                 }
 
@@ -490,10 +662,24 @@ async fn run_interactive(
     drop(session_lock);
 
     if let Some(manager) = mcp_manager {
-        manager.shutdown().await;
+        shutdown_mcp_manager(manager).await;
     }
 
     Ok(())
+}
+
+/// Unwrap the shared MCP manager and drive its shutdown. The manager is held
+/// behind an `Arc` because resource/prompt tools keep clones of it; once the
+/// agent and tool registry have been dropped, try_unwrap should succeed.
+async fn shutdown_mcp_manager(manager: Arc<mcp::McpClientManager>) {
+    match Arc::try_unwrap(manager) {
+        Ok(manager) => manager.shutdown().await,
+        Err(_arc) => {
+            tracing::debug!(
+                "MCP manager still referenced at shutdown; relying on drop guards for cleanup"
+            );
+        }
+    }
 }
 
 async fn export_session(
@@ -528,6 +714,64 @@ async fn export_session(
         }
     }
 
+    Ok(())
+}
+
+async fn run_mcp_subcommand(
+    session_manager: &SessionManager,
+    action: &cli::McpAction,
+    cli_args: &cli::Cli,
+) -> anyhow::Result<()> {
+    let config = ResolvedConfig::from_cli(cli_args);
+    let token_store = session_manager.token_store();
+    match action {
+        cli::McpAction::List => mcp::cli::run_list(&config.mcp_servers).await?,
+        cli::McpAction::Get { name } => mcp::cli::run_get(&config.mcp_servers, name).await?,
+        cli::McpAction::Reconnect { name } => {
+            mcp::cli::run_reconnect(&config.mcp_servers, &token_store, name).await?
+        }
+        cli::McpAction::Login { name } => {
+            mcp::cli::run_login(&config.mcp_servers, &token_store, name).await?
+        }
+        cli::McpAction::Logout { name } => {
+            mcp::cli::run_logout(&config.mcp_servers, &token_store, name).await?
+        }
+        cli::McpAction::Add {
+            name,
+            transport,
+            command,
+            args,
+            env,
+            url,
+            permission,
+        } => {
+            let env_pairs: Vec<(String, String)> = env
+                .iter()
+                .filter_map(|kv| {
+                    kv.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect();
+            mcp::cli::run_add(mcp::cli::AddArgs {
+                name: name.clone(),
+                transport: transport.clone(),
+                command: command.clone(),
+                args: if args.is_empty() {
+                    None
+                } else {
+                    Some(args.clone())
+                },
+                env: if env_pairs.is_empty() {
+                    None
+                } else {
+                    Some(env_pairs)
+                },
+                url: url.clone(),
+                permission: permission.clone(),
+            })?
+        }
+        cli::McpAction::Remove { name } => mcp::cli::run_remove(name, &token_store).await?,
+    }
     Ok(())
 }
 
