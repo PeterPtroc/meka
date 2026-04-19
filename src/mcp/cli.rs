@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::config::{McpServerConfig, McpTransport};
+use crate::config::{McpAuthConfig, McpServerConfig, McpTransport};
 use crate::error::{AgshError, Result};
 use crate::mcp::{McpClientContext, McpClientManager};
 use crate::session::TokenStore;
@@ -156,23 +156,51 @@ pub async fn run_logout(
     Ok(())
 }
 
-/// Run `agsh mcp login <name>` — force an interactive OAuth flow.
+/// Run `agsh mcp login <name>` — drive an interactive OAuth flow.
+///
+/// If the config has an explicit `[auth]` block, it's honoured as-is.
+/// If the server is HTTP with no `auth` set, we assume
+/// `type = "oauth"` (authorization-code grant with dynamic client
+/// registration), run the flow, and on success persist the synthesised
+/// auth block back to `config.toml` so future runs skip the assumption.
+/// stdio servers without `auth` can't be logged in to and error.
 pub async fn run_login(
     servers: &[McpServerConfig],
     token_store: &TokenStore,
     name: &str,
 ) -> Result<()> {
-    let config = servers
+    let base_config = servers
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| config_err(format!("no MCP server named '{}'", name)))?
         .clone();
-    if config.auth.is_none() {
-        return Err(config_err(format!(
-            "server '{}' has no 'auth' configured; nothing to log in to",
-            name
-        )));
-    }
+
+    let (config, needs_persist) = if base_config.auth.is_some() {
+        (base_config, false)
+    } else {
+        match base_config.transport {
+            McpTransport::Http => {
+                let mut assumed = base_config.clone();
+                assumed.auth = Some(McpAuthConfig::OAuth {
+                    client_id: None,
+                    client_secret: None,
+                    scopes: None,
+                    redirect_port: None,
+                });
+                eprintln!(
+                    "no [auth] block for '{}' — assuming OAuth authorization_code.",
+                    name
+                );
+                (assumed, true)
+            }
+            McpTransport::Stdio => {
+                return Err(config_err(format!(
+                    "server '{}' is stdio and has no 'auth' configured; nothing to log in to",
+                    name
+                )));
+            }
+        }
+    };
 
     token_store.clear_mcp_credentials(name).await?;
     token_store.clear_auth_probe(name).await?;
@@ -182,20 +210,152 @@ pub async fn run_login(
         McpClientManager::connect_all(std::slice::from_ref(&config), Some(token_store), context)
             .await?;
 
-    if manager.server_names().contains(&config.name) {
-        println!("ok: authorized '{}'", config.name);
-        manager.shutdown().await;
-        Ok(())
-    } else {
-        Err(config_err(format!(
+    if !manager.server_names().contains(&config.name) {
+        return Err(config_err(format!(
             "OAuth flow did not complete for '{}'",
             config.name
-        )))
+        )));
     }
+    manager.shutdown().await;
+
+    if needs_persist && let Err(error) = persist_auth_block_for(name) {
+        // Login worked — don't fail the whole command if we can't write
+        // the config back, just surface the issue so the user can decide
+        // whether to hand-edit.
+        tracing::warn!(
+            "authorised '{}' but failed to persist [auth] block: {}",
+            name,
+            error
+        );
+        eprintln!(
+            "note: '{}' is authorised, but failed to write 'auth = oauth' back to config.toml: {}",
+            name, error
+        );
+    }
+
+    println!("ok: authorized '{}'", config.name);
+    Ok(())
 }
 
-/// Run `agsh mcp add …` — persist a new server config into config.toml.
-pub fn run_add(args: AddArgs) -> Result<()> {
+/// Write `[mcp.servers.auth] type = "oauth"` for a named server if the
+/// entry doesn't already have an `auth` key. Used by [`run_login`] to
+/// make the "assumed OAuth" path a one-time thing rather than silently
+/// reapplying the assumption on every future run.
+fn persist_auth_block_for(name: &str) -> Result<()> {
+    let path = crate::config::config_file_path()
+        .ok_or_else(|| config_err("could not determine config directory"))?;
+    let existing = std::fs::read_to_string(&path)
+        .map_err(|error| config_err(format!("failed to read config: {}", error)))?;
+    let mut document = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| config_err(format!("failed to parse config: {}", error)))?;
+
+    let mutated = {
+        let servers = document
+            .get_mut("mcp")
+            .and_then(|m| m.as_table_mut())
+            .and_then(|t| t.get_mut("servers"))
+            .and_then(|s| s.as_array_of_tables_mut())
+            .ok_or_else(|| config_err("config has no [[mcp.servers]] entries".to_string()))?;
+
+        let mut target = None;
+        for entry in servers.iter_mut() {
+            if entry.get("name").and_then(|v| v.as_str()) == Some(name) {
+                target = Some(entry);
+                break;
+            }
+        }
+        let entry = target.ok_or_else(|| {
+            config_err(format!(
+                "server '{}' not found in [[mcp.servers]] after login",
+                name
+            ))
+        })?;
+        if entry.contains_key("auth") {
+            false
+        } else {
+            let mut auth_table = toml_edit::Table::new();
+            auth_table.insert("type", toml_edit::value("oauth"));
+            entry.insert("auth", toml_edit::Item::Table(auth_table));
+            true
+        }
+    };
+
+    if mutated {
+        crate::config::write_config_atomic(&path, &document.to_string())
+            .map_err(|error| config_err(format!("failed to write config: {}", error)))?;
+    }
+    Ok(())
+}
+
+/// Inputs for `agsh mcp add`. Parsed into a [`ResolvedAddArgs`] by
+/// [`resolve_add_args`] which is where transport auto-detection, flag
+/// compatibility, and the `McpAuthKind` → `McpAuthConfig` mapping live.
+/// Keep this struct plain-data so the clap layer in `cli.rs` and the
+/// CLI integration tests can both build one.
+pub struct AddArgs {
+    pub name: String,
+    pub location: Option<String>,
+    pub args: Vec<String>,
+    pub transport: Option<McpTransport>,
+    /// Raw `KEY=VALUE` entries from the CLI.
+    pub env: Vec<String>,
+    /// Raw `KEY=VALUE` entries from the CLI.
+    pub header: Vec<String>,
+    pub auth: Option<crate::cli::McpAuthKind>,
+    pub auth_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub signing_key: Option<String>,
+    pub signing_algorithm: Option<String>,
+    pub scope: Vec<String>,
+    pub redirect_port: Option<u16>,
+    pub permission: Option<String>,
+    pub sampling: bool,
+    pub sampling_limit: Option<u32>,
+    /// Skip the auto-login that runs when the probe reports
+    /// auth-required or when `--auth oauth` was explicitly set.
+    pub no_login: bool,
+}
+
+/// What `add` looks like after validation: transport is chosen,
+/// mutually-exclusive flag combinations have been rejected, and the
+/// `[auth]` block (if any) has been reduced to an [`McpAuthConfig`]
+/// ready to be serialised into TOML.
+#[cfg_attr(test, derive(Debug))]
+struct ResolvedAddArgs {
+    name: String,
+    transport: McpTransport,
+    /// Present iff `transport == Stdio`.
+    command: Option<String>,
+    /// Present iff `transport == Stdio` and there were trailing args.
+    stdio_args: Vec<String>,
+    /// Present iff `transport == Stdio` and `--env` was given.
+    env: Vec<(String, String)>,
+    /// Present iff `transport == Http`.
+    url: Option<String>,
+    /// Present iff `transport == Http` and `--header` was given.
+    headers: Vec<(String, String)>,
+    auth_token: Option<String>,
+    auth: Option<McpAuthConfig>,
+    permission: Option<String>,
+    sampling: bool,
+    sampling_limit: Option<u32>,
+    no_login: bool,
+}
+
+/// Run `agsh mcp add …`.
+///
+/// Persists the server into `config.toml`, then for HTTP servers:
+///   1. Probes the endpoint (RFC 6750 / RFC 9728) to see if auth is
+///      required.
+///   2. If the probe says auth is required — or the user explicitly
+///      passed `--auth oauth` — and `--no-login` wasn't set, runs the
+///      OAuth authorization_code flow immediately so the whole setup
+///      is "add + authorise" in a single command.
+///   3. If that OAuth flow fails, rolls back by purging the entry we
+///      just wrote. The CLI exit is non-zero.
+pub async fn run_add(args: AddArgs, token_store: &TokenStore) -> Result<()> {
     use crate::mcp::sanitize::{is_reserved_server_name, normalize_server_name};
 
     let normalized = normalize_server_name(&args.name);
@@ -211,6 +371,7 @@ pub fn run_add(args: AddArgs) -> Result<()> {
             args.name
         )));
     }
+    let resolved = resolve_add_args(args)?;
 
     let path = crate::config::config_file_path()
         .ok_or_else(|| config_err("could not determine config directory"))?;
@@ -249,37 +410,482 @@ pub fn run_add(args: AddArgs) -> Result<()> {
         if existing_entry
             .get("name")
             .and_then(|v| v.as_str())
-            .is_some_and(|n| n == args.name)
+            .is_some_and(|n| n == resolved.name)
         {
             return Err(config_err(format!(
                 "server '{}' already exists in config",
-                args.name
+                resolved.name
             )));
         }
     }
 
+    let table = build_server_table(&resolved);
+    servers_array.push(table);
+
+    crate::config::write_config_atomic(&path, &document.to_string())
+        .map_err(|error| config_err(format!("failed to write config: {}", error)))?;
+    println!("ok: added '{}' to {}", resolved.name, path.display());
+
+    // Decide whether to probe and/or auto-login. Stdio has no auth
+    // surface; HTTP servers with a pre-configured static bearer don't
+    // need one either. Everything else gets the probe. These
+    // short-circuits return `Ok(())` before we'd need Ctrl-C protection.
+    if resolved.transport != McpTransport::Http {
+        return Ok(());
+    }
+    if resolved.auth_token.is_some() {
+        return Ok(());
+    }
+    if resolved.url.is_none() {
+        return Ok(());
+    }
+
+    // From here on, anything that goes wrong — natural failure, timeout,
+    // Ctrl-C — should leave config.toml in the "never added" state.
+    // Race the probe + auto-login block against SIGINT so an interrupted
+    // user ends up in exactly the same place as a clean `mcp remove`.
+    let result: Result<()> = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => Err(AgshError::Interrupted),
+        r = probe_then_login(&resolved, token_store) => r,
+    };
+
+    if let Err(error) = result {
+        match &error {
+            AgshError::Interrupted => eprintln!("interrupted — rolling back '{}'.", resolved.name),
+            other => eprintln!(
+                "authorisation failed for '{}': {} — rolling back the config entry.",
+                resolved.name, other
+            ),
+        }
+        if let Err(purge_err) = purge_server(&resolved.name, token_store).await {
+            tracing::warn!("rollback of '{}' also failed: {}", resolved.name, purge_err);
+            eprintln!(
+                "rollback of '{}' also failed: {} — you may need to edit config.toml by hand.",
+                resolved.name, purge_err
+            );
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// The "everything that can fail post-persist" block: probe, decide
+/// whether to auto-login, and run the OAuth flow when warranted.
+/// Extracted so [`run_add`] can race it against a SIGINT handler and
+/// roll back on either error path from one place.
+async fn probe_then_login(resolved: &ResolvedAddArgs, token_store: &TokenStore) -> Result<()> {
+    // Caller has already verified HTTP + no auth_token + url.is_some().
+    let url = resolved
+        .url
+        .as_deref()
+        .expect("caller gated on url.is_some()");
+
+    let wants_oauth_already = matches!(resolved.auth, Some(McpAuthConfig::OAuth { .. }));
+    let should_login = match probe_and_announce(&resolved.name, url).await {
+        // Probe says unauthenticated access works, and the user didn't
+        // explicitly ask for OAuth → nothing to log in to.
+        ProbeOutcome::Open => wants_oauth_already,
+        ProbeOutcome::AuthRequired => true,
+        ProbeOutcome::Inconclusive => wants_oauth_already,
+    };
+
+    if !should_login {
+        return Ok(());
+    }
+    if resolved.no_login {
+        println!(
+            "skipping auto-login (--no-login). Run `agsh mcp login {}` when ready.",
+            resolved.name
+        );
+        return Ok(());
+    }
+
+    // Synthesised server config for the login — equivalent to parsing
+    // the entry we just wrote but without round-tripping through disk.
+    let server_config = resolved_to_server_config(resolved);
+    println!(
+        "running OAuth authorisation for '{}' (use --no-login to skip).",
+        resolved.name
+    );
+    run_login(
+        std::slice::from_ref(&server_config),
+        token_store,
+        &resolved.name,
+    )
+    .await
+}
+
+/// What we need to know about the probe from `run_add`'s perspective.
+/// The full `McpAuthProbe` detail is printed to the user (so they still
+/// see "server reachable" / "couldn't reach …"), but the auto-login
+/// decision only needs the three-state summary.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeOutcome {
+    Open,
+    AuthRequired,
+    Inconclusive,
+}
+
+/// Probe the HTTP endpoint, print a one-line hint, and collapse the
+/// probe result into a login-decision summary.
+async fn probe_and_announce(name: &str, url: &str) -> ProbeOutcome {
+    use crate::mcp::McpAuthProbe;
+
+    match crate::mcp::probe_http_auth(url).await {
+        McpAuthProbe::Open => {
+            println!("probe: server reachable and does not require auth.");
+            ProbeOutcome::Open
+        }
+        McpAuthProbe::AuthRequired { resource_metadata } => {
+            println!("probe: server requires OAuth.");
+            if let Some(meta) = resource_metadata {
+                tracing::debug!("resource_metadata advertised by '{}': {}", name, meta);
+            }
+            ProbeOutcome::AuthRequired
+        }
+        McpAuthProbe::Unexpected { status } => {
+            println!(
+                "probe: server answered HTTP {} — couldn't infer auth state.",
+                status
+            );
+            ProbeOutcome::Inconclusive
+        }
+        McpAuthProbe::Unreachable { message } => {
+            println!("probe: couldn't reach '{}' ({}).", url, message);
+            ProbeOutcome::Inconclusive
+        }
+    }
+}
+
+/// Turn the raw CLI [`AddArgs`] into a validated [`ResolvedAddArgs`].
+///
+/// Auto-detects transport from the positional `location` when
+/// `--transport` is not given (`http[s]://…` → http, anything else →
+/// stdio). Rejects every illegal flag combination (stdio with http-only
+/// flags, `--auth-token` together with `--auth`, OAuth flags without an
+/// OAuth-family auth kind, etc.) at add time so bad configurations
+/// never land in `config.toml`.
+fn resolve_add_args(args: AddArgs) -> Result<ResolvedAddArgs> {
+    let AddArgs {
+        name,
+        location,
+        args: tail,
+        transport,
+        env,
+        header,
+        auth,
+        auth_token,
+        client_id,
+        client_secret,
+        signing_key,
+        signing_algorithm,
+        scope,
+        redirect_port,
+        permission,
+        sampling,
+        sampling_limit,
+        no_login,
+    } = args;
+
+    let looks_like_url = location
+        .as_deref()
+        .map(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .unwrap_or(false);
+    let transport = transport.unwrap_or(if looks_like_url {
+        McpTransport::Http
+    } else {
+        McpTransport::Stdio
+    });
+
+    // Permission allow-list matches `parse_server_permission` upstream.
+    if let Some(perm) = permission.as_deref() {
+        match perm {
+            "none" | "read" | "ask" | "write" => {}
+            other => {
+                return Err(config_err(format!(
+                    "unknown permission '{}' (expected none, read, ask, or write)",
+                    other
+                )));
+            }
+        }
+    }
+
+    let auth_flags_present = client_id.is_some()
+        || client_secret.is_some()
+        || signing_key.is_some()
+        || signing_algorithm.is_some()
+        || !scope.is_empty()
+        || redirect_port.is_some();
+
+    if auth_token.is_some() && auth.is_some() {
+        return Err(config_err("--auth-token is mutually exclusive with --auth"));
+    }
+
+    match transport {
+        McpTransport::Stdio => {
+            let command = location.ok_or_else(|| {
+                config_err(
+                    "stdio transport needs an executable (pass it as the positional argument)",
+                )
+            })?;
+            if !header.is_empty() {
+                return Err(config_err("--header is HTTP-only"));
+            }
+            if auth_token.is_some() || auth.is_some() || auth_flags_present {
+                return Err(config_err("auth flags are HTTP-only"));
+            }
+
+            let env = parse_kv_pairs("--env", &env)?;
+
+            Ok(ResolvedAddArgs {
+                name,
+                transport,
+                command: Some(command),
+                stdio_args: tail,
+                env,
+                url: None,
+                headers: Vec::new(),
+                auth_token: None,
+                auth: None,
+                permission,
+                sampling,
+                sampling_limit,
+                no_login,
+            })
+        }
+        McpTransport::Http => {
+            let url = location.ok_or_else(|| {
+                config_err("http transport needs a URL (pass it as the positional argument)")
+            })?;
+            if !tail.is_empty() {
+                return Err(config_err(
+                    "http transport doesn't take trailing positional args",
+                ));
+            }
+            if !env.is_empty() {
+                return Err(config_err("--env is stdio-only"));
+            }
+
+            let headers = parse_kv_pairs("--header", &header)?;
+
+            let auth_config = resolve_auth_config(
+                auth,
+                &auth_token,
+                client_id,
+                client_secret,
+                signing_key,
+                signing_algorithm,
+                scope,
+                redirect_port,
+            )?;
+
+            Ok(ResolvedAddArgs {
+                name,
+                transport,
+                command: None,
+                stdio_args: Vec::new(),
+                env: Vec::new(),
+                url: Some(url),
+                headers,
+                auth_token,
+                auth: auth_config,
+                permission,
+                sampling,
+                sampling_limit,
+                no_login,
+            })
+        }
+    }
+}
+
+/// Convert the CLI's auth-related flags into an [`McpAuthConfig`] (or
+/// `None` if the user chose static-token / no auth). Validates the
+/// per-variant required fields so "oauth" doesn't silently accept an
+/// unrelated `--signing-key` and ship a malformed config.
+///
+/// The eight inputs are the independent auth-related CLI flags; grouping
+/// them behind a newtype would just shuffle the destructuring burden one
+/// step upstream without adding meaning.
+#[allow(clippy::too_many_arguments)]
+fn resolve_auth_config(
+    auth: Option<crate::cli::McpAuthKind>,
+    auth_token: &Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    signing_key: Option<String>,
+    signing_algorithm: Option<String>,
+    scope: Vec<String>,
+    redirect_port: Option<u16>,
+) -> Result<Option<McpAuthConfig>> {
+    use crate::cli::McpAuthKind;
+
+    let auth_flags_present = client_id.is_some()
+        || client_secret.is_some()
+        || signing_key.is_some()
+        || signing_algorithm.is_some()
+        || !scope.is_empty()
+        || redirect_port.is_some();
+
+    match auth {
+        None => {
+            if auth_flags_present && auth_token.is_none() {
+                return Err(config_err(
+                    "OAuth-family flags require --auth (oauth, client-credentials, or \
+                     client-credentials-jwt)",
+                ));
+            }
+            Ok(None)
+        }
+        Some(McpAuthKind::OAuth) => {
+            if signing_key.is_some() || signing_algorithm.is_some() {
+                return Err(config_err(
+                    "--signing-key and --signing-algorithm are only valid with \
+                     --auth client-credentials-jwt",
+                ));
+            }
+            Ok(Some(McpAuthConfig::OAuth {
+                client_id,
+                client_secret,
+                scopes: if scope.is_empty() { None } else { Some(scope) },
+                redirect_port,
+            }))
+        }
+        Some(McpAuthKind::ClientCredentials) => {
+            let client_id = client_id
+                .ok_or_else(|| config_err("--auth client-credentials requires --client-id"))?;
+            let client_secret = client_secret
+                .ok_or_else(|| config_err("--auth client-credentials requires --client-secret"))?;
+            if signing_key.is_some() || signing_algorithm.is_some() {
+                return Err(config_err(
+                    "--signing-key and --signing-algorithm are only valid with \
+                     --auth client-credentials-jwt",
+                ));
+            }
+            if redirect_port.is_some() {
+                return Err(config_err(
+                    "--redirect-port is only valid with --auth oauth",
+                ));
+            }
+            Ok(Some(McpAuthConfig::ClientCredentials {
+                client_id,
+                client_secret,
+                scopes: if scope.is_empty() { None } else { Some(scope) },
+                resource: None,
+            }))
+        }
+        Some(McpAuthKind::ClientCredentialsJwt) => {
+            let client_id = client_id
+                .ok_or_else(|| config_err("--auth client-credentials-jwt requires --client-id"))?;
+            let signing_key_path = signing_key.ok_or_else(|| {
+                config_err("--auth client-credentials-jwt requires --signing-key")
+            })?;
+            if client_secret.is_some() {
+                return Err(config_err(
+                    "--client-secret is for --auth client-credentials, not -jwt",
+                ));
+            }
+            if redirect_port.is_some() {
+                return Err(config_err(
+                    "--redirect-port is only valid with --auth oauth",
+                ));
+            }
+            Ok(Some(McpAuthConfig::ClientCredentialsJwt {
+                client_id,
+                signing_key_path,
+                signing_algorithm,
+                scopes: if scope.is_empty() { None } else { Some(scope) },
+                resource: None,
+            }))
+        }
+    }
+}
+
+/// Parse a list of `KEY=VALUE` strings from the CLI into pairs. Surfaces
+/// the originating flag name in errors so users can tell `--env` and
+/// `--header` apart when both are wrong at once.
+fn parse_kv_pairs(flag: &str, pairs: &[String]) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for entry in pairs {
+        let (k, v) = entry
+            .split_once('=')
+            .ok_or_else(|| config_err(format!("{} expects KEY=VALUE, got '{}'", flag, entry)))?;
+        if k.is_empty() {
+            return Err(config_err(format!(
+                "{} entry '{}' has an empty key",
+                flag, entry
+            )));
+        }
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
+}
+
+/// Build an [`McpServerConfig`] equivalent to what parsing the entry
+/// we just wrote into `config.toml` would yield. Lets the auto-login
+/// path in [`run_add`] call into [`run_login`] without round-tripping
+/// through disk.
+fn resolved_to_server_config(resolved: &ResolvedAddArgs) -> McpServerConfig {
+    let env = if resolved.env.is_empty() {
+        None
+    } else {
+        Some(resolved.env.iter().cloned().collect())
+    };
+    let headers = if resolved.headers.is_empty() {
+        None
+    } else {
+        Some(resolved.headers.iter().cloned().collect())
+    };
+    let args = if resolved.stdio_args.is_empty() {
+        None
+    } else {
+        Some(resolved.stdio_args.clone())
+    };
+    McpServerConfig {
+        name: resolved.name.clone(),
+        transport: resolved.transport.clone(),
+        command: resolved.command.clone(),
+        args,
+        env,
+        url: resolved.url.clone(),
+        auth_token: resolved.auth_token.clone(),
+        headers,
+        headers_helper: None,
+        auth: resolved.auth.clone(),
+        permission: resolved.permission.clone(),
+        sampling: resolved.sampling,
+        sampling_limit: resolved.sampling_limit,
+    }
+}
+
+/// Serialise a validated [`ResolvedAddArgs`] into a TOML table ready to
+/// push onto `mcp.servers`. Only the fields the user actually supplied
+/// are emitted so hand-edited config files stay readable.
+fn build_server_table(resolved: &ResolvedAddArgs) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
-    table.insert("name", toml_edit::value(args.name.clone()));
+    table.insert("name", toml_edit::value(resolved.name.clone()));
     table.insert(
         "transport",
-        toml_edit::value(match args.transport {
+        toml_edit::value(match resolved.transport {
             McpTransport::Stdio => "stdio",
             McpTransport::Http => "http",
         }),
     );
-    if let Some(command) = &args.command {
+
+    if let Some(command) = &resolved.command {
         table.insert("command", toml_edit::value(command.clone()));
     }
-    if let Some(cli_args) = &args.args {
+    if !resolved.stdio_args.is_empty() {
         let mut arr = toml_edit::Array::new();
-        for arg in cli_args {
-            arr.push(arg);
+        for arg in &resolved.stdio_args {
+            arr.push(arg.as_str());
         }
         table.insert("args", toml_edit::Item::Value(toml_edit::Value::Array(arr)));
     }
-    if let Some(env) = &args.env {
+    if !resolved.env.is_empty() {
         let mut env_table = toml_edit::InlineTable::new();
-        for (k, v) in env {
+        for (k, v) in &resolved.env {
             env_table.insert(k, toml_edit::Value::from(v.as_str()));
         }
         table.insert(
@@ -287,24 +893,119 @@ pub fn run_add(args: AddArgs) -> Result<()> {
             toml_edit::Item::Value(toml_edit::Value::InlineTable(env_table)),
         );
     }
-    if let Some(url) = &args.url {
+    if let Some(url) = &resolved.url {
         table.insert("url", toml_edit::value(url.clone()));
     }
-    if let Some(permission) = &args.permission {
+    if !resolved.headers.is_empty() {
+        let mut h = toml_edit::InlineTable::new();
+        for (k, v) in &resolved.headers {
+            h.insert(k, toml_edit::Value::from(v.as_str()));
+        }
+        table.insert(
+            "headers",
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(h)),
+        );
+    }
+    if let Some(token) = &resolved.auth_token {
+        table.insert("auth_token", toml_edit::value(token.clone()));
+    }
+    if let Some(permission) = &resolved.permission {
         table.insert("permission", toml_edit::value(permission.clone()));
     }
-
-    servers_array.push(table);
-
-    crate::config::write_config_atomic(&path, &document.to_string())
-        .map_err(|error| config_err(format!("failed to write config: {}", error)))?;
-    println!("ok: added '{}' to {}", args.name, path.display());
-    Ok(())
+    if resolved.sampling {
+        table.insert("sampling", toml_edit::value(true));
+    }
+    if let Some(limit) = resolved.sampling_limit {
+        table.insert("sampling_limit", toml_edit::value(limit as i64));
+    }
+    if let Some(auth) = &resolved.auth {
+        table.insert("auth", toml_edit::Item::Table(auth_to_toml(auth)));
+    }
+    table
 }
 
-/// Run `agsh mcp remove <name>` — delete the entry from config.toml + clear
-/// any stored credentials/probe cache.
-pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
+fn auth_to_toml(auth: &McpAuthConfig) -> toml_edit::Table {
+    let mut t = toml_edit::Table::new();
+    match auth {
+        McpAuthConfig::OAuth {
+            client_id,
+            client_secret,
+            scopes,
+            redirect_port,
+        } => {
+            t.insert("type", toml_edit::value("oauth"));
+            if let Some(id) = client_id {
+                t.insert("client_id", toml_edit::value(id.clone()));
+            }
+            if let Some(secret) = client_secret {
+                t.insert("client_secret", toml_edit::value(secret.clone()));
+            }
+            insert_string_array(&mut t, "scopes", scopes.as_deref());
+            if let Some(port) = redirect_port {
+                t.insert("redirect_port", toml_edit::value(*port as i64));
+            }
+        }
+        McpAuthConfig::ClientCredentials {
+            client_id,
+            client_secret,
+            scopes,
+            resource,
+        } => {
+            t.insert("type", toml_edit::value("client_credentials"));
+            t.insert("client_id", toml_edit::value(client_id.clone()));
+            t.insert("client_secret", toml_edit::value(client_secret.clone()));
+            insert_string_array(&mut t, "scopes", scopes.as_deref());
+            if let Some(resource) = resource {
+                t.insert("resource", toml_edit::value(resource.clone()));
+            }
+        }
+        McpAuthConfig::ClientCredentialsJwt {
+            client_id,
+            signing_key_path,
+            signing_algorithm,
+            scopes,
+            resource,
+        } => {
+            t.insert("type", toml_edit::value("client_credentials_jwt"));
+            t.insert("client_id", toml_edit::value(client_id.clone()));
+            t.insert(
+                "signing_key_path",
+                toml_edit::value(signing_key_path.clone()),
+            );
+            if let Some(alg) = signing_algorithm {
+                t.insert("signing_algorithm", toml_edit::value(alg.clone()));
+            }
+            insert_string_array(&mut t, "scopes", scopes.as_deref());
+            if let Some(resource) = resource {
+                t.insert("resource", toml_edit::value(resource.clone()));
+            }
+        }
+    }
+    t
+}
+
+fn insert_string_array(table: &mut toml_edit::Table, key: &str, values: Option<&[String]>) {
+    let Some(values) = values else {
+        return;
+    };
+    if values.is_empty() {
+        return;
+    }
+    let mut arr = toml_edit::Array::new();
+    for v in values {
+        arr.push(v.as_str());
+    }
+    table.insert(key, toml_edit::Item::Value(toml_edit::Value::Array(arr)));
+}
+
+/// Wipe every trace of `name`: the `[[mcp.servers]]` entry in
+/// `config.toml`, any stored OAuth credentials (revoked server-side
+/// via RFC 7009 first, best-effort), the auth-probe cache row, and any
+/// resource-update ledger entries. Silent: callers print their own
+/// user-facing line. Used by both `run_remove` (user-invoked) and
+/// `run_add`'s auto-login rollback path (on OAuth failure after the
+/// config entry has already been written).
+async fn purge_server(name: &str, token_store: &TokenStore) -> Result<std::path::PathBuf> {
     let path = crate::config::config_file_path()
         .ok_or_else(|| config_err("could not determine config directory"))?;
     let existing = std::fs::read_to_string(&path)
@@ -334,23 +1035,230 @@ pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
     crate::config::write_config_atomic(&path, &document.to_string())
         .map_err(|error| config_err(format!("failed to write config: {}", error)))?;
 
+    // Best-effort OAuth token revocation per RFC 7009 before we drop the
+    // local credentials. If the caller is rolling back a never-succeeded
+    // login there won't be any credentials; `revoke_stored_token` early-
+    // returns in that case so the call is safe regardless.
+    if let Err(error) = crate::mcp::revoke_stored_token(token_store, name).await {
+        tracing::warn!(
+            "failed to revoke token at server '{}' during purge: {} (continuing)",
+            name,
+            error
+        );
+    }
+
     token_store.clear_mcp_credentials(name).await?;
     token_store.clear_auth_probe(name).await?;
-    // Drop any accumulated resource-update ledger entries for this server so
-    // `list_mcp_resource_updates` doesn't keep reporting stale URIs after the
-    // server's configuration has been removed.
     crate::mcp::resource_updates::clear_for_server(name);
+    Ok(path)
+}
+
+/// Run `agsh mcp remove <name>` — delete the entry from config.toml,
+/// best-effort revoke OAuth tokens at the provider, clear local state.
+pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
+    let path = purge_server(name, token_store).await?;
     println!("ok: removed '{}' from {}", name, path.display());
     Ok(())
 }
 
-/// Arguments collected by the `agsh mcp add` CLI path.
-pub struct AddArgs {
-    pub name: String,
-    pub transport: McpTransport,
-    pub command: Option<String>,
-    pub args: Option<Vec<String>>,
-    pub env: Option<Vec<(String, String)>>,
-    pub url: Option<String>,
-    pub permission: Option<String>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare_add(name: &str, location: Option<&str>) -> AddArgs {
+        AddArgs {
+            name: name.to_string(),
+            location: location.map(str::to_string),
+            args: Vec::new(),
+            transport: None,
+            env: Vec::new(),
+            header: Vec::new(),
+            auth: None,
+            auth_token: None,
+            client_id: None,
+            client_secret: None,
+            signing_key: None,
+            signing_algorithm: None,
+            scope: Vec::new(),
+            redirect_port: None,
+            permission: None,
+            sampling: false,
+            sampling_limit: None,
+            no_login: false,
+        }
+    }
+
+    #[test]
+    fn resolve_autodetects_http_from_url() {
+        let resolved = resolve_add_args(bare_add("notion", Some("https://mcp.notion.com/mcp")))
+            .expect("should resolve");
+        assert_eq!(resolved.transport, McpTransport::Http);
+        assert_eq!(resolved.url.as_deref(), Some("https://mcp.notion.com/mcp"));
+        assert!(resolved.command.is_none());
+        assert!(resolved.auth.is_none());
+    }
+
+    #[test]
+    fn resolve_autodetects_stdio_from_command() {
+        let mut args = bare_add("pg", Some("npx"));
+        args.args = vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-postgres".to_string(),
+        ];
+        let resolved = resolve_add_args(args).expect("should resolve");
+        assert_eq!(resolved.transport, McpTransport::Stdio);
+        assert_eq!(resolved.command.as_deref(), Some("npx"));
+        assert_eq!(resolved.stdio_args.len(), 2);
+        assert!(resolved.url.is_none());
+    }
+
+    #[test]
+    fn resolve_http_requires_location() {
+        let err = resolve_add_args({
+            let mut args = bare_add("srv", None);
+            args.transport = Some(McpTransport::Http);
+            args
+        })
+        .expect_err("http with no URL should error");
+        assert!(format!("{}", err).contains("http transport needs a URL"));
+    }
+
+    #[test]
+    fn resolve_stdio_requires_command() {
+        let err = resolve_add_args({
+            let mut args = bare_add("srv", None);
+            args.transport = Some(McpTransport::Stdio);
+            args
+        })
+        .expect_err("stdio with no command should error");
+        assert!(format!("{}", err).contains("stdio transport needs an executable"));
+    }
+
+    #[test]
+    fn resolve_http_rejects_trailing_args() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.args = vec!["extra".to_string()];
+        let err = resolve_add_args(args).expect_err("should reject trailing args on http");
+        assert!(format!("{}", err).contains("trailing positional args"));
+    }
+
+    #[test]
+    fn resolve_rejects_env_on_http() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.env = vec!["K=V".to_string()];
+        let err = resolve_add_args(args).expect_err("env on http should error");
+        assert!(format!("{}", err).contains("--env is stdio-only"));
+    }
+
+    #[test]
+    fn resolve_rejects_header_on_stdio() {
+        let mut args = bare_add("srv", Some("/usr/bin/mcp"));
+        args.header = vec!["X-Custom=1".to_string()];
+        let err = resolve_add_args(args).expect_err("header on stdio should error");
+        assert!(format!("{}", err).contains("--header is HTTP-only"));
+    }
+
+    #[test]
+    fn resolve_rejects_auth_token_with_auth_flag() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.auth_token = Some("tok".to_string());
+        args.auth = Some(crate::cli::McpAuthKind::OAuth);
+        let err = resolve_add_args(args).expect_err("mutually exclusive flags");
+        assert!(format!("{}", err).contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn resolve_client_credentials_requires_id_and_secret() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.auth = Some(crate::cli::McpAuthKind::ClientCredentials);
+        let err = resolve_add_args(args).expect_err("missing client-id");
+        assert!(format!("{}", err).contains("--client-id"));
+    }
+
+    #[test]
+    fn resolve_oauth_builds_empty_config_when_no_flags() {
+        let mut args = bare_add("notion", Some("https://mcp.notion.com/mcp"));
+        args.auth = Some(crate::cli::McpAuthKind::OAuth);
+        let resolved = resolve_add_args(args).expect("should resolve");
+        match resolved.auth {
+            Some(McpAuthConfig::OAuth {
+                client_id,
+                client_secret,
+                scopes,
+                redirect_port,
+            }) => {
+                assert!(client_id.is_none());
+                assert!(client_secret.is_none());
+                assert!(scopes.is_none());
+                assert!(redirect_port.is_none());
+            }
+            other => panic!("expected OAuth auth, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_oauth_flags_without_auth() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.client_id = Some("id".to_string());
+        let err = resolve_add_args(args).expect_err("orphan oauth flag");
+        assert!(format!("{}", err).contains("OAuth-family flags"));
+    }
+
+    #[test]
+    fn resolve_auth_token_works_alone() {
+        let mut args = bare_add("srv", Some("https://example.com"));
+        args.auth_token = Some("bearer-xyz".to_string());
+        let resolved = resolve_add_args(args).expect("should resolve");
+        assert_eq!(resolved.auth_token.as_deref(), Some("bearer-xyz"));
+        assert!(resolved.auth.is_none());
+    }
+
+    #[test]
+    fn parse_kv_pairs_rejects_missing_separator() {
+        let err = parse_kv_pairs("--env", &["bad".to_string()]).expect_err("no = should error");
+        assert!(format!("{}", err).contains("--env"));
+        assert!(format!("{}", err).contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn parse_kv_pairs_rejects_empty_key() {
+        let err =
+            parse_kv_pairs("--header", &["=val".to_string()]).expect_err("empty key should error");
+        assert!(format!("{}", err).contains("empty key"));
+    }
+
+    #[test]
+    fn build_server_table_emits_oauth_block() {
+        let mut args = bare_add("notion", Some("https://mcp.notion.com/mcp"));
+        args.auth = Some(crate::cli::McpAuthKind::OAuth);
+        args.scope = vec!["read".to_string(), "write".to_string()];
+        args.redirect_port = Some(8400);
+        let resolved = resolve_add_args(args).expect("resolve");
+        // Parse it back through toml to confirm the schema matches what
+        // ResolvedConfig expects — checking the textual rendering is
+        // fragile because toml_edit decides when to emit a standalone
+        // `[mcp.servers.auth]` header.
+        let mut doc = toml_edit::DocumentMut::new();
+        let mut servers = toml_edit::ArrayOfTables::new();
+        servers.push(build_server_table(&resolved));
+        doc.insert(
+            "mcp",
+            toml_edit::Item::Table({
+                let mut t = toml_edit::Table::new();
+                t.insert("servers", toml_edit::Item::ArrayOfTables(servers));
+                t
+            }),
+        );
+        let parsed: crate::config::ConfigFile =
+            toml::from_str(&doc.to_string()).expect("valid config");
+        let servers = parsed.mcp.expect("mcp").servers.expect("servers");
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+        assert_eq!(server.name, "notion");
+        assert!(matches!(
+            &server.auth,
+            Some(crate::config::McpAuthConfig::OAuth { redirect_port: Some(8400), scopes: Some(s), .. })
+            if s == &vec!["read".to_string(), "write".to_string()]
+        ));
+    }
 }

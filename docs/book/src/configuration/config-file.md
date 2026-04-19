@@ -379,13 +379,85 @@ Manage configured servers without editing `config.toml` by hand:
 |---|---|
 | `agsh mcp list` | Print all configured servers. |
 | `agsh mcp get <name>` | Print full details for one server. |
-| `agsh mcp add <name> --transport {stdio\|http} [--command ...] [--arg ...] [--env KEY=VALUE] [--url ...] [--permission ...]` | Persist a server into `config.toml` (preserves existing formatting/comments via `toml_edit`). |
-| `agsh mcp remove <name>` | Delete the server entry and clear stored credentials. |
+| `agsh mcp add <name> <url-or-command> [args...] [flags]` | Persist a server. Transport is auto-detected: a URL starting with `http[s]://` means HTTP, anything else means stdio. Preserves existing formatting/comments via `toml_edit`. |
+| `agsh mcp remove <name>` | Best-effort revoke stored OAuth tokens (RFC 7009) at the provider, then delete the server entry, clear stored credentials, and drop any resource-update ledger entries. |
 | `agsh mcp reconnect <name>` | Smoke-test a connect; prints `ok` or the error. |
-| `agsh mcp login <name>` | Force interactive OAuth for a server with `auth` configured. |
+| `agsh mcp login <name>` | Drive interactive OAuth. If the server has no `[auth]` block and uses HTTP, assumes `type = "oauth"` and persists the block on success. |
 | `agsh mcp logout <name>` | Call the provider's `revocation_endpoint` (RFC 7009) best-effort, then clear stored credentials + auth-probe cache. |
 
-Inside the REPL, `/mcp list`, `/mcp reconnect <server>`, and `/mcp <server>:<prompt> [args...]` provide the same lookup + a way to invoke MCP prompts as a user turn.
+#### `agsh mcp add` flags
+
+| Flag | Purpose |
+|------|---------|
+| `--transport <stdio\|http>` | Override the auto-detected transport. |
+| `--env KEY=VALUE` | Environment variable for stdio (repeatable). |
+| `--header KEY=VALUE` | HTTP header (repeatable). |
+| `--auth <oauth\|client-credentials\|client-credentials-jwt>` | Configure the `[auth]` block. |
+| `--auth-token <TOKEN>` | Static bearer token. Mutually exclusive with `--auth`. |
+| `--client-id`, `--client-secret` | OAuth / client-credentials client identifiers. |
+| `--signing-key <PATH>`, `--signing-algorithm <ALG>` | JWT signing material (`client-credentials-jwt` only). |
+| `--scope <SCOPE>` | OAuth scope (repeatable). |
+| `--redirect-port <PORT>` | Fixed OAuth redirect port (default: ephemeral). |
+| `--permission <none\|read\|ask\|write>` | Per-server permission cap. |
+| `--sampling`, `--sampling-limit <N>` | Opt into server-initiated `sampling/createMessage`. |
+
+#### Example: Notion
+
+```console
+$ agsh mcp add notion https://mcp.notion.com/mcp
+ok: added 'notion' to ~/.config/agsh/config.toml
+probe: server requires OAuth.
+running OAuth authorisation for 'notion' (use --no-login to skip).
+no [auth] block for 'notion' — assuming OAuth authorization_code.
+…
+ok: authorized 'notion'
+```
+
+`agsh mcp add` on an HTTP endpoint:
+
+1. **Probe** — issues an unauthenticated `GET` (3 s timeout, redirects off) and classifies the response per the MCP authorization spec + RFC 6750 + RFC 9728:
+
+   - `2xx` → server is open, no login needed.
+   - `401` / `403` with `WWW-Authenticate: Bearer …` → OAuth required. The `resource_metadata="…"` attribute (RFC 9728) is captured at DEBUG.
+   - Any other status → couldn't infer, prints the status code.
+   - Network failure → prints the error.
+
+2. **Auto-login** — if the probe says OAuth is required (or `--auth oauth` was explicitly set), the OAuth authorization_code flow runs immediately as though the user had chained `agsh mcp login <name>` themselves. The synthesised `[auth] = oauth` block is written back to `config.toml` on success.
+
+3. **Rollback on failure** — if the OAuth flow errors out, the entry we just wrote is purged from `config.toml` (alongside any partial credentials + probe cache), leaving the user's config clean. The command exits non-zero.
+
+4. **`--no-login`** — skips step 2. The entry is still persisted and the probe's hint is still printed; run `agsh mcp login <name>` when ready. Useful for scripted setup or when you expect to edit `[auth]` by hand.
+
+The probe and the auto-login only run for HTTP servers, and only when the user didn't provide `--auth-token` (static bearer) or `--auth` (other than `oauth`). Stdio servers skip both.
+
+#### Remote hosts / SSH sessions
+
+The OAuth flow redirects the browser to `http://127.0.0.1:<port>/callback`. When agsh is running on a different host than the browser (SSH session, container, Codespace, WSL), the browser can't reach back and shows a "connection refused" error page. agsh handles this automatically:
+
+- While `agsh mcp login <name>` waits for the callback it also watches stdin.
+- The browser's address bar still contains the full callback URL (including `code` and `state`) even when the connection fails. Copy it, paste it into the agsh prompt, and press Enter.
+- Whichever completes first — the TCP callback or the pasted URL — wins.
+
+```console
+$ agsh mcp login notion
+server 'notion' has no [auth] block; assuming OAuth authorization_code.
+Opening browser for MCP server 'notion' OAuth authorization...
+If the browser didn't open, visit:
+  https://mcp.notion.com/authorize?response_type=code&…
+Waiting for OAuth callback (up to 120s).
+  If the browser can't reach this host (e.g. you're over SSH), paste the full
+  callback URL here and press Enter.
+http://127.0.0.1:46437/callback?code=…&state=…     ← paste here
+ok: authorized 'notion'
+```
+
+#### REPL parity
+
+Inside the REPL:
+- `/mcp list` — list configured servers.
+- `/mcp reconnect <server>` — reconnect smoke-test.
+- `/mcp login <server>` / `/mcp logout <server>` — run the auth flow or revoke.
+- `/mcp <server>:<prompt> [args...]` — render a server-defined prompt as the next user turn.
 
 ### Resources and prompts
 

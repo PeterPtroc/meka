@@ -191,6 +191,121 @@ pub async fn revoke_stored_token(
     Ok(())
 }
 
+/// Classification of an unauthenticated probe to an HTTP MCP endpoint.
+/// The MCP authorization spec (2025-03-26) layers on RFC 6750 +
+/// RFC 9728: a server that requires auth answers unauthenticated
+/// requests with `401` and a `WWW-Authenticate: Bearer …` challenge,
+/// optionally advertising a `resource_metadata` URL we can fetch to
+/// learn which authorization servers + scopes to use.
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpAuthProbe {
+    /// Server answered 2xx — reachable and doesn't require auth.
+    Open,
+    /// Server answered 401 / 403 with a `Bearer` challenge. The optional
+    /// URL is the RFC 9728 protected-resource-metadata document.
+    AuthRequired { resource_metadata: Option<String> },
+    /// Reachable but some other status (405, 404, …). Record it so the
+    /// caller can surface it without claiming auth is or isn't needed.
+    Unexpected { status: u16 },
+    /// Couldn't even talk to the server (DNS, TLS, timeout, …).
+    Unreachable { message: String },
+}
+
+/// Probe an MCP HTTP endpoint to see whether it requires OAuth.
+///
+/// Runs an unauthenticated `GET` with a 3 s wall-clock timeout and
+/// redirects disabled; we never follow off-origin so a compromised DNS
+/// can't bait us into treating an attacker host as authoritative about
+/// the real server. The body is ignored — the verdict comes entirely
+/// from the status line and the `WWW-Authenticate` header.
+pub async fn probe_http_auth(url: &str) -> McpAuthProbe {
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return McpAuthProbe::Unreachable {
+                message: format!("build http client: {}", error),
+            };
+        }
+    };
+    let response = match http.get(url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return McpAuthProbe::Unreachable {
+                message: error.to_string(),
+            };
+        }
+    };
+    let status = response.status().as_u16();
+    let www_authenticate = response
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    classify_probe_response(status, www_authenticate.as_deref())
+}
+
+/// Pure classifier for the probe — takes the status code + optional
+/// `WWW-Authenticate` header and returns the [`McpAuthProbe`] verdict.
+/// Extracted so the RFC-6750 / RFC-9728 parsing can be unit-tested
+/// without a live HTTP server.
+fn classify_probe_response(status: u16, www_authenticate: Option<&str>) -> McpAuthProbe {
+    if (200..300).contains(&status) {
+        return McpAuthProbe::Open;
+    }
+    if status == 401 || status == 403 {
+        let header = www_authenticate.unwrap_or("");
+        // RFC 6750 §3: the challenge must start with `Bearer`. Match
+        // case-insensitively; tolerate the scheme with or without any
+        // `key=value` parameters following.
+        let first = header.split(',').next().unwrap_or("").trim();
+        let is_bearer = first.eq_ignore_ascii_case("Bearer")
+            || first
+                .split_once(|c: char| c.is_whitespace())
+                .map(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+                .unwrap_or(false);
+        if !is_bearer {
+            return McpAuthProbe::Unexpected { status };
+        }
+        return McpAuthProbe::AuthRequired {
+            resource_metadata: extract_bearer_param(header, "resource_metadata"),
+        };
+    }
+    McpAuthProbe::Unexpected { status }
+}
+
+/// Extract a quoted parameter value from an RFC 6750 `WWW-Authenticate:
+/// Bearer …` challenge. Handles the forms seen in the wild:
+/// `key="value"`, `key=value`, trailing commas, mixed whitespace.
+/// Returns `None` if the key isn't present.
+fn extract_bearer_param(header: &str, key: &str) -> Option<String> {
+    // Drop the `Bearer` scheme prefix; everything after is a
+    // comma-separated parameter list.
+    let params = match header.find(|c: char| c.is_whitespace()) {
+        Some(idx) => &header[idx..],
+        None => return None,
+    };
+    for pair in params.split(',') {
+        let pair = pair.trim();
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let v = v.trim();
+        let unquoted = v
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(v);
+        return Some(unquoted.to_string());
+    }
+    None
+}
+
 /// Parse an OAuth authorization-server metadata JSON document and return
 /// the `revocation_endpoint` string, if any. Rejects bodies larger than
 /// `max_bytes` and invalid JSON. Split from [`revoke_stored_token`] so the
@@ -1337,15 +1452,14 @@ async fn authenticate_oauth_authorization_code(
                 message: format!("failed to get authorization URL: {}", error),
             })?;
 
-    // Open browser for user authorization
-    eprintln!(
-        "Opening browser for MCP server '{}' OAuth authorization...",
-        server_name
-    );
+    // Print the URL exactly once and try to open the browser silently.
+    // Browser-launch failures are expected on headless hosts (SSH, CI,
+    // containers), so they stay at `debug` — the user has the URL and
+    // can copy it either way.
+    eprintln!("\nopen this URL in your browser to authorize:\n\n{auth_url}\n");
     if let Err(error) = open::that(&auth_url) {
-        tracing::warn!("failed to open browser: {}", error);
+        tracing::debug!("open::that failed to launch browser: {}", error);
     }
-    eprintln!("If the browser didn't open, visit:\n  {}", auth_url);
 
     // Wait for the authorization code on our pre-bound listener.
     let (code, state) = await_oauth_callback(callback_listener)
@@ -1379,22 +1493,72 @@ const CALLBACK_READ_CAP: usize = 64 * 1024;
 /// End-of-headers marker for HTTP/1.x.
 const CRLF_CRLF: &[u8] = b"\r\n\r\n";
 
+/// Overall wall-clock budget for the OAuth callback wait, shared by
+/// both the TCP accept path and the paste-URL fallback.
+const OAUTH_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wait for the authorization code.
+///
+/// The common case is that the OAuth provider redirects the user's
+/// browser to our localhost listener and we pick the code out of the
+/// HTTP request. But when agsh runs on a different host than the
+/// browser — SSH sessions, containers, remote Codespaces — the browser
+/// can't reach back, so we race the TCP accept against a stdin prompt
+/// that lets the user paste the full callback URL (it's visible in
+/// the browser's address bar even when the connection is refused).
+/// Paste mode is only offered when stdin is a TTY.
 async fn await_oauth_callback(
     listener: tokio::net::TcpListener,
 ) -> std::result::Result<(String, String), String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let deadline = tokio::time::Instant::now() + OAUTH_CALLBACK_TIMEOUT;
+    let paste_enabled = std::io::IsTerminal::is_terminal(&std::io::stdin());
 
-    let overall_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
+    if paste_enabled {
+        eprintln!(
+            "waiting up to {}s for the callback — or paste the callback URL here and press Enter:",
+            OAUTH_CALLBACK_TIMEOUT.as_secs()
+        );
+    } else {
+        eprintln!(
+            "waiting up to {}s for the callback.",
+            OAUTH_CALLBACK_TIMEOUT.as_secs()
+        );
+        return accept_http_callback(listener, deadline).await;
+    }
+
+    tokio::select! {
+        result = accept_http_callback(listener, deadline) => result,
+        result = read_pasted_callback(deadline) => result,
+    }
+}
+
+/// Accept one HTTP request on the bound listener, validate it's the
+/// OAuth callback, extract `code` and `state`, and send back a success
+/// page. Loops past non-callback requests (favicons, preflights) until
+/// the shared deadline elapses.
+async fn accept_http_callback(
+    listener: tokio::net::TcpListener,
+    overall_deadline: tokio::time::Instant,
+) -> std::result::Result<(String, String), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
         let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err("authorization timed out after 120 seconds".to_string());
+            return Err(format!(
+                "authorization timed out after {}s",
+                OAUTH_CALLBACK_TIMEOUT.as_secs()
+            ));
         }
 
         let accept_result = tokio::time::timeout(remaining, listener.accept()).await;
         let (mut stream, _addr) = match accept_result {
-            Err(_) => return Err("authorization timed out after 120 seconds".to_string()),
+            Err(_) => {
+                return Err(format!(
+                    "authorization timed out after {}s",
+                    OAUTH_CALLBACK_TIMEOUT.as_secs()
+                ));
+            }
             Ok(Err(error)) => return Err(format!("failed to accept connection: {}", error)),
             Ok(Ok(pair)) => pair,
         };
@@ -1415,10 +1579,18 @@ async fn await_oauth_callback(
             let read_remaining =
                 overall_deadline.saturating_duration_since(tokio::time::Instant::now());
             if read_remaining.is_zero() {
-                return Err("authorization timed out after 120 seconds".to_string());
+                return Err(format!(
+                    "authorization timed out after {}s",
+                    OAUTH_CALLBACK_TIMEOUT.as_secs()
+                ));
             }
             match tokio::time::timeout(read_remaining, stream.read(&mut temp)).await {
-                Err(_) => return Err("authorization timed out after 120 seconds".to_string()),
+                Err(_) => {
+                    return Err(format!(
+                        "authorization timed out after {}s",
+                        OAUTH_CALLBACK_TIMEOUT.as_secs()
+                    ));
+                }
                 Ok(Err(error)) => return Err(format!("failed to read request: {}", error)),
                 Ok(Ok(0)) => break buffer.windows(CRLF_CRLF.len()).any(|w| w == CRLF_CRLF),
                 Ok(Ok(n)) => buffer.extend_from_slice(&temp[..n]),
@@ -1473,6 +1645,81 @@ async fn await_oauth_callback(
             }
         }
     }
+}
+
+/// Paste-URL fallback for the OAuth callback: prompt on stderr, read a
+/// line from stdin, extract `code` + `state` from the pasted URL. Used
+/// when the browser can't reach back to our bound listener (e.g. agsh
+/// is on an SSH host and the browser is on the user's laptop).
+async fn read_pasted_callback(
+    deadline: tokio::time::Instant,
+) -> std::result::Result<(String, String), String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(format!(
+            "authorization timed out after {}s",
+            OAUTH_CALLBACK_TIMEOUT.as_secs()
+        ));
+    }
+    let mut reader = BufReader::new(tokio::io::stdin());
+    let mut line = String::new();
+    match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+        Err(_) => Err(format!(
+            "authorization timed out after {}s",
+            OAUTH_CALLBACK_TIMEOUT.as_secs()
+        )),
+        Ok(Err(error)) => Err(format!("stdin read failed: {}", error)),
+        // `read_line` returning 0 means EOF — stdin was closed before the
+        // user pasted anything. Don't treat this as a fatal error; let
+        // the TCP branch of the `select!` continue waiting.
+        Ok(Ok(0)) => std::future::pending().await,
+        Ok(Ok(_)) => parse_pasted_callback(&line),
+    }
+}
+
+/// Extract `(code, state)` from a pasted callback URL. Accepts either
+/// the full URL or just the query string, percent-decodes the values,
+/// and surfaces the `error=…` parameter (sanitised) when the
+/// authorization server declines.
+fn parse_pasted_callback(input: &str) -> std::result::Result<(String, String), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("no callback URL pasted".to_string());
+    }
+    // Drop any URL fragment, then narrow to whatever sits after `?`.
+    let before_hash = trimmed.split('#').next().unwrap_or(trimmed);
+    let query = match before_hash.find('?') {
+        Some(idx) => &before_hash[idx + 1..],
+        None => before_hash,
+    };
+    let mut code = None;
+    let mut state = None;
+    let mut error_param: Option<String> = None;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let decoded = percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .into_owned();
+        match key {
+            "code" => code = Some(decoded),
+            "state" => state = Some(decoded),
+            "error" => error_param = Some(decoded),
+            _ => {}
+        }
+    }
+    if let Some(error) = error_param {
+        return Err(format!(
+            "authorization server returned error: {}",
+            crate::mcp::sanitize::sanitize_text(&error)
+        ));
+    }
+    let code = code.ok_or_else(|| "missing 'code' parameter in pasted URL".to_string())?;
+    let state = state.ok_or_else(|| "missing 'state' parameter in pasted URL".to_string())?;
+    Ok((code, state))
 }
 
 #[derive(Debug)]
@@ -2837,6 +3084,177 @@ mod tests {
             }
             other => panic!("expected Malformed with error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn classify_probe_open_on_2xx() {
+        assert_eq!(classify_probe_response(200, None), McpAuthProbe::Open);
+        assert_eq!(classify_probe_response(204, None), McpAuthProbe::Open);
+        assert_eq!(
+            classify_probe_response(200, Some("Bearer realm=\"x\"")),
+            McpAuthProbe::Open,
+            "2xx always wins over any WWW-Authenticate header"
+        );
+    }
+
+    #[test]
+    fn classify_probe_auth_required_with_resource_metadata() {
+        // What Notion-style MCP servers actually emit.
+        let header = r#"Bearer realm="mcp", resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource""#;
+        assert_eq!(
+            classify_probe_response(401, Some(header)),
+            McpAuthProbe::AuthRequired {
+                resource_metadata: Some(
+                    "https://mcp.notion.com/.well-known/oauth-protected-resource".to_string()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_probe_auth_required_without_resource_metadata() {
+        assert_eq!(
+            classify_probe_response(401, Some("Bearer realm=\"mcp\"")),
+            McpAuthProbe::AuthRequired {
+                resource_metadata: None,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_probe_auth_required_bare_bearer() {
+        // Some servers emit just `Bearer` with no parameters.
+        assert_eq!(
+            classify_probe_response(401, Some("Bearer")),
+            McpAuthProbe::AuthRequired {
+                resource_metadata: None,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_probe_is_case_insensitive_on_scheme() {
+        assert_eq!(
+            classify_probe_response(401, Some("bearer realm=\"x\"")),
+            McpAuthProbe::AuthRequired {
+                resource_metadata: None,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_probe_401_without_bearer_is_unexpected() {
+        // A 401 with e.g. Basic / Digest auth is not MCP-spec compliant —
+        // surface it as Unexpected rather than pretending it's OAuth.
+        assert_eq!(
+            classify_probe_response(401, Some("Basic realm=\"x\"")),
+            McpAuthProbe::Unexpected { status: 401 }
+        );
+        assert_eq!(
+            classify_probe_response(401, None),
+            McpAuthProbe::Unexpected { status: 401 }
+        );
+    }
+
+    #[test]
+    fn classify_probe_403_with_bearer_is_auth_required() {
+        // Some implementations return 403 for missing auth.
+        assert_eq!(
+            classify_probe_response(403, Some("Bearer realm=\"mcp\"")),
+            McpAuthProbe::AuthRequired {
+                resource_metadata: None,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_probe_other_statuses_are_unexpected() {
+        assert_eq!(
+            classify_probe_response(405, None),
+            McpAuthProbe::Unexpected { status: 405 }
+        );
+        assert_eq!(
+            classify_probe_response(500, None),
+            McpAuthProbe::Unexpected { status: 500 }
+        );
+    }
+
+    #[test]
+    fn extract_bearer_param_handles_quoting_and_spacing() {
+        let header = r#"Bearer realm="x",resource_metadata="https://y/z""#;
+        assert_eq!(
+            extract_bearer_param(header, "resource_metadata"),
+            Some("https://y/z".to_string())
+        );
+        let unquoted = r#"Bearer realm=x, resource_metadata=https://y/z"#;
+        assert_eq!(
+            extract_bearer_param(unquoted, "resource_metadata"),
+            Some("https://y/z".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_bearer_param_returns_none_when_missing() {
+        assert_eq!(
+            extract_bearer_param("Bearer realm=\"x\"", "resource_metadata"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_pasted_callback_accepts_full_url() {
+        // Exact shape returned by Notion after the user authorises.
+        let input = "http://127.0.0.1:46437/callback?code=1d5d872b-594c-8153-a5e0-0002d8f4be0f%3AGEE3YdaPJhHZpMMa%3AjZ2YV0BC0TYheYBtoSB16LmRDTgIZ6zM&state=82Nw67m4su5AeMSfCFcXAw";
+        let (code, state) = parse_pasted_callback(input).expect("should parse");
+        // Percent-encoded colons in the code must be decoded.
+        assert_eq!(
+            code,
+            "1d5d872b-594c-8153-a5e0-0002d8f4be0f:GEE3YdaPJhHZpMMa:jZ2YV0BC0TYheYBtoSB16LmRDTgIZ6zM"
+        );
+        assert_eq!(state, "82Nw67m4su5AeMSfCFcXAw");
+    }
+
+    #[test]
+    fn parse_pasted_callback_accepts_query_only() {
+        let (code, state) = parse_pasted_callback("code=abc&state=xyz").expect("should parse");
+        assert_eq!(code, "abc");
+        assert_eq!(state, "xyz");
+    }
+
+    #[test]
+    fn parse_pasted_callback_trims_whitespace_and_fragment() {
+        let (code, state) =
+            parse_pasted_callback("   http://127.0.0.1:1/callback?code=a&state=b#fragment  \n")
+                .expect("should parse");
+        assert_eq!(code, "a");
+        assert_eq!(state, "b");
+    }
+
+    #[test]
+    fn parse_pasted_callback_rejects_empty_input() {
+        let err = parse_pasted_callback("   \n").expect_err("empty input should fail");
+        assert!(err.contains("no callback URL"));
+    }
+
+    #[test]
+    fn parse_pasted_callback_surfaces_server_error_sanitised() {
+        let input = "http://127.0.0.1:1/callback?error=bad%1B%5B2Jstuff%E2%80%AErtl&state=z";
+        let err = parse_pasted_callback(input).expect_err("should surface error");
+        assert!(!err.contains('\u{001B}'), "ANSI leaked: {}", err);
+        assert!(!err.contains('\u{202E}'), "RTL leaked: {}", err);
+        assert!(err.contains("bad"));
+    }
+
+    #[test]
+    fn parse_pasted_callback_missing_code() {
+        let err = parse_pasted_callback("state=xyz").expect_err("should fail");
+        assert!(err.contains("missing 'code'"));
+    }
+
+    #[test]
+    fn parse_pasted_callback_missing_state() {
+        let err = parse_pasted_callback("code=abc").expect_err("should fail");
+        assert!(err.contains("missing 'state'"));
     }
 
     #[test]

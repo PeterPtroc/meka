@@ -6,6 +6,12 @@ use clap::Parser;
 
 use crate::permission::Permission;
 
+// `Mcp { action: McpAction }` is bigger than every other variant because
+// `McpAction::Add` holds every CLI flag inline, but the enum is only ever
+// constructed once per process by clap and held on the stack of `main`,
+// so the few extra words of padding on the other variants aren't worth
+// the indirection cost of boxing.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
     /// Run the interactive configuration wizard
@@ -39,6 +45,10 @@ pub enum Command {
     },
 }
 
+// Same reasoning as `Command` above: `Add` is the outlier and the enum
+// lives on `main`'s stack for exactly one dispatch, not in a hot
+// collection, so boxing would trade clarity for nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand, Debug)]
 pub enum McpAction {
     /// List all configured MCP servers
@@ -47,35 +57,101 @@ pub enum McpAction {
     Get { name: String },
     /// Connect once and print `ok` if the handshake succeeds
     Reconnect { name: String },
-    /// Force interactive OAuth for a server with `auth` configured
+    /// Authenticate a server interactively (OAuth assumed for HTTP)
     Login { name: String },
     /// Revoke cached credentials for a server
     Logout { name: String },
-    /// Add a server to config.toml
+    /// Add a server to config.toml.
+    ///
+    /// Examples:
+    ///   agsh mcp add pg npx -y @modelcontextprotocol/server-postgres
+    ///   agsh mcp add notion https://mcp.notion.com/mcp
+    ///   agsh mcp add api https://api.example.com/mcp --auth-token $API_TOKEN
+    ///   agsh mcp add notion https://mcp.notion.com/mcp --auth oauth
     Add {
         /// Unique server name (alphanumerics, `-`, `_` only)
         name: String,
-        /// Transport: "stdio" or "http"
-        #[arg(long, value_parser = parse_mcp_transport)]
-        transport: crate::config::McpTransport,
-        /// Command path for stdio transport
-        #[arg(long)]
-        command: Option<String>,
-        /// Argument for stdio transport (repeat to pass multiple)
-        #[arg(long = "arg", value_name = "ARG")]
+        /// URL (for HTTP) or executable path (for stdio). Transport is
+        /// auto-detected from this value unless `--transport` is given.
+        location: Option<String>,
+        /// Arguments to pass to the stdio command.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Environment variable for stdio transport (KEY=VALUE; repeat)
+
+        /// Force transport (stdio or http); auto-detected otherwise
+        #[arg(long, value_parser = parse_mcp_transport)]
+        transport: Option<crate::config::McpTransport>,
+
+        /// Environment variable for stdio (KEY=VALUE, repeatable)
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
-        /// URL for http transport
+
+        /// HTTP header (KEY=VALUE, repeatable)
+        #[arg(long = "header", value_name = "KEY=VALUE")]
+        header: Vec<String>,
+
+        /// Authentication: oauth | client-credentials | client-credentials-jwt
+        #[arg(long, value_parser = parse_mcp_auth_kind)]
+        auth: Option<McpAuthKind>,
+
+        /// Static bearer token for HTTP (mutually exclusive with --auth)
         #[arg(long)]
-        url: Option<String>,
-        /// Permission level: none, read, ask, write
+        auth_token: Option<String>,
+
+        /// OAuth / client-credentials client ID
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// OAuth / client-credentials client secret
+        #[arg(long)]
+        client_secret: Option<String>,
+
+        /// JWT signing key path (for client-credentials-jwt)
+        #[arg(long)]
+        signing_key: Option<String>,
+
+        /// JWT signing algorithm (RS256, RS384, RS512, ES256, ES384)
+        #[arg(long)]
+        signing_algorithm: Option<String>,
+
+        /// OAuth scope (repeatable)
+        #[arg(long = "scope", value_name = "SCOPE")]
+        scope: Vec<String>,
+
+        /// Fixed OAuth redirect port (default: ephemeral)
+        #[arg(long)]
+        redirect_port: Option<u16>,
+
+        /// Permission: none, read, ask, write (default: read)
         #[arg(long)]
         permission: Option<String>,
+
+        /// Allow this server to call sampling/createMessage
+        #[arg(long)]
+        sampling: bool,
+
+        /// Max sampling calls per agsh session (default 10)
+        #[arg(long)]
+        sampling_limit: Option<u32>,
+
+        /// Skip the post-add auto-login even if the server requires auth.
+        /// The server is still persisted; run `agsh mcp login <name>`
+        /// later to authorise.
+        #[arg(long = "no-login")]
+        no_login: bool,
     },
     /// Remove a server from config.toml and clear stored creds
     Remove { name: String },
+}
+
+/// Authentication flavours selectable from the CLI. Maps onto the
+/// [`crate::config::McpAuthConfig`] variants, except `None` which means
+/// "no `[auth]` block at all" (static token or unauthenticated).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpAuthKind {
+    OAuth,
+    ClientCredentials,
+    ClientCredentialsJwt,
 }
 
 fn parse_mcp_transport(s: &str) -> std::result::Result<crate::config::McpTransport, String> {
@@ -84,6 +160,20 @@ fn parse_mcp_transport(s: &str) -> std::result::Result<crate::config::McpTranspo
         "http" => Ok(crate::config::McpTransport::Http),
         other => Err(format!(
             "unknown transport '{}' (expected stdio or http)",
+            other
+        )),
+    }
+}
+
+fn parse_mcp_auth_kind(s: &str) -> std::result::Result<McpAuthKind, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "oauth" => Ok(McpAuthKind::OAuth),
+        "client-credentials" | "client_credentials" => Ok(McpAuthKind::ClientCredentials),
+        "client-credentials-jwt" | "client_credentials_jwt" => {
+            Ok(McpAuthKind::ClientCredentialsJwt)
+        }
+        other => Err(format!(
+            "unknown auth '{}' (expected oauth, client-credentials, or client-credentials-jwt)",
             other
         )),
     }

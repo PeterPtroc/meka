@@ -46,10 +46,7 @@ fn main() -> anyhow::Result<()> {
         _ => "trace",
     };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-        )
+        .with_env_filter(build_log_filter(log_level))
         .with_writer(std::io::stderr)
         .init();
 
@@ -91,6 +88,34 @@ fn main() -> anyhow::Result<()> {
 
     let config = ResolvedConfig::from_cli(&cli);
     runtime.block_on(async_main(config))
+}
+
+/// Build the `tracing` filter for agsh.
+///
+/// When the user sets `RUST_LOG` we honour it verbatim — no hidden
+/// overrides, so debugging with `RUST_LOG=rmcp=debug` works as expected.
+/// Otherwise we start from `log_level` (derived from `-v` / `-vv`) and
+/// add a single directive that downgrades rmcp's SSE-reconnect warning
+/// to `error`:
+///
+/// MCP servers behind a CDN / edge (Cloudflare, Fastly, …) close idle
+/// HTTP streams after ~100 s, which trips
+/// `rmcp::transport::common::client_side_sse`'s `warn!("sse stream
+/// error: …")` before rmcp transparently reconnects via `Last-Event-ID`.
+/// The warn fires on every expected reconnect; the real failure mode
+/// (`"max retry times reached"`) is emitted at `error!` from the same
+/// module, so an `=error` floor keeps the useful signal and drops the
+/// noise. Verified against rmcp 1.5.
+fn build_log_filter(log_level: &str) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    if let Ok(filter) = EnvFilter::try_from_default_env() {
+        return filter;
+    }
+    EnvFilter::new(log_level).add_directive(
+        "rmcp::transport::common::client_side_sse=error"
+            .parse()
+            .expect("valid tracing directive"),
+    )
 }
 
 async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
@@ -550,6 +575,20 @@ async fn run_interactive(
                             render::render_error(&error);
                         }
                     }
+                    shell::SlashCommand::McpLogin { server } => {
+                        if let Err(error) =
+                            mcp::cli::run_login(&config.mcp_servers, &token_store, &server).await
+                        {
+                            render::render_error(&error);
+                        }
+                    }
+                    shell::SlashCommand::McpLogout { server } => {
+                        if let Err(error) =
+                            mcp::cli::run_logout(&config.mcp_servers, &token_store, &server).await
+                        {
+                            render::render_error(&error);
+                        }
+                    }
                     shell::SlashCommand::McpPrompt {
                         server,
                         prompt: prompt_name,
@@ -742,37 +781,48 @@ async fn run_mcp_subcommand(
         }
         cli::McpAction::Add {
             name,
-            transport,
-            command,
+            location,
             args,
+            transport,
             env,
-            url,
+            header,
+            auth,
+            auth_token,
+            client_id,
+            client_secret,
+            signing_key,
+            signing_algorithm,
+            scope,
+            redirect_port,
             permission,
+            sampling,
+            sampling_limit,
+            no_login,
         } => {
-            let env_pairs: Vec<(String, String)> = env
-                .iter()
-                .filter_map(|kv| {
-                    kv.split_once('=')
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                })
-                .collect();
-            mcp::cli::run_add(mcp::cli::AddArgs {
-                name: name.clone(),
-                transport: transport.clone(),
-                command: command.clone(),
-                args: if args.is_empty() {
-                    None
-                } else {
-                    Some(args.clone())
+            mcp::cli::run_add(
+                mcp::cli::AddArgs {
+                    name: name.clone(),
+                    location: location.clone(),
+                    args: args.clone(),
+                    transport: transport.clone(),
+                    env: env.clone(),
+                    header: header.clone(),
+                    auth: auth.clone(),
+                    auth_token: auth_token.clone(),
+                    client_id: client_id.clone(),
+                    client_secret: client_secret.clone(),
+                    signing_key: signing_key.clone(),
+                    signing_algorithm: signing_algorithm.clone(),
+                    scope: scope.clone(),
+                    redirect_port: *redirect_port,
+                    permission: permission.clone(),
+                    sampling: *sampling,
+                    sampling_limit: *sampling_limit,
+                    no_login: *no_login,
                 },
-                env: if env_pairs.is_empty() {
-                    None
-                } else {
-                    Some(env_pairs)
-                },
-                url: url.clone(),
-                permission: permission.clone(),
-            })?
+                &token_store,
+            )
+            .await?
         }
         cli::McpAction::Remove { name } => mcp::cli::run_remove(name, &token_store).await?,
     }
@@ -1212,5 +1262,48 @@ mod tests {
         // c2 should be dropped, rest preserved
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[3].text_content(), "done");
+    }
+
+    // -- log filter --
+
+    /// The default filter (no `RUST_LOG`) floors rmcp's SSE-reconnect
+    /// module at `error`. Guards against a future refactor silently
+    /// dropping the directive and letting the noisy warning back in.
+    #[test]
+    fn default_log_filter_downgrades_rmcp_sse_warns() {
+        // Belt-and-braces: clear RUST_LOG so the `try_from_default_env`
+        // branch doesn't short-circuit under a developer-set env var.
+        // SAFETY: tests run in a single process; we don't read this env
+        // var from other threads.
+        unsafe { std::env::remove_var("RUST_LOG") };
+        let rendered = format!("{}", build_log_filter("warn"));
+        assert!(
+            rendered.contains("rmcp::transport::common::client_side_sse=error"),
+            "expected SSE-reconnect target to be floored at `error` in the default \
+             filter, got: {}",
+            rendered
+        );
+    }
+
+    /// When the user sets `RUST_LOG` we honour it verbatim — no hidden
+    /// directive overlay — so debugging rmcp internals with e.g.
+    /// `RUST_LOG=rmcp=debug` works as expected.
+    #[test]
+    fn explicit_rust_log_is_not_overridden() {
+        // SAFETY: tests run in a single process; we don't read RUST_LOG
+        // from other threads.
+        unsafe { std::env::set_var("RUST_LOG", "rmcp=debug") };
+        let rendered = format!("{}", build_log_filter("warn"));
+        unsafe { std::env::remove_var("RUST_LOG") };
+        assert!(
+            !rendered.contains("rmcp::transport::common::client_side_sse=error"),
+            "explicit RUST_LOG must not be augmented; got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("rmcp=debug"),
+            "user's RUST_LOG should pass through unchanged; got: {}",
+            rendered
+        );
     }
 }

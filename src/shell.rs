@@ -119,6 +119,14 @@ pub enum SlashCommand {
     McpReconnect {
         server: String,
     },
+    /// `/mcp login <server>` — run the OAuth flow from the REPL.
+    McpLogin {
+        server: String,
+    },
+    /// `/mcp logout <server>` — clear stored credentials + revoke.
+    McpLogout {
+        server: String,
+    },
 }
 
 pub enum ShellEvent {
@@ -177,10 +185,32 @@ fn parse_mcp_slash(rest: &str) -> Option<SlashCommand> {
     if rest.is_empty() || rest == "list" {
         return Some(SlashCommand::McpList);
     }
-    if let Some(server) = rest.strip_prefix("reconnect ") {
-        return Some(SlashCommand::McpReconnect {
-            server: server.trim().to_string(),
-        });
+    // `<subcommand> <server>` shapes. Reject bare `reconnect` / `login`
+    // / `logout` with no server argument so users see the "Unknown
+    // command" error instead of silently firing against no target.
+    type McpServerCtor = fn(String) -> SlashCommand;
+    fn mk_reconnect(s: String) -> SlashCommand {
+        SlashCommand::McpReconnect { server: s }
+    }
+    fn mk_login(s: String) -> SlashCommand {
+        SlashCommand::McpLogin { server: s }
+    }
+    fn mk_logout(s: String) -> SlashCommand {
+        SlashCommand::McpLogout { server: s }
+    }
+    let subcommands: [(&str, McpServerCtor); 3] = [
+        ("reconnect ", mk_reconnect),
+        ("login ", mk_login),
+        ("logout ", mk_logout),
+    ];
+    for (keyword, ctor) in subcommands {
+        if let Some(server) = rest.strip_prefix(keyword) {
+            let server = server.trim();
+            if server.is_empty() {
+                return None;
+            }
+            return Some(ctor(server.to_string()));
+        }
     }
     // `<server>:<prompt> [args...]` — the first token is the prompt spec.
     let mut parts = rest.split_whitespace();
@@ -294,7 +324,9 @@ pub fn run_repl(
                             | SlashCommand::Export
                             | SlashCommand::McpPrompt { .. }
                             | SlashCommand::McpList
-                            | SlashCommand::McpReconnect { .. }),
+                            | SlashCommand::McpReconnect { .. }
+                            | SlashCommand::McpLogin { .. }
+                            | SlashCommand::McpLogout { .. }),
                         ) => {
                             if input_sender.send(ShellEvent::Command(command)).is_err() {
                                 break;
@@ -794,6 +826,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mcp_slash_login_with_server() {
+        match parse_slash_command("/mcp login notion") {
+            Some(SlashCommand::McpLogin { server }) => assert_eq!(server, "notion"),
+            other => panic!("expected McpLogin, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_logout_with_server() {
+        match parse_slash_command("/mcp logout notion") {
+            Some(SlashCommand::McpLogout { server }) => assert_eq!(server, "notion"),
+            other => panic!("expected McpLogout, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_login_without_server_is_none() {
+        assert!(parse_slash_command("/mcp login").is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_logout_without_server_is_none() {
+        assert!(parse_slash_command("/mcp logout").is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_slash_login_trims_whitespace() {
+        match parse_slash_command("/mcp login   notion  ") {
+            Some(SlashCommand::McpLogin { server }) => assert_eq!(server, "notion"),
+            other => panic!("expected McpLogin, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
     fn test_parse_mcp_slash_prompt_no_args() {
         match parse_slash_command("/mcp postgres:schema") {
             Some(SlashCommand::McpPrompt {
@@ -864,6 +930,8 @@ mod tests {
             Some(SlashCommand::Cd(_)) => "Cd",
             Some(SlashCommand::McpList) => "McpList",
             Some(SlashCommand::McpReconnect { .. }) => "McpReconnect",
+            Some(SlashCommand::McpLogin { .. }) => "McpLogin",
+            Some(SlashCommand::McpLogout { .. }) => "McpLogout",
             Some(SlashCommand::McpPrompt { .. }) => "McpPrompt",
         }
     }

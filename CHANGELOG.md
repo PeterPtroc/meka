@@ -10,7 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `agsh mcp` CLI: `list`, `get`, `add`, `remove`, `reconnect`, `login`, `logout` subcommands.
-- `/mcp` REPL commands: `list`, `reconnect <server>`, `<server>:<prompt> [args...]`.
+- `agsh mcp add <name> <url-or-command> [args]` auto-detects transport (URL → http, else stdio).
+- `agsh mcp add` flags for env/headers, permission, auth (oauth, client-credentials, -jwt, token).
+- `agsh mcp add` probes HTTP servers post-persist (RFC 6750 / RFC 9728): 3 s redirects-off GET.
+- `agsh mcp add` auto-runs OAuth on auth-required / `--auth oauth`; `--no-login` skips.
+- `agsh mcp add` auto-login failure or Ctrl-C rolls the entry back (config + creds + probe cache).
+- `agsh mcp login <name>` assumes OAuth authorization_code on HTTP servers with no `[auth]` block,
+  and persists the synthesised `[auth] = "oauth"` back to `config.toml` on success.
+- OAuth callback races the bound TCP listener against a stdin paste so logins work over SSH.
+- `/mcp login <server>` and `/mcp logout <server>` REPL commands mirror the CLI subcommands.
 - Server `InitializeResult.instructions` spliced into the system prompt each turn.
 - Progress notifications forwarded to the REPL as a live status line under the running tool call.
 - Form + URL elicitation — the shell prompts the user and returns typed values to the server.
@@ -32,16 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- MCP progress + elicitation strings sanitised before hitting the terminal — blocks ANSI/RTL spoofing.
-- MCP tool-result images capped at 10 MiB and restricted to PNG/JPEG/GIF/WebP; else a text placeholder.
+- MCP progress + elicitation strings sanitised before reaching the terminal; no ANSI/RTL spoofing.
+- MCP tool-result images capped at 10 MiB and restricted to PNG/JPEG/GIF/WebP; else a placeholder.
 - MCP sampling `system_prompt` stripped of Cc/Cf codepoints before reaching the provider.
 - `read_mcp_resource` + `get_mcp_prompt` + list tools sanitise server-supplied text and URIs.
 - `read_mcp_resource` total output capped at 10 MiB; oversized chunks replaced with a marker.
 - `headers_helper` stdout capped at 64 KiB, stderr at 4 KiB, to contain helper misbehaviour.
-- OAuth token revocation rejects redirects, caps metadata responses at 256 KiB, and pins the
-  `revocation_endpoint` to the issuer's origin before sending the access token.
+- OAuth revocation rejects redirects, caps metadata at 256 KiB, pins endpoint to issuer origin.
 - OAuth callback `error=…` query parameter is stripped of Cc/Cf codepoints before display.
-- JWT signing key files are rejected on Unix when group/other permission bits are set (must be 0600).
+- JWT signing key files rejected on Unix when group/other perm bits are set (must be 0600).
 - MCP cancellation notifications now time out after 2 s so a hung transport can't stall Ctrl-C.
 - `agsh mcp add`/`remove` writes config.toml atomically and chmods it 0600 (dir 0700) on Unix.
 - `agsh mcp add` propagates config-read errors instead of silently treating them as an empty file.
@@ -51,9 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `${VAR}` expansion for MCP config preserves multi-byte UTF-8 (previously corrupted non-ASCII).
 - MCP tools with an unserializable input schema are skipped with a warning.
 - OAuth-authenticated MCP transports now reconnect cleanly mid-session.
-- MCP `sampling/createMessage` now has a 60 s provider timeout and refunds the sampling slot on error.
+- MCP `sampling/createMessage` has a 60 s provider timeout and refunds the sampling slot on error.
 - `agsh mcp remove` now clears that server's entries from the resource-update ledger.
-- MCP auth-probe cache with `ttl = 0` now correctly treats every entry as stale (was "fresh for current second").
+- `agsh mcp remove` now also best-effort revokes stored OAuth tokens at the provider (RFC 7009).
+- MCP auth-probe cache with `ttl = 0` now correctly treats every entry as stale.
+- rmcp's SSE-reconnect warning floored at `error` in default filter; CDN idle resets no longer spam.
 
 ## [0.12.0] - 2026-04-18
 
