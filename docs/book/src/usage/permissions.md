@@ -76,6 +76,10 @@ That two-line block is the only permission-dependent content in the request. The
 
 MCP tools are classified through a 5-step resolution chain: per-tool override → server-level override → the server's own `readOnlyHint` → `[mcp].default_permission` → hardcoded `Write` fallback. See the *Permission resolution* section of the [Config File](../configuration/config-file.md) docs for the full rules and how to override a misclassified tool.
 
+### Built-in tool permissions
+
+Any built-in tool's required permission can be overridden from `config.toml` without editing code — see [`[tools]` — built-in tool filters](../configuration/config-file.md#tools--built-in-tool-filters). The same section documents how to allow-list or block-list specific built-ins (e.g. disabling `web_search` in a locked-down environment).
+
 ## Examples
 
 ### Read Mode (Default)

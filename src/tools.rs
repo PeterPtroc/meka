@@ -15,7 +15,7 @@ pub(crate) mod todo;
 mod util;
 mod web;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,6 +30,101 @@ use crate::error::Result;
 use crate::permission::Permission;
 use crate::provider::{ToolDefinition, ToolResultContent};
 use crate::session::SessionManager;
+
+/// Built-in tool policy from `[tools]` in `config.toml`. Mirrors the three
+/// knobs [`crate::config::McpServerConfig`] exposes for MCP tools.
+#[derive(Debug, Clone, Default)]
+pub struct BuiltinToolFilter {
+    pub allowed: Option<HashSet<String>>,
+    pub disabled: HashSet<String>,
+    pub permission_overrides: HashMap<String, Permission>,
+}
+
+impl BuiltinToolFilter {
+    pub fn from_config(
+        allowed: Option<Vec<String>>,
+        disabled: Vec<String>,
+        permission_overrides: HashMap<String, Permission>,
+    ) -> Self {
+        // Empty allow-list → None so `admits` treats it as "no restriction".
+        let allowed = allowed.and_then(|list| {
+            if list.is_empty() {
+                None
+            } else {
+                Some(list.into_iter().collect())
+            }
+        });
+        Self {
+            allowed,
+            disabled: disabled.into_iter().collect(),
+            permission_overrides,
+        }
+    }
+
+    pub fn admits(&self, name: &str) -> bool {
+        if self.disabled.contains(name) {
+            return false;
+        }
+        match &self.allowed {
+            Some(list) => list.contains(name),
+            None => true,
+        }
+    }
+}
+
+/// Canonical built-in names for the stale-entry warning pass. Update when
+/// adding a new built-in in [`ToolRegistry::build_default`].
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "edit_file",
+    "execute_command",
+    "fetch_url",
+    "find_files",
+    "read_file",
+    "render_image",
+    "scratchpad_delete",
+    "scratchpad_edit",
+    "scratchpad_list",
+    "scratchpad_read",
+    "scratchpad_write",
+    "search_contents",
+    "skill",
+    "spawn_agent",
+    "todo_write",
+    "web_search",
+    "write_file",
+];
+
+/// Warn (never fail) on `[tools]` entries that don't match any known
+/// built-in. Mirrors MCP's `warn_on_stale_tool_config()`.
+pub fn warn_on_stale_builtin_tool_config(filter: &BuiltinToolFilter) {
+    let known: HashSet<&str> = BUILTIN_TOOL_NAMES.iter().copied().collect();
+    if let Some(allowed) = filter.allowed.as_ref() {
+        for name in allowed {
+            if !known.contains(name.as_str()) {
+                tracing::warn!(
+                    "[tools].allowed_tools entry '{}' doesn't match any built-in tool",
+                    name
+                );
+            }
+        }
+    }
+    for name in &filter.disabled {
+        if !known.contains(name.as_str()) {
+            tracing::warn!(
+                "[tools].disabled_tools entry '{}' doesn't match any built-in tool",
+                name
+            );
+        }
+    }
+    for name in filter.permission_overrides.keys() {
+        if !known.contains(name.as_str()) {
+            tracing::warn!(
+                "[tools.tool_permissions] entry '{}' doesn't match any built-in tool",
+                name
+            );
+        }
+    }
+}
 
 pub type ReadTracker = Arc<RwLock<HashSet<PathBuf>>>;
 
@@ -76,13 +171,28 @@ type ToolSet = Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>;
 pub struct ToolRegistry {
     tools: ToolSet,
     deferred: DeferredSet,
+    /// Per-tool overrides from `[tools.tool_permissions]`. Immutable after
+    /// construction so the cached system-prompt prefix stays byte-stable
+    /// across `/permission` toggles.
+    permission_overrides: Arc<HashMap<String, Permission>>,
+    /// Built-in allow/block-list. MCP tools have their own per-server
+    /// filtering in `src/mcp.rs` and bypass this.
+    builtin_filter: Arc<BuiltinToolFilter>,
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::new_with_filter(BuiltinToolFilter::default())
+    }
+
+    fn new_with_filter(filter: BuiltinToolFilter) -> Self {
+        let overrides = filter.permission_overrides.clone();
         Self {
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             deferred: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            permission_overrides: Arc::new(overrides),
+            builtin_filter: Arc::new(filter),
         }
     }
 
@@ -153,6 +263,15 @@ impl ToolRegistry {
             .cloned()
     }
 
+    /// Effective required permission: override wins, else the tool's
+    /// hardcoded `Tool::required_permission()`. `None` if not registered.
+    pub fn required_permission_for(&self, name: &str) -> Option<Permission> {
+        if let Some(permission) = self.permission_overrides.get(name) {
+            return Some(*permission);
+        }
+        self.get(name).map(|tool| tool.required_permission())
+    }
+
     /// Check if a tool is registered but currently deferred.
     pub fn is_deferred(&self, name: &str) -> bool {
         self.deferred
@@ -173,8 +292,13 @@ impl ToolRegistry {
             .expect("tools lock poisoned")
             .iter()
             .filter(|tool| {
-                permission.allows(tool.required_permission())
-                    && !deferred.contains(&tool.definition().name)
+                let definition = tool.definition();
+                let required = self
+                    .permission_overrides
+                    .get(&definition.name)
+                    .copied()
+                    .unwrap_or_else(|| tool.required_permission());
+                permission.allows(required) && !deferred.contains(&definition.name)
             })
             .map(|tool| tool.definition())
             .collect()
@@ -210,12 +334,12 @@ impl ToolRegistry {
             .map(|tool| {
                 let def = tool.definition();
                 let is_deferred = deferred.contains(&def.name);
-                (
-                    def.name,
-                    def.description,
-                    tool.required_permission(),
-                    is_deferred,
-                )
+                let required = self
+                    .permission_overrides
+                    .get(&def.name)
+                    .copied()
+                    .unwrap_or_else(|| tool.required_permission());
+                (def.name, def.description, required, is_deferred)
             })
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -255,12 +379,21 @@ impl ToolRegistry {
         }));
     }
 
-    /// Register a builtin tool. Builtins are statically known to be unique,
-    /// so a collision is a programmer error — panic rather than swallow.
+    /// Register a builtin. Collisions panic (programmer error). Tools
+    /// rejected by the `[tools]` filter are silently skipped.
     fn register_builtin(&self, tool: Arc<dyn Tool>) {
+        let name = tool.definition().name;
+        if !self.builtin_filter.admits(&name) {
+            tracing::info!(
+                "skipping built-in tool '{}' (disabled by [tools] config)",
+                name
+            );
+            return;
+        }
         self.register(tool).expect("builtin tool name collision");
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_default(
         user_agent: String,
         shared_permission: crate::permission::SharedPermission,
@@ -269,8 +402,9 @@ impl ToolRegistry {
         todo_list: todo::SharedTodoList,
         session_manager: SessionManager,
         shared_session_id: Arc<RwLock<Option<Uuid>>>,
+        builtin_filter: BuiltinToolFilter,
     ) -> Self {
-        let registry = Self::new();
+        let registry = Self::new_with_filter(builtin_filter);
         registry.register_core_tools(
             &user_agent,
             shared_permission,
@@ -319,8 +453,9 @@ impl ToolRegistry {
         shared_permission: crate::permission::SharedPermission,
         sandbox_enabled: bool,
         sandbox_capability: crate::sandbox::SandboxCapability,
+        builtin_filter: BuiltinToolFilter,
     ) -> Self {
-        let registry = Self::new();
+        let registry = Self::new_with_filter(builtin_filter);
         registry.register_core_tools(
             &user_agent,
             shared_permission,
@@ -351,6 +486,10 @@ mod tests {
     }
 
     async fn test_registry() -> ToolRegistry {
+        build_test_registry(BuiltinToolFilter::default()).await
+    }
+
+    async fn build_test_registry(filter: BuiltinToolFilter) -> ToolRegistry {
         let session_manager = SessionManager::open(Some(Path::new(":memory:")))
             .await
             .expect("failed to open in-memory database");
@@ -363,6 +502,7 @@ mod tests {
             test_todo_list(),
             session_manager,
             shared_session_id,
+            filter,
         )
     }
 
@@ -499,5 +639,182 @@ mod tests {
             "error message should mention the duplicate name, got: {}",
             message
         );
+    }
+
+    #[test]
+    fn test_builtin_filter_default_admits_everything() {
+        let filter = BuiltinToolFilter::default();
+        assert!(filter.admits("read_file"));
+        assert!(filter.admits("write_file"));
+        assert!(filter.admits("anything_else"));
+    }
+
+    #[test]
+    fn test_builtin_filter_allow_list_restricts() {
+        let allowed: HashSet<String> = ["read_file", "find_files"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let filter = BuiltinToolFilter {
+            allowed: Some(allowed),
+            ..Default::default()
+        };
+        assert!(filter.admits("read_file"));
+        assert!(filter.admits("find_files"));
+        assert!(!filter.admits("write_file"));
+        assert!(!filter.admits("execute_command"));
+    }
+
+    #[test]
+    fn test_builtin_filter_block_list_wins_over_allow_list() {
+        let allowed: HashSet<String> = ["read_file", "write_file"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let disabled: HashSet<String> = ["write_file"].iter().map(|s| s.to_string()).collect();
+        let filter = BuiltinToolFilter {
+            allowed: Some(allowed),
+            disabled,
+            ..Default::default()
+        };
+        assert!(filter.admits("read_file"));
+        assert!(!filter.admits("write_file"));
+    }
+
+    #[test]
+    fn test_builtin_filter_from_config_empty_allow_list_is_none() {
+        let filter = BuiltinToolFilter::from_config(Some(Vec::new()), Vec::new(), HashMap::new());
+        assert!(
+            filter.allowed.is_none(),
+            "empty allow-list should drop to None"
+        );
+        assert!(filter.admits("read_file"));
+    }
+
+    #[tokio::test]
+    async fn test_registry_filter_drops_disabled_tools() {
+        let filter = BuiltinToolFilter::from_config(
+            None,
+            vec!["web_search".to_string(), "fetch_url".to_string()],
+            HashMap::new(),
+        );
+        let registry = build_test_registry(filter).await;
+        assert!(registry.get("read_file").is_some());
+        assert!(registry.get("write_file").is_some());
+        assert!(
+            registry.get("web_search").is_none(),
+            "web_search should be filtered out"
+        );
+        assert!(
+            registry.get("fetch_url").is_none(),
+            "fetch_url should be filtered out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registry_filter_allow_list_keeps_only_listed() {
+        let filter = BuiltinToolFilter::from_config(
+            Some(vec!["read_file".to_string(), "find_files".to_string()]),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let registry = build_test_registry(filter).await;
+        assert!(registry.get("read_file").is_some());
+        assert!(registry.get("find_files").is_some());
+        assert!(registry.get("write_file").is_none());
+        assert!(registry.get("execute_command").is_none());
+        assert!(registry.get("web_search").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_registry_permission_override_applied() {
+        let mut overrides = HashMap::new();
+        overrides.insert("read_file".to_string(), Permission::Write);
+        let filter = BuiltinToolFilter::from_config(None, Vec::new(), overrides);
+        let registry = build_test_registry(filter).await;
+
+        // Override wins over the Tool impl's hardcoded `Read`.
+        assert_eq!(
+            registry.required_permission_for("read_file"),
+            Some(Permission::Write)
+        );
+        // Non-overridden tool returns its hardcoded level.
+        assert_eq!(
+            registry.required_permission_for("write_file"),
+            Some(Permission::Write)
+        );
+        // Catalogue must reflect the override too (the system prompt
+        // reads from it).
+        let catalogue = registry.tool_catalogue();
+        let read_file_required = catalogue
+            .iter()
+            .find(|(name, _, _, _)| name == "read_file")
+            .map(|(_, _, perm, _)| *perm);
+        assert_eq!(read_file_required, Some(Permission::Write));
+    }
+
+    #[tokio::test]
+    async fn test_registry_permission_override_excludes_tool_from_lower_level() {
+        let mut overrides = HashMap::new();
+        overrides.insert("read_file".to_string(), Permission::Write);
+        let filter = BuiltinToolFilter::from_config(None, Vec::new(), overrides);
+        let registry = build_test_registry(filter).await;
+
+        // At Read permission, read_file should now be excluded from the
+        // permission-filtered definitions because the override raised it
+        // to Write.
+        let read_defs = registry.definitions_for_permission(Permission::Read);
+        assert!(!read_defs.iter().any(|t| t.name == "read_file"));
+
+        let write_defs = registry.definitions_for_permission(Permission::Write);
+        assert!(write_defs.iter().any(|t| t.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn test_subagent_registry_honours_filter() {
+        let filter =
+            BuiltinToolFilter::from_config(None, vec!["web_search".to_string()], HashMap::new());
+        let registry = ToolRegistry::build_for_subagent(
+            "sub-test/0.1".to_string(),
+            crate::permission::SharedPermission::new(Permission::Read),
+            true,
+            crate::sandbox::detect(),
+            filter,
+        );
+        assert!(registry.get("read_file").is_some());
+        assert!(registry.get("web_search").is_none());
+    }
+
+    #[test]
+    fn test_builtin_tool_names_covers_canonical_set() {
+        // Guard against forgetting to add a new built-in to the canonical
+        // list that drives stale-entry warnings. Update this assertion
+        // deliberately when adding a tool in register_core_tools.
+        let names: HashSet<&str> = BUILTIN_TOOL_NAMES.iter().copied().collect();
+        for expected in &[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "find_files",
+            "search_contents",
+            "execute_command",
+            "fetch_url",
+            "web_search",
+            "todo_write",
+            "scratchpad_read",
+            "scratchpad_write",
+            "scratchpad_edit",
+            "scratchpad_list",
+            "scratchpad_delete",
+            "skill",
+            "render_image",
+            "spawn_agent",
+        ] {
+            assert!(
+                names.contains(expected),
+                "BUILTIN_TOOL_NAMES missing '{}'",
+                expected
+            );
+        }
     }
 }

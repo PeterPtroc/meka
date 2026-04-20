@@ -2,6 +2,7 @@
 //! and environment variables on top, and produces a [`ResolvedConfig`] that
 //! the rest of the binary consumes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -21,6 +22,17 @@ pub struct ConfigFile {
     pub thinking: Option<ThinkingConfig>,
     pub mcp: Option<McpConfig>,
     pub prompt: Option<PromptConfig>,
+    pub tools: Option<ToolsConfig>,
+}
+
+/// Built-in tool filters, mirroring the per-server knobs on
+/// [`McpServerConfig`]. Applied at registration time by
+/// [`crate::tools::ToolRegistry`].
+#[derive(Debug, Deserialize, Default)]
+pub struct ToolsConfig {
+    pub allowed_tools: Option<Vec<String>>,
+    pub disabled_tools: Option<Vec<String>>,
+    pub tool_permissions: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -195,6 +207,9 @@ pub struct ResolvedConfig {
     /// configured" — resolution falls through to the hardcoded Write.
     pub mcp_default_permission: Option<Permission>,
     pub user_instructions: Option<String>,
+    pub builtin_allowed_tools: Option<Vec<String>>,
+    pub builtin_disabled_tools: Vec<String>,
+    pub builtin_tool_permissions: HashMap<String, Permission>,
 }
 
 /// Returns the agsh config directory (the directory that contains
@@ -339,6 +354,7 @@ impl ResolvedConfig {
         let file_session = config_file.session.unwrap_or_default();
         let file_thinking = config_file.thinking.unwrap_or_default();
         let file_prompt = config_file.prompt.unwrap_or_default();
+        let file_tools = config_file.tools.unwrap_or_default();
         // Destructure the [mcp] table into its two independent fields so
         // we don't have to re-open the config file later for resolution.
         let (mcp_default_permission_str, mcp_servers) = match config_file.mcp {
@@ -364,6 +380,41 @@ impl ResolvedConfig {
             .instructions
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+
+        let builtin_allowed_tools = file_tools
+            .allowed_tools
+            .filter(|list| !list.is_empty())
+            .map(|list| list.into_iter().map(|s| s.trim().to_string()).collect());
+        let builtin_disabled_tools = file_tools
+            .disabled_tools
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let builtin_tool_permissions = file_tools
+            .tool_permissions
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, level)| {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                match level.parse::<Permission>() {
+                    Ok(permission) => Some((name, permission)),
+                    Err(_) => {
+                        tracing::warn!(
+                            "ignoring invalid [tools.tool_permissions] entry '{}' = '{}' \
+                             (expected none, read, ask, or write)",
+                            name,
+                            level
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
 
         let provider_name = cli
             .provider
@@ -435,6 +486,9 @@ impl ResolvedConfig {
             mcp_servers,
             mcp_default_permission,
             user_instructions,
+            builtin_allowed_tools,
+            builtin_disabled_tools,
+            builtin_tool_permissions,
         }
     }
 
@@ -813,6 +867,65 @@ auth_token = "bearer-token"
         let servers = config.mcp.unwrap().servers.unwrap();
         assert!(servers[0].auth.is_none());
         assert_eq!(servers[0].auth_token.as_deref(), Some("bearer-token"));
+    }
+
+    #[test]
+    fn test_tools_config_deserialization() {
+        let toml_str = r#"
+[tools]
+allowed_tools = ["read_file", "find_files"]
+disabled_tools = ["web_search"]
+
+[tools.tool_permissions]
+execute_command = "write"
+read_file = "ask"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).expect("failed to parse toml");
+        let tools = config.tools.expect("tools should be present");
+        assert_eq!(
+            tools.allowed_tools.as_deref(),
+            Some(["read_file".to_string(), "find_files".to_string()].as_slice())
+        );
+        assert_eq!(
+            tools.disabled_tools.as_deref(),
+            Some(["web_search".to_string()].as_slice())
+        );
+        let perms = tools.tool_permissions.expect("tool_permissions set");
+        assert_eq!(
+            perms.get("execute_command").map(String::as_str),
+            Some("write")
+        );
+        assert_eq!(perms.get("read_file").map(String::as_str), Some("ask"));
+    }
+
+    #[test]
+    fn test_tools_config_missing_is_none() {
+        let config: ConfigFile = toml::from_str("").expect("failed to parse empty toml");
+        assert!(config.tools.is_none());
+    }
+
+    #[test]
+    fn test_tools_config_invalid_permission_drops_entry() {
+        // Drive the post-parse filter directly — ResolvedConfig::from_cli
+        // runs this loop. Checks that a bad level string is filtered out
+        // without panicking and that valid entries still land.
+        let raw: HashMap<String, String> = [
+            ("read_file".to_string(), "write".to_string()),
+            ("write_file".to_string(), "superuser".to_string()),
+            ("find_files".to_string(), "read".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let parsed: HashMap<String, Permission> = raw
+            .into_iter()
+            .filter_map(|(name, level)| level.parse::<Permission>().ok().map(|p| (name, p)))
+            .collect();
+        assert_eq!(parsed.get("read_file").copied(), Some(Permission::Write));
+        assert_eq!(parsed.get("find_files").copied(), Some(Permission::Read));
+        assert!(
+            !parsed.contains_key("write_file"),
+            "invalid level 'superuser' must be dropped"
+        );
     }
 
     #[test]

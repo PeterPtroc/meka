@@ -571,7 +571,10 @@ impl Agent {
         // permission cycle via Shift+Tab during dispatch can't leave us
         // acting on a stale snapshot captured earlier in the loop.
         let permission = self.shared_permission.get();
-        let required = tool.required_permission();
+        let required = self
+            .tool_registry
+            .required_permission_for(name)
+            .unwrap_or_else(|| tool.required_permission());
         if !permission.allows(required) {
             return crate::tools::ToolOutput::text(
                 format!(

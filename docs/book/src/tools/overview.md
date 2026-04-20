@@ -41,6 +41,10 @@ In **ask** mode, all tools are available but each call requires user confirmatio
 
 In **none** mode, no tools are available. The agent can only respond with text.
 
+## Filtering Built-in Tools
+
+Any built-in can be allow-listed, blocked, or have its required permission overridden via the `[tools]` table in `config.toml`. See [`[tools]` — built-in tool filters](../configuration/config-file.md#tools--built-in-tool-filters). Run `agsh tools list` to see every built-in with its effective permission and current status.
+
 ## MCP Tools
 
 When [MCP servers](../configuration/config-file.md#mcp-servers-mcp) are configured, their tools are registered under a namespaced name of the form `<server>__<tool>` (e.g. `notion__notion-search`). They appear in the system prompt catalogue alongside the built-ins — with their resolved permission level annotated inline — and are called the same way.

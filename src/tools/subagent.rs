@@ -12,7 +12,7 @@ use crate::error::{AgshError, Result};
 use crate::permission::{Permission, SharedPermission};
 use crate::provider::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
 
-use super::{Tool, ToolOutput, ToolRegistry};
+use super::{BuiltinToolFilter, Tool, ToolOutput, ToolRegistry};
 
 /// Parameters needed to build a fresh ToolRegistry for sub-agents.
 #[derive(Clone)]
@@ -20,6 +20,8 @@ pub struct ToolBuilderParams {
     pub user_agent: String,
     pub sandbox_enabled: bool,
     pub sandbox_capability: crate::sandbox::SandboxCapability,
+    /// Parent's `[tools]` filter — sub-agents inherit it.
+    pub builtin_filter: BuiltinToolFilter,
 }
 
 pub struct SpawnAgentTool {
@@ -88,6 +90,7 @@ impl Tool for SpawnAgentTool {
             sub_shared_perm,
             self.tool_builder_params.sandbox_enabled,
             self.tool_builder_params.sandbox_capability,
+            self.tool_builder_params.builtin_filter.clone(),
         );
 
         let tools = sub_registry.definitions_for_permission(sub_perm);
@@ -194,7 +197,9 @@ async fn run_subagent_loop(
                         let output = match tool_registry.get(name) {
                             None => ToolOutput::text(format!("Unknown tool: '{}'", name), true),
                             Some(tool) => {
-                                let required = tool.required_permission();
+                                let required = tool_registry
+                                    .required_permission_for(name)
+                                    .unwrap_or_else(|| tool.required_permission());
                                 if !permission.allows(required) {
                                     ToolOutput::text(
                                         format!(

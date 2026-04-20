@@ -143,9 +143,7 @@ pub struct ToolApprovalRequest {
     pub response_sender: std::sync::mpsc::SyncSender<bool>,
 }
 
-/// Messages sent from the agent to the REPL thread. Using a single channel
-/// instead of two separate ones allows the REPL to block on `recv()` rather
-/// than busy-polling with `try_recv()` + `sleep`.
+/// Messages sent from the agent to the REPL thread.
 pub enum AgentToReplEvent {
     Done,
     ApprovalRequest(ToolApprovalRequest),
@@ -176,10 +174,7 @@ fn parse_slash_command(input: &str) -> Option<SlashCommand> {
     }
 }
 
-/// Parse the argument to `/mcp …`. Shapes:
-/// - `list`                         → [`SlashCommand::McpList`]
-/// - `reconnect <server>`           → [`SlashCommand::McpReconnect`]
-/// - `<server>:<prompt> [args...]`  → [`SlashCommand::McpPrompt`]
+/// Parse the argument to `/mcp …`.
 fn parse_mcp_slash(rest: &str) -> Option<SlashCommand> {
     let rest = rest.trim();
     if rest.is_empty() || rest == "list" {
@@ -434,8 +429,7 @@ fn wait_for_agent(agent_event_receiver: &std::sync::mpsc::Receiver<AgentToReplEv
     }
 }
 
-/// Render an MCP progress update as a one-line status overwrite on stderr
-/// so the user sees long-running tool calls advancing.
+/// One-line status overwrite on stderr for a running MCP tool.
 fn render_progress_update(update: &crate::mcp::progress::ProgressUpdate) {
     let line = format_progress_update(update);
     eprint!("{}", line);
@@ -443,10 +437,8 @@ fn render_progress_update(update: &crate::mcp::progress::ProgressUpdate) {
     let _ = std::io::stderr().flush();
 }
 
-/// Pure formatter for a progress line. Sanitises server-controlled
-/// strings (`message`, `server_name`, `tool_name`) so an MCP server can't
-/// inject ANSI escapes to clear the screen or spoof the permission prompt.
-/// Split out from `render_progress_update` so it's testable.
+/// Format a progress line. Sanitises server-controlled strings so an MCP
+/// server can't inject ANSI escapes to clear the screen or spoof prompts.
 fn format_progress_update(update: &crate::mcp::progress::ProgressUpdate) -> String {
     let message = update
         .message

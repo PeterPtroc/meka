@@ -97,6 +97,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
                 cli::Command::Mcp { action } => {
                     run_mcp_subcommand(&session_manager, action, cli_ref).await
                 }
+                cli::Command::Tools { action } => run_tools_subcommand(action, cli_ref).await,
             }
         });
     }
@@ -284,6 +285,12 @@ async fn create_agent_from_config(
     let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
+    let builtin_filter = crate::tools::BuiltinToolFilter::from_config(
+        config.builtin_allowed_tools.clone(),
+        config.builtin_disabled_tools.clone(),
+        config.builtin_tool_permissions.clone(),
+    );
+
     let tool_registry = ToolRegistry::build_default(
         config.user_agent.clone(),
         shared_permission.clone(),
@@ -292,21 +299,27 @@ async fn create_agent_from_config(
         todo_list.clone(),
         session_manager.clone(),
         shared_session_id.clone(),
+        builtin_filter.clone(),
     );
 
     // Register the sub-agent tool with access to the provider
-    tool_registry
-        .register(Arc::new(crate::tools::subagent::SpawnAgentTool {
-            provider: Arc::clone(&provider),
-            parent_permission: shared_permission.clone(),
-            tool_builder_params: crate::tools::subagent::ToolBuilderParams {
-                user_agent: config.user_agent.clone(),
-                sandbox_enabled: config.sandbox,
-                sandbox_capability,
-            },
-            user_instructions: config.user_instructions.clone(),
-        }))
-        .expect("builtin subagent tool name collision");
+    if builtin_filter.admits("spawn_agent") {
+        tool_registry
+            .register(Arc::new(crate::tools::subagent::SpawnAgentTool {
+                provider: Arc::clone(&provider),
+                parent_permission: shared_permission.clone(),
+                tool_builder_params: crate::tools::subagent::ToolBuilderParams {
+                    user_agent: config.user_agent.clone(),
+                    sandbox_enabled: config.sandbox,
+                    sandbox_capability,
+                    builtin_filter: builtin_filter.clone(),
+                },
+                user_instructions: config.user_instructions.clone(),
+            }))
+            .expect("builtin subagent tool name collision");
+    }
+
+    crate::tools::warn_on_stale_builtin_tool_config(&builtin_filter);
 
     if let Some(manager) = mcp_manager {
         for mcp_config in &config.mcp_servers {
@@ -863,6 +876,81 @@ async fn run_mcp_subcommand(
             .await?
         }
         cli::McpAction::Remove { name } => mcp::cli::run_remove(name, &token_store).await?,
+    }
+    Ok(())
+}
+
+/// Handle `agsh tools <action>`.
+async fn run_tools_subcommand(
+    action: &cli::ToolsAction,
+    cli_args: &cli::Cli,
+) -> anyhow::Result<()> {
+    match action {
+        cli::ToolsAction::List => {
+            let config = ResolvedConfig::from_cli(cli_args);
+            let filter = crate::tools::BuiltinToolFilter::from_config(
+                config.builtin_allowed_tools.clone(),
+                config.builtin_disabled_tools.clone(),
+                config.builtin_tool_permissions.clone(),
+            );
+            crate::tools::warn_on_stale_builtin_tool_config(&filter);
+
+            // Build with no filter so the catalogue carries every tool's
+            // hardcoded level; overlay the real filter for status/source.
+            let session_manager = SessionManager::open(None).await?;
+            let shared_permission = SharedPermission::new(config.permission);
+            let sandbox_capability = crate::sandbox::detect();
+            let todo_list: crate::tools::todo::SharedTodoList =
+                std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+            let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
+                std::sync::Arc::new(tokio::sync::RwLock::new(None));
+            let reference = ToolRegistry::build_default(
+                config.user_agent.clone(),
+                shared_permission,
+                config.sandbox,
+                sandbox_capability,
+                todo_list,
+                session_manager,
+                shared_session_id,
+                crate::tools::BuiltinToolFilter::default(),
+            );
+
+            let catalogue = reference.tool_catalogue();
+            println!(
+                "{:<20} {:<9} {:<9} {:<8} description",
+                "NAME", "REQUIRED", "SOURCE", "STATUS"
+            );
+            println!("{}", "-".repeat(78));
+            for (name, description, required, is_deferred) in &catalogue {
+                let override_entry = filter.permission_overrides.get(name);
+                let effective = override_entry.copied().unwrap_or(*required);
+                let source = if override_entry.is_some() {
+                    "override"
+                } else {
+                    "builtin"
+                };
+                let status = if filter.admits(name) {
+                    if *is_deferred { "deferred" } else { "enabled" }
+                } else {
+                    "disabled"
+                };
+                let short = description
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect::<String>();
+                println!(
+                    "{:<20} {:<9} {:<9} {:<8} {}",
+                    name,
+                    effective.to_string(),
+                    source,
+                    status,
+                    short
+                );
+            }
+        }
     }
     Ok(())
 }

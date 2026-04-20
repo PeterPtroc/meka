@@ -433,6 +433,38 @@ MCP tools are registered with namespaced names in the format `servername__toolna
 
 Tool and resource descriptions returned from MCP servers are truncated at 2048 characters to keep the system prompt bounded.
 
+### `[tools]` — built-in tool filters
+
+The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to agsh's built-in tools (`read_file`, `write_file`, `execute_command`, `web_search`, etc.) via a top-level `[tools]` table. MCP per-server filtering is separate from this and keeps its own namespaces — this block only affects the built-ins.
+
+| Key | Purpose |
+|---|---|
+| `allowed_tools` | Optional allow-list of built-in tool names. When set and non-empty, only these built-ins register. Use `agsh tools list` to see the canonical names. |
+| `disabled_tools` | Block-list of built-in tool names. Applied **after** `allowed_tools`; a tool here is never registered even if it also appears in the allow-list. |
+| `tool_permissions` | Per-tool required-permission override keyed by built-in name. Beats the hardcoded required level from the tool's impl. Levels: `none`, `read`, `ask`, `write`. |
+
+Stale entries (a name that doesn't match any built-in) emit a `warn!` at startup. agsh still starts — the warning just flags a likely typo or a tool the binary renamed.
+
+Restrict a session to read-only inspection:
+```toml
+[tools]
+allowed_tools = ["read_file", "find_files", "search_contents", "fetch_url"]
+```
+
+Force `execute_command` to need `write` so `ask` mode prompts for every shell call:
+```toml
+[tools.tool_permissions]
+execute_command = "write"
+```
+
+Disable web access entirely in a locked-down environment:
+```toml
+[tools]
+disabled_tools = ["web_search", "fetch_url"]
+```
+
+Sub-agents spawned via `spawn_agent` inherit the same filter — a disabled built-in is disabled everywhere. Run `agsh tools list` to see every built-in's effective required permission, whether a `[tools.tool_permissions]` override is in effect, and whether the current config enables it.
+
 ### Environment variable substitution
 
 Every string field listed above (command, args, env values, url, headers values, auth_token) supports `${VAR}` and `${VAR:-default}` expansion from the process environment. Missing variables with no default leave the literal `${VAR}` in place and log a warning at startup. Use this to avoid committing secrets:

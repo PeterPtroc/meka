@@ -19,19 +19,12 @@ use crate::tools::todo::{self, TodoItem};
 /// [`crate::tools::ToolRegistry::tool_catalogue`].
 pub type ToolCatalogueEntry = (String, String, Permission, bool);
 
-/// Max chars rendered into the `## Additional Tools` catalogue per-tool
-/// summary. Large MCP descriptions (Notion advertises 2 KB blobs) would
-/// otherwise bloat the cached system prompt by multiple KB. The full
-/// description still lives in the tool schema that ships once the
-/// deferred tool activates.
+/// Per-entry cap for the `## Additional Tools` catalogue. Keeps the
+/// cached system prompt bounded when MCP servers advertise 2 KB blobs.
 const TOOL_SUMMARY_MAX_CHARS: usize = 160;
 
-/// Return a short one-line summary of a tool description for rendering
-/// into the system-prompt catalogue. Collapses internal whitespace,
-/// keeps the first sentence, and clamps the result to
-/// [`TOOL_SUMMARY_MAX_CHARS`] characters. Appends a single Unicode
-/// ellipsis (`…`) when clipped — distinct from the upstream
-/// `MAX_MCP_DESCRIPTION_LENGTH` "..." truncation in `src/mcp.rs`.
+/// Collapse whitespace, keep the first sentence, clamp to
+/// [`TOOL_SUMMARY_MAX_CHARS`], append `…` if clipped.
 fn short_description(description: &str) -> String {
     let collapsed: String = {
         let mut out = String::with_capacity(description.len());

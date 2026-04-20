@@ -2218,6 +2218,7 @@ mod tests {
             todo_list,
             session_manager,
             shared_session_id,
+            crate::tools::BuiltinToolFilter::default(),
         );
 
         let provider = test_provider();
@@ -2311,6 +2312,7 @@ mod tests {
             todo_list,
             session_manager,
             shared_session_id,
+            crate::tools::BuiltinToolFilter::default(),
         );
 
         let provider = test_provider();

@@ -43,6 +43,17 @@ pub enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+    /// Inspect built-in tool filters (allow/disable/permission overrides)
+    Tools {
+        #[command(subcommand)]
+        action: ToolsAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ToolsAction {
+    /// List every built-in tool with its effective permission and status.
+    List,
 }
 
 // Same reasoning as `Command` above: `Add` is the outlier and the enum

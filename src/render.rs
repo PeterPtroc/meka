@@ -14,9 +14,7 @@ use syntect::parsing::SyntaxSet;
 use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
 use termimad::MadSkin;
 
-/// Monokai Extended theme, vendored from bat's `sharkdp/sublime-monokai-extended`
-/// submodule (MIT). Kept in-repo and embedded so highlighting is visually
-/// identical to what bat produces without shipping bat itself.
+/// Monokai Extended theme, vendored from bat's `sharkdp/sublime-monokai-extended` (MIT).
 const MONOKAI_EXTENDED_TMTHEME: &[u8] = include_bytes!("../assets/themes/Monokai Extended.tmTheme");
 
 // ---------------------------------------------------------------------------
@@ -32,8 +30,7 @@ enum LastOutput {
     TodoList,
 }
 
-/// Tracks what was last printed and decides whether a blank line is needed
-/// before the next output. Replaces ad-hoc spacing flags.
+/// Tracks what was last printed to decide if a blank line is needed next.
 pub struct OutputSpacing {
     last: LastOutput,
 }
