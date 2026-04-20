@@ -57,9 +57,7 @@ pub enum McpAction {
     Get { name: String },
     /// Connect once and print `ok` if the handshake succeeds
     Reconnect { name: String },
-    /// List tools advertised by a server, with resolved permission per
-    /// tool — use this to pick names for `--allow-tool`,
-    /// `--disable-tool`, or `--tool-permission` overrides.
+    /// List tools advertised by a server, with resolved permission per tool.
     Tools { name: String },
     /// Authenticate a server interactively (OAuth assumed for HTTP)
     Login { name: String },
