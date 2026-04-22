@@ -1362,6 +1362,275 @@ mod tests {
         assert!(preview.len() <= 84); // 80 chars + "…"
     }
 
+    // ---- end-to-end regression tests for `agsh list`'s preview ----
+    //
+    // These tests mock the complete pipeline that produces the
+    // `Preview` column: build the turn-context block the agent
+    // actually sends, prepend it to a user prompt the way
+    // `agent::Agent::run_turn` does, persist via `save_message`,
+    // then call `list_sessions` and assert the preview matches the
+    // raw user prompt. Any future change to:
+    //   - `context::build_turn_context`'s output shape
+    //   - `agent::Agent::run_turn`'s "prefix block, then user input"
+    //     format
+    //   - `save_message` storage
+    //   - `list_sessions`'s SQL / preview rendering
+    //   - `strip_context_tags` / `truncate_preview`
+    // that breaks the preview will fail one of these tests.
+    //
+    // The preview has regressed several times historically; these
+    // guards exist so the next breakage is caught by CI, not a user.
+
+    /// Reconstructs what `agent::Agent::run_turn` passes to
+    /// `save_message` for a fresh user turn: the `<context>...</context>`
+    /// block followed by `\n\n` and the user's raw prompt. Kept
+    /// structurally identical to the real call-site (see
+    /// `src/agent.rs::run_turn` → `augmented_input = format!("{}\n\n{}", block, user_input)`).
+    fn mock_run_turn_user_message(
+        permission: crate::permission::Permission,
+        user_input: &str,
+    ) -> String {
+        let block = crate::context::build_turn_context(permission, &[]);
+        format!("{}\n\n{}", block, user_input)
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_is_user_prompt_not_context_wrapper() {
+        // The canonical regression: user types a prompt, turn runs,
+        // `agsh list` must show the prompt — not `<context>`, not the
+        // permission/environment metadata.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        let user_prompt = "find all Rust files under src/";
+        let stored = mock_run_turn_user_message(crate::permission::Permission::Read, user_prompt);
+        manager
+            .save_message(session_id, "user", &stored)
+            .await
+            .expect("save_message");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries
+            .iter()
+            .find(|s| s.id == session_id)
+            .expect("session missing from list");
+
+        assert_eq!(
+            summary.preview, user_prompt,
+            "preview regressed: expected user prompt, got {:?}",
+            summary.preview
+        );
+        assert!(
+            !summary.preview.contains("<context>"),
+            "wrapper leaked into preview: {:?}",
+            summary.preview
+        );
+        assert!(
+            !summary.preview.contains("[Permission context]"),
+            "permission metadata leaked into preview: {:?}",
+            summary.preview
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_covers_all_permission_levels() {
+        // The context block's shape differs per permission level
+        // (Write omits the [Environment context], None differs again).
+        // Every level should still surface the user's prompt cleanly.
+        let manager = test_manager().await;
+        for (label, permission) in &[
+            ("none", crate::permission::Permission::None),
+            ("read", crate::permission::Permission::Read),
+            ("ask", crate::permission::Permission::Ask),
+            ("write", crate::permission::Permission::Write),
+        ] {
+            let session_id = manager.create_session().await.expect("create_session");
+            let prompt = format!("ask at {} level", label);
+            let stored = mock_run_turn_user_message(*permission, &prompt);
+            manager
+                .save_message(session_id, "user", &stored)
+                .await
+                .expect("save_message");
+
+            let summaries = manager.list_sessions(100).await.expect("list_sessions");
+            let summary = summaries
+                .iter()
+                .find(|s| s.id == session_id)
+                .unwrap_or_else(|| panic!("session missing for level {}", label));
+            assert_eq!(
+                summary.preview, prompt,
+                "preview mismatch at permission level {}",
+                label
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_truncates_long_prompt_with_ellipsis() {
+        // Long prompts are capped at 80 chars with a trailing ellipsis.
+        // The cap must apply to the user's prompt, not the wrapper.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        let long_prompt = "a".repeat(150);
+        let stored = mock_run_turn_user_message(crate::permission::Permission::Read, &long_prompt);
+        manager
+            .save_message(session_id, "user", &stored)
+            .await
+            .expect("save_message");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+
+        assert!(
+            summary.preview.starts_with("aaa"),
+            "preview should start with the user's content, not the wrapper: {:?}",
+            summary.preview
+        );
+        assert!(
+            summary.preview.ends_with('…'),
+            "long preview should end with ellipsis: {:?}",
+            summary.preview
+        );
+        assert!(summary.preview.chars().count() <= 81);
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_is_first_user_turn_not_later() {
+        // Multiple turns in one session — preview must be the FIRST
+        // user prompt, not a later one. `ORDER BY id ASC LIMIT 1`
+        // guarantees this; guard against that being changed.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        for (i, prompt) in ["first prompt", "second prompt", "third prompt"]
+            .iter()
+            .enumerate()
+        {
+            let stored = mock_run_turn_user_message(crate::permission::Permission::Read, prompt);
+            manager
+                .save_message(session_id, "user", &stored)
+                .await
+                .expect("save_message");
+            // Interleave an assistant reply — real sessions alternate.
+            manager
+                .save_message(session_id, "assistant", &format!("reply {}", i))
+                .await
+                .expect("save_message");
+        }
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(summary.preview, "first prompt");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_multiline_shows_first_line() {
+        // Multi-line user prompts collapse to the first line in the
+        // list view. The remaining lines are not leaked.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        let stored = mock_run_turn_user_message(
+            crate::permission::Permission::Read,
+            "line one is the preview\nline two should not appear\nline three either",
+        );
+        manager
+            .save_message(session_id, "user", &stored)
+            .await
+            .expect("save_message");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(summary.preview, "line one is the preview");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_independent_per_session() {
+        // Each session's preview is its own first user turn — no
+        // cross-contamination from neighbour sessions.
+        let manager = test_manager().await;
+        let a = manager.create_session().await.expect("create_session");
+        let b = manager.create_session().await.expect("create_session");
+        let c = manager.create_session().await.expect("create_session");
+
+        for (sid, prompt) in [(a, "alpha"), (b, "beta"), (c, "gamma")] {
+            let stored = mock_run_turn_user_message(crate::permission::Permission::Read, prompt);
+            manager
+                .save_message(sid, "user", &stored)
+                .await
+                .expect("save_message");
+        }
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let preview_of = |id: uuid::Uuid| {
+            summaries
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.preview.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(preview_of(a), "alpha");
+        assert_eq!(preview_of(b), "beta");
+        assert_eq!(preview_of(c), "gamma");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_empty_session_has_empty_preview() {
+        // A session with zero user messages (e.g. created but Ctrl-C'd
+        // before first dispatch) falls back to an empty string — it
+        // should not panic or render `<no user msg>` scaffolding.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(summary.preview, "");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_compacted_session() {
+        // After `/compact`, the agent clears messages and inserts a
+        // single new user message starting with
+        // `[Conversation summary from session compaction]`. That has
+        // no `<context>` wrapper; `list_sessions` should surface the
+        // summary's first line, not an empty preview.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+
+        let summary_msg = "[Conversation summary from session compaction]\n\nSummary text here\n\n\
+             [Post-compaction context]\n\n…";
+        manager
+            .save_message(session_id, "user", summary_msg)
+            .await
+            .expect("save_message");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(
+            summary.preview, "[Conversation summary from session compaction]",
+            "compacted session should surface the summary marker as preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_preview_legacy_unwrapped_user_message() {
+        // Backward-compat: older sessions (or future non-wrapper
+        // message paths) whose user content has no `<context>` block
+        // at all — the stored string IS the prompt, and the preview
+        // equals it.
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create_session");
+        manager
+            .save_message(session_id, "user", "legacy prompt without any wrapper")
+            .await
+            .expect("save_message");
+
+        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(summary.preview, "legacy prompt without any wrapper");
+    }
+
     #[tokio::test]
     async fn test_enforce_storage_limit_no_deletion_needed() {
         let manager = test_manager().await;
