@@ -552,9 +552,13 @@ fn format_table(lines: &[String]) -> Vec<String> {
     result
 }
 
-pub fn render_tool_indicator(name: &str, input: &serde_json::Value) {
+pub fn render_tool_indicator(
+    name: &str,
+    input: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+) {
     let display_name = tool_display_name(name);
-    let indicator = match tool_primary_param(name, input) {
+    let indicator = match resolve_primary_param(name, input, schema) {
         Some(value) => {
             // Strip ANSI escapes and C0 control chars before display so a
             // model-supplied command or path can't spoof the permission
@@ -657,11 +661,19 @@ pub fn tool_display_name_for_approval(name: &str) -> &str {
     tool_display_name(name)
 }
 
-pub fn tool_primary_param_for_approval<'a>(
+/// Resolve the summary string shown next to a tool-call indicator and in the
+/// approval prompt. Tries the hardcoded built-in map first; falls back to the
+/// tool's JSON schema `required[0]` when provided (covers MCP tools, whose
+/// schemas are authored upstream and can't be enumerated here).
+pub fn resolve_primary_param(
     name: &str,
-    input: &'a serde_json::Value,
-) -> Option<&'a str> {
-    tool_primary_param(name, input)
+    input: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(value) = builtin_primary_param(name, input) {
+        return Some(value);
+    }
+    schema.and_then(|s| schema_primary_param(s, input))
 }
 
 fn tool_display_name(name: &str) -> &str {
@@ -687,16 +699,16 @@ fn tool_display_name(name: &str) -> &str {
     }
 }
 
-fn tool_primary_param<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
+fn builtin_primary_param(name: &str, input: &serde_json::Value) -> Option<String> {
     // `render_image` accepts either `from_scratchpad` or inline `base64`.
     // Show the scratchpad name when present; for inline base64 the payload
     // is opaque so there's nothing useful to display.
     if name == "render_image" {
         if let Some(from) = input.get("from_scratchpad").and_then(|v| v.as_str()) {
-            return Some(from);
+            return Some(from.to_string());
         }
         if input.get("base64").is_some() {
-            return Some("<inline base64>");
+            return Some("<inline base64>".to_string());
         }
         return None;
     }
@@ -712,7 +724,52 @@ fn tool_primary_param<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'
         "skill" => "name",
         _ => return None,
     };
-    input.get(key).and_then(|v| v.as_str())
+    input.get(key).and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// Fallback for tools not covered by the built-in map (MCP tools,
+/// dynamically-registered tools, etc.). Uses the first entry of
+/// `inputSchema.required` as the key into `input` and coerces the value
+/// to a short display string. Returns `None` when the schema offers no
+/// `required` field, the required key is missing from `input`, or the
+/// value type has no sensible string form (e.g. nested objects / binary
+/// blobs).
+fn schema_primary_param(schema: &serde_json::Value, input: &serde_json::Value) -> Option<String> {
+    let required = schema.get("required")?.as_array()?;
+    let key = required.iter().find_map(|v| v.as_str())?;
+    let value = input.get(key)?;
+    coerce_display_value(value)
+}
+
+fn coerce_display_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Array(arr) => {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                })
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(", "))
+            }
+        }
+        _ => None,
+    }
 }
 
 fn truncate_display(value: &str, max_chars: usize) -> String {
@@ -817,50 +874,168 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_primary_param_skill() {
+    fn test_builtin_primary_param_skill() {
         let input = serde_json::json!({"name": "setup-postgres"});
-        assert_eq!(tool_primary_param("skill", &input), Some("setup-postgres"));
+        assert_eq!(
+            builtin_primary_param("skill", &input).as_deref(),
+            Some("setup-postgres")
+        );
     }
 
     #[test]
-    fn test_tool_primary_param() {
+    fn test_builtin_primary_param() {
         let input = serde_json::json!({"command": "ls", "path": "/tmp"});
-        assert_eq!(tool_primary_param("execute_command", &input), Some("ls"));
-        assert_eq!(tool_primary_param("read_file", &input), Some("/tmp"));
-        assert_eq!(tool_primary_param("unknown_tool", &input), None);
+        assert_eq!(
+            builtin_primary_param("execute_command", &input).as_deref(),
+            Some("ls")
+        );
+        assert_eq!(
+            builtin_primary_param("read_file", &input).as_deref(),
+            Some("/tmp")
+        );
+        assert_eq!(builtin_primary_param("unknown_tool", &input), None);
     }
 
     #[test]
-    fn test_tool_primary_param_missing() {
+    fn test_builtin_primary_param_missing() {
         let input = serde_json::json!({"other": "value"});
-        assert_eq!(tool_primary_param("execute_command", &input), None);
+        assert_eq!(builtin_primary_param("execute_command", &input), None);
     }
 
     #[test]
-    fn test_tool_primary_param_render_image_from_scratchpad() {
+    fn test_builtin_primary_param_render_image_from_scratchpad() {
         let input = serde_json::json!({"from_scratchpad": "frame4"});
-        assert_eq!(tool_primary_param("render_image", &input), Some("frame4"));
+        assert_eq!(
+            builtin_primary_param("render_image", &input).as_deref(),
+            Some("frame4")
+        );
     }
 
     #[test]
-    fn test_tool_primary_param_render_image_inline_base64() {
+    fn test_builtin_primary_param_render_image_inline_base64() {
         let input = serde_json::json!({"base64": "iVBOR..."});
         assert_eq!(
-            tool_primary_param("render_image", &input),
+            builtin_primary_param("render_image", &input).as_deref(),
             Some("<inline base64>")
         );
     }
 
     #[test]
-    fn test_tool_primary_param_render_image_from_scratchpad_takes_precedence() {
+    fn test_builtin_primary_param_render_image_from_scratchpad_takes_precedence() {
         let input = serde_json::json!({"from_scratchpad": "frame4", "base64": "iVBOR..."});
-        assert_eq!(tool_primary_param("render_image", &input), Some("frame4"));
+        assert_eq!(
+            builtin_primary_param("render_image", &input).as_deref(),
+            Some("frame4")
+        );
     }
 
     #[test]
-    fn test_tool_primary_param_render_image_empty() {
+    fn test_builtin_primary_param_render_image_empty() {
         let input = serde_json::json!({});
-        assert_eq!(tool_primary_param("render_image", &input), None);
+        assert_eq!(builtin_primary_param("render_image", &input), None);
+    }
+
+    #[test]
+    fn test_schema_primary_param_string_value() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        });
+        let input = serde_json::json!({"query": "best keyboards 2026"});
+        assert_eq!(
+            schema_primary_param(&schema, &input).as_deref(),
+            Some("best keyboards 2026")
+        );
+    }
+
+    #[test]
+    fn test_schema_primary_param_array_of_strings() {
+        let schema = serde_json::json!({
+            "required": ["urls"],
+        });
+        let input = serde_json::json!({
+            "urls": ["https://example.com", "https://other.example"],
+        });
+        assert_eq!(
+            schema_primary_param(&schema, &input).as_deref(),
+            Some("https://example.com, https://other.example")
+        );
+    }
+
+    #[test]
+    fn test_schema_primary_param_number_and_bool() {
+        let schema = serde_json::json!({"required": ["count"]});
+        let input = serde_json::json!({"count": 42});
+        assert_eq!(schema_primary_param(&schema, &input).as_deref(), Some("42"));
+        let schema = serde_json::json!({"required": ["enabled"]});
+        let input = serde_json::json!({"enabled": true});
+        assert_eq!(
+            schema_primary_param(&schema, &input).as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_schema_primary_param_no_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+        });
+        let input = serde_json::json!({"query": "hello"});
+        assert_eq!(schema_primary_param(&schema, &input), None);
+    }
+
+    #[test]
+    fn test_schema_primary_param_required_key_absent_from_input() {
+        let schema = serde_json::json!({"required": ["query"]});
+        let input = serde_json::json!({"other_field": "value"});
+        assert_eq!(schema_primary_param(&schema, &input), None);
+    }
+
+    #[test]
+    fn test_schema_primary_param_empty_required_array() {
+        let schema = serde_json::json!({"required": []});
+        let input = serde_json::json!({"query": "hello"});
+        assert_eq!(schema_primary_param(&schema, &input), None);
+    }
+
+    #[test]
+    fn test_schema_primary_param_nested_object_skipped() {
+        let schema = serde_json::json!({"required": ["config"]});
+        let input = serde_json::json!({"config": {"nested": 1}});
+        assert_eq!(schema_primary_param(&schema, &input), None);
+    }
+
+    #[test]
+    fn test_resolve_primary_param_builtin_takes_precedence_over_schema() {
+        // A tool that happens to share a built-in name: hardcoded map wins
+        // so the display stays consistent with what users know.
+        let schema = serde_json::json!({"required": ["path"]});
+        let input = serde_json::json!({"command": "ls -la", "path": "/ignored"});
+        assert_eq!(
+            resolve_primary_param("execute_command", &input, Some(&schema)).as_deref(),
+            Some("ls -la")
+        );
+    }
+
+    #[test]
+    fn test_resolve_primary_param_falls_back_to_schema_for_unknown_tool() {
+        let schema = serde_json::json!({"required": ["query"]});
+        let input = serde_json::json!({"query": "claude code"});
+        assert_eq!(
+            resolve_primary_param("exa__web_search_exa", &input, Some(&schema)).as_deref(),
+            Some("claude code")
+        );
+    }
+
+    #[test]
+    fn test_resolve_primary_param_no_schema_no_builtin() {
+        let input = serde_json::json!({"anything": "here"});
+        assert_eq!(
+            resolve_primary_param("unknown__mcp_tool", &input, None),
+            None
+        );
     }
 
     #[test]

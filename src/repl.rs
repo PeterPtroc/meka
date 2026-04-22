@@ -157,7 +157,11 @@ pub enum ReplEvent {
 /// Ask mode.
 pub struct ToolApprovalRequest {
     pub tool_name: String,
-    pub tool_input: serde_json::Value,
+    /// Pre-computed summary (first required argument) to show next to the
+    /// tool name in the approval prompt. Resolved agent-side because the
+    /// REPL thread has no access to the tool registry needed for MCP
+    /// schema lookups.
+    pub primary_param: Option<String>,
     pub response_sender: std::sync::mpsc::SyncSender<bool>,
 }
 
@@ -588,17 +592,15 @@ fn handle_approval_request(request: &ToolApprovalRequest) {
     use crossterm::style::Stylize;
 
     let display_name = crate::render::tool_display_name_for_approval(&request.tool_name);
-    let summary =
-        crate::render::tool_primary_param_for_approval(&request.tool_name, &request.tool_input);
+    let summary = request
+        .primary_param
+        .as_deref()
+        .map(|s| s.replace('\n', " "))
+        .unwrap_or_default();
 
     eprint!(
         "{} ",
-        format!(
-            "[ask] {} {}",
-            display_name,
-            summary.unwrap_or_default().replace('\n', " ")
-        )
-        .with(crossterm::style::Color::Magenta)
+        format!("[ask] {} {}", display_name, summary).with(crossterm::style::Color::Magenta)
     );
     eprint!("{}", "(Y/n) ".with(crossterm::style::Color::DarkGrey));
 

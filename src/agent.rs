@@ -477,7 +477,11 @@ impl Agent {
                     if spacing.before_tool_indicator() {
                         println!();
                     }
-                    render::render_tool_indicator(&current_tool_name, &input);
+                    let schema = self
+                        .tool_registry
+                        .get(&current_tool_name)
+                        .map(|t| t.definition().parameters);
+                    render::render_tool_indicator(&current_tool_name, &input, schema.as_ref());
 
                     content_blocks.push(ContentBlock::ToolUse {
                         id: std::mem::take(&mut current_tool_id),
@@ -501,7 +505,11 @@ impl Agent {
                     let marker_input = serde_json::json!({
                         crate::provider::INVALID_TOOL_ARGS_MARKER: reason,
                     });
-                    render::render_tool_indicator(&name, &marker_input);
+                    let schema = self
+                        .tool_registry
+                        .get(&name)
+                        .map(|t| t.definition().parameters);
+                    render::render_tool_indicator(&name, &marker_input, schema.as_ref());
                     content_blocks.push(ContentBlock::ToolUse {
                         id,
                         name,
@@ -569,7 +577,11 @@ impl Agent {
                     if spacing.before_tool_indicator() {
                         println!();
                     }
-                    render::render_tool_indicator(name, input);
+                    let schema = self
+                        .tool_registry
+                        .get(name)
+                        .map(|t| t.definition().parameters);
+                    render::render_tool_indicator(name, input, schema.as_ref());
                 }
 
                 let output = self
@@ -671,9 +683,11 @@ impl Agent {
         };
 
         let (response_sender, response_receiver) = std::sync::mpsc::sync_channel(1);
+        let schema = tool.definition().parameters;
+        let primary_param = crate::render::resolve_primary_param(name, input, Some(&schema));
         let request = crate::repl::ToolApprovalRequest {
             tool_name: name.to_string(),
-            tool_input: input.clone(),
+            primary_param,
             response_sender,
         };
 
