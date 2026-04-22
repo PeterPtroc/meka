@@ -153,15 +153,16 @@ pub fn dispatch(params: ProgressNotificationParam) {
     }
 }
 
-/// Test helper: count outstanding progress-token registrations. Used by the
-/// adapter tests to confirm that [`ProgressGuard`] cleans up on drop.
+/// Test helper: check whether a specific progress-token key is in the
+/// registry. Race-free against concurrent tests because the key is a
+/// UUID only the caller knows.
 #[cfg(test)]
-pub(crate) fn outstanding_count() -> usize {
+pub(crate) fn is_registered(key: &str) -> bool {
     registry()
         .entries
         .lock()
-        .map(|e| e.len())
-        .unwrap_or_default()
+        .map(|e| e.contains_key(key))
+        .unwrap_or(false)
 }
 
 // Needed so the `uuid` crate's dependency-only presence is documented; other
@@ -177,27 +178,28 @@ mod tests {
 
     #[test]
     fn guard_cleans_up_on_drop() {
-        // Cargo runs unit tests in parallel and the registry is a shared
-        // global, so we can only assert *deltas*, not absolute values:
-        // other test threads may be holding their own guards alongside us.
-        let before = outstanding_count();
-        let inside;
+        // Cargo runs unit tests in parallel and the registry is a
+        // shared global. Checking `outstanding_count()` deltas races
+        // with other tests registering/dropping tokens concurrently —
+        // scan for this specific token's UUID key instead, which only
+        // this test knows about.
+        let token_key: String;
         {
-            let (_token, _guard) = register("srv".into(), "tool".into(), None);
-            inside = outstanding_count();
+            let (token, _guard) = register("srv".into(), "tool".into(), None);
+            token_key = match &token.0 {
+                NumberOrString::String(s) => s.to_string(),
+                NumberOrString::Number(n) => n.to_string(),
+            };
             assert!(
-                inside > before,
-                "expected count to rise after register (before={}, inside={})",
-                before,
-                inside
+                is_registered(&token_key),
+                "token missing from registry while guard is still alive: {}",
+                token_key
             );
         }
-        let after = outstanding_count();
         assert!(
-            after < inside,
-            "expected count to drop after guard fell out of scope (inside={}, after={})",
-            inside,
-            after
+            !is_registered(&token_key),
+            "token '{}' lingered after guard dropped — ProgressGuard::drop didn't clean up",
+            token_key
         );
     }
 
