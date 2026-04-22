@@ -192,15 +192,13 @@ async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
 
     let mcp_context = mcp::McpClientContext::new();
     let mcp_manager = if !config.mcp_servers.is_empty() {
-        let manager = Arc::new(
-            mcp::McpClientManager::connect_all(
-                &config.mcp_servers,
-                config.mcp_default_permission,
-                Some(&token_store),
-                Arc::clone(&mcp_context),
-            )
-            .await?,
-        );
+        let manager = mcp::McpClientManager::prepare(
+            &config.mcp_servers,
+            config.mcp_default_permission,
+            Some(token_store.clone()),
+            Arc::clone(&mcp_context),
+        )
+        .await?;
         mcp_context.set_manager(Arc::downgrade(&manager));
         Some(manager)
     } else {
@@ -322,24 +320,18 @@ async fn create_agent_from_config(
     crate::tools::warn_on_stale_builtin_tool_config(&builtin_filter);
 
     if let Some(manager) = mcp_manager {
-        for mcp_config in &config.mcp_servers {
-            let mcp_tools = manager.discover_tools_for_server(&mcp_config.name).await?;
-            for tool in mcp_tools {
-                use crate::tools::Tool as _;
-                let name = tool.definition().name.clone();
-                match tool_registry.register(Arc::new(tool)) {
-                    Ok(()) => tool_registry.mark_deferred(&name),
-                    Err(error) => {
-                        tracing::warn!(
-                            "failed to register MCP tool '{}': {}; skipping",
-                            name,
-                            error
-                        );
-                    }
-                }
-            }
-        }
+        // Register MCP resource meta-tools upfront — they delegate through
+        // `ServerEntry::require_connected` so they tolerate Pending /
+        // Failed servers until a specific one is called.
         crate::tools::mcp_resources::register_all(&tool_registry, Arc::clone(manager));
+        // Kick off the background connector. Each server's adapters are
+        // installed into `tool_registry` via `replace_server_tools` +
+        // `mark_deferred` as it reaches `Connected`. The REPL is free to
+        // paint while this runs in the background.
+        manager.start_connector(
+            tool_registry.clone(),
+            crate::mcp::McpRuntimeConfig::from_config(config),
+        );
     }
 
     // Now that provider and registry exist, publish them on the MCP client
@@ -373,6 +365,8 @@ async fn create_agent_from_config(
             }),
             thinking_show_content: config.thinking_show_content,
             user_instructions: config.user_instructions.clone(),
+            mcp_strict: config.mcp_strict,
+            mcp_grace: config.mcp_grace,
         },
         todo_list,
         shared_session_id,
@@ -601,7 +595,9 @@ async fn run_interactive(
                         None => eprintln!("No active session to export."),
                     },
                     repl::SlashCommand::McpList => {
-                        if let Err(error) = mcp::cli::run_list(&config.mcp_servers).await {
+                        if let Err(error) =
+                            mcp::cli::run_list(&config.mcp_servers, mcp_manager.as_ref()).await
+                        {
                             render::render_error(&error);
                         }
                     }
@@ -806,7 +802,7 @@ async fn run_mcp_subcommand(
     let config = ResolvedConfig::from_cli(cli_args);
     let token_store = session_manager.token_store();
     match action {
-        cli::McpAction::List => mcp::cli::run_list(&config.mcp_servers).await?,
+        cli::McpAction::List => mcp::cli::run_list(&config.mcp_servers, None).await?,
         cli::McpAction::Get { name } => mcp::cli::run_get(&config.mcp_servers, name).await?,
         cli::McpAction::Reconnect { name } => {
             mcp::cli::run_reconnect(&config.mcp_servers, &token_store, name).await?
@@ -848,6 +844,7 @@ async fn run_mcp_subcommand(
             allow_tool,
             disable_tool,
             tool_permission,
+            disabled,
         } => {
             mcp::cli::run_add(
                 mcp::cli::AddArgs {
@@ -872,12 +869,15 @@ async fn run_mcp_subcommand(
                     allow_tool: allow_tool.clone(),
                     disable_tool: disable_tool.clone(),
                     tool_permission: tool_permission.clone(),
+                    disabled: *disabled,
                 },
                 &token_store,
             )
             .await?
         }
         cli::McpAction::Remove { name } => mcp::cli::run_remove(name, &token_store).await?,
+        cli::McpAction::Disable { name } => mcp::cli::run_disable(name).await?,
+        cli::McpAction::Enable { name } => mcp::cli::run_enable(name).await?,
     }
     Ok(())
 }

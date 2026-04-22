@@ -51,6 +51,14 @@ pub enum AgshError {
         server_name: String,
         message: String,
     },
+
+    /// Strict MCP gate rejected the turn: at least one enabled server
+    /// wasn't `Connected` within the configured grace period. Turn
+    /// contents haven't been sent to the provider. The REPL catches
+    /// this and loops back to the prompt; one-shot mode propagates to
+    /// a non-zero process exit.
+    #[error("mcp: {} server(s) not ready: {}", .servers.len(), .servers.iter().map(|(n, s)| format!("{} ({})", n, s)).collect::<Vec<_>>().join(", "))]
+    McpTurnGated { servers: Vec<(String, String)> },
 }
 
 pub type Result<T> = std::result::Result<T, AgshError>;

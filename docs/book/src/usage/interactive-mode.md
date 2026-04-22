@@ -101,7 +101,7 @@ agsh supports `/` prefix commands for controlling the shell:
 | `/permission [none\|read\|ask\|write]` | Show or set the permission level |
 | `/compact` | Summarize and compact the session history |
 | `/cd [path]` | Change working directory |
-| `/mcp list` | List configured MCP servers |
+| `/mcp list` | List configured MCP servers with their live state (`pending` / `connected` / `failed` / `disabled`) |
 | `/mcp reconnect <server>` | Smoke-test connect for one server |
 | `/mcp login <server>` | Run the OAuth flow from the REPL |
 | `/mcp logout <server>` | Revoke cached credentials for a server |

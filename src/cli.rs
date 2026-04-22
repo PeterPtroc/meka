@@ -171,9 +171,18 @@ pub enum McpAction {
         /// later to authorise.
         #[arg(long = "no-login")]
         no_login: bool,
+
+        /// Add the server entry with `disabled = true` so it's skipped
+        /// at startup until `agsh mcp enable <name>` runs.
+        #[arg(long = "disabled")]
+        disabled: bool,
     },
     /// Remove a server from config.toml and clear stored creds
     Remove { name: String },
+    /// Temporarily turn off a server without removing it from config
+    Disable { name: String },
+    /// Turn a disabled server back on
+    Enable { name: String },
 }
 
 /// Authentication flavours selectable from the CLI. Maps onto the

@@ -31,6 +31,13 @@ pub struct AgentOptions {
     pub context_window: u64,
     pub thinking_show_content: bool,
     pub user_instructions: Option<String>,
+    /// Pre-turn MCP readiness gate. When true, a turn is rejected with
+    /// `AgshError::McpTurnGated` if any enabled server isn't `Connected`
+    /// after [`Self::mcp_grace`].
+    pub mcp_strict: bool,
+    /// Max time to wait for still-`Pending` MCP servers to reach
+    /// `Connected` before applying the strict check.
+    pub mcp_grace: std::time::Duration,
 }
 
 pub struct Agent {
@@ -86,6 +93,56 @@ impl Agent {
         self.mcp_manager = Some(manager);
     }
 
+    /// Per-turn MCP readiness gate. Applies to every turn (not just the
+    /// first) so mid-session reconnects also gate cleanly. Awaits
+    /// `grace` for Pending servers to finish connecting; then:
+    /// - all enabled servers `Connected` → `Ok(())`.
+    /// - some still not Connected + `strict` → `Err(McpTurnGated)`.
+    /// - some still not Connected + `!strict` → `Ok(())` with a warn.
+    ///
+    /// No-op when no MCP manager is attached (e.g. sub-agents).
+    async fn await_mcp_ready(&self) -> Result<()> {
+        let Some(manager) = self.mcp_manager.as_ref() else {
+            return Ok(());
+        };
+        if manager.all_ready() {
+            let not_ready = manager.enabled_not_connected().await;
+            if not_ready.is_empty() {
+                return Ok(());
+            }
+            return self.handle_mcp_not_ready(not_ready);
+        }
+
+        let _ = tokio::time::timeout(self.options.mcp_grace, manager.await_settled()).await;
+
+        let not_ready = manager.enabled_not_connected().await;
+        if not_ready.is_empty() {
+            return Ok(());
+        }
+        self.handle_mcp_not_ready(not_ready)
+    }
+
+    fn handle_mcp_not_ready(
+        &self,
+        not_ready: Vec<(String, crate::mcp::ServerState)>,
+    ) -> Result<()> {
+        if self.options.mcp_strict {
+            let summary: Vec<(String, String)> = not_ready
+                .iter()
+                .map(|(name, state)| (name.clone(), state.label().to_string()))
+                .collect();
+            Err(AgshError::McpTurnGated { servers: summary })
+        } else {
+            let names: Vec<&str> = not_ready.iter().map(|(n, _)| n.as_str()).collect();
+            tracing::warn!(
+                "mcp: proceeding without {} server(s): {:?} (set [mcp].strict = true to gate)",
+                names.len(),
+                names
+            );
+            Ok(())
+        }
+    }
+
     pub async fn run_turn(
         &self,
         session_id: &mut Option<Uuid>,
@@ -93,6 +150,10 @@ impl Agent {
         user_input: String,
         cancellation: CancellationToken,
     ) -> Result<()> {
+        // Gate on MCP readiness BEFORE touching session state / message
+        // history so a rejected turn leaves no trace in the conversation.
+        self.await_mcp_ready().await?;
+
         if session_id.is_none() {
             let id = self.session_manager.create_session().await?;
             *session_id = Some(id);

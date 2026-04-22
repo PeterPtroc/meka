@@ -181,7 +181,10 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    #[cfg(test)]
+    /// Empty registry with the default filter — no built-ins, no MCP
+    /// tools. Used by out-of-band CLI commands that spin up a manager
+    /// for a single RPC (`agsh mcp reconnect`, `agsh mcp tools`) and
+    /// don't need a populated registry.
     pub(crate) fn new() -> Self {
         Self::new_with_filter(BuiltinToolFilter::default())
     }

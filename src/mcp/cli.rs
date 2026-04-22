@@ -12,13 +12,46 @@ fn config_err(message: impl Into<String>) -> AgshError {
 }
 
 /// Run `agsh mcp list` — print configured servers + their transport/URL.
-pub async fn run_list(servers: &[McpServerConfig]) -> Result<()> {
+///
+/// When `manager` is `Some`, the output also carries a `state` column
+/// showing each server's live lifecycle state (`pending` / `connected`
+/// / `failed` / `disabled`). The out-of-band `agsh mcp list` CLI doesn't
+/// have a running manager and gets the no-state view; the REPL's
+/// `/mcp list` passes the live manager for the richer output.
+pub async fn run_list(
+    servers: &[McpServerConfig],
+    manager: Option<&std::sync::Arc<crate::mcp::McpClientManager>>,
+) -> Result<()> {
     if servers.is_empty() {
         println!("(no MCP servers configured)");
         return Ok(());
     }
-    println!("{:<24} {:<8} {:<8} target", "name", "transport", "perm");
-    println!("{}", "-".repeat(72));
+
+    // Resolve state once up front so the table output stays consistent
+    // even if a server connects mid-print.
+    let mut states: std::collections::HashMap<&str, &'static str> =
+        std::collections::HashMap::new();
+    if let Some(manager) = manager {
+        for config in servers {
+            let label = match manager.server_entry(&config.name) {
+                Some(entry) => entry.state().await.label(),
+                None => "(unknown)",
+            };
+            states.insert(config.name.as_str(), label);
+        }
+    }
+
+    if manager.is_some() {
+        println!(
+            "{:<24} {:<8} {:<9} {:<8} target",
+            "name", "transport", "state", "perm"
+        );
+        println!("{}", "-".repeat(72));
+    } else {
+        println!("{:<24} {:<8} {:<8} target", "name", "transport", "perm");
+        println!("{}", "-".repeat(72));
+    }
+
     for config in servers {
         let target = match config.transport {
             McpTransport::Stdio => {
@@ -37,16 +70,26 @@ pub async fn run_list(servers: &[McpServerConfig]) -> Result<()> {
             }
             McpTransport::Http => config.url.clone().unwrap_or_else(|| "(no url)".to_string()),
         };
-        println!(
-            "{:<24} {:<8} {:<8} {}",
-            config.name,
-            match config.transport {
-                McpTransport::Stdio => "stdio",
-                McpTransport::Http => "http",
-            },
-            config.permission.as_deref().unwrap_or("read"),
-            target
-        );
+        let transport_label = match config.transport {
+            McpTransport::Stdio => "stdio",
+            McpTransport::Http => "http",
+        };
+        let perm_label = config.permission.as_deref().unwrap_or("read");
+        if manager.is_some() {
+            let state_label = states
+                .get(config.name.as_str())
+                .copied()
+                .unwrap_or("(unknown)");
+            println!(
+                "{:<24} {:<8} {:<9} {:<8} {}",
+                config.name, transport_label, state_label, perm_label, target
+            );
+        } else {
+            println!(
+                "{:<24} {:<8} {:<8} {}",
+                config.name, transport_label, perm_label, target
+            );
+        }
     }
     Ok(())
 }
@@ -133,15 +176,33 @@ pub async fn run_tools(
         .clone();
 
     let context = McpClientContext::new();
-    let manager = McpClientManager::connect_all(
+    let manager = McpClientManager::prepare(
         std::slice::from_ref(&config),
         mcp_default,
-        Some(token_store),
+        Some(token_store.clone()),
         Arc::clone(&context),
     )
     .await?;
+    manager.start_connector(
+        crate::tools::ToolRegistry::new(),
+        crate::mcp::McpRuntimeConfig {
+            connect_timeout: std::time::Duration::from_secs(30),
+            stdio_concurrency: 1,
+            http_concurrency: 1,
+        },
+    );
+    manager.await_settled().await;
 
-    if !manager.server_names().contains(&config.name) {
+    if !manager
+        .server_entry(&config.name)
+        .map(|entry| {
+            matches!(
+                futures::executor::block_on(entry.state.read()).clone(),
+                crate::mcp::ServerState::Connected { .. }
+            )
+        })
+        .unwrap_or(false)
+    {
         return Err(config_err(format!(
             "failed to connect to '{}' — see logs above",
             config.name
@@ -149,7 +210,7 @@ pub async fn run_tools(
     }
 
     let tools = manager.list_advertised_tools(&config.name).await?;
-    manager.shutdown().await;
+    manager.shutdown_arc().await;
 
     if tools.is_empty() {
         println!("(server '{}' advertises no tools)", config.name);
@@ -254,17 +315,36 @@ pub async fn run_reconnect(
     // `ResolvedConfig` in scope — pass `None` and let resolution fall
     // through to the hardcoded strict default. Any user-specific
     // per-server / per-tool config still applies.
-    let manager = McpClientManager::connect_all(
+    let manager = McpClientManager::prepare(
         std::slice::from_ref(&config),
         None,
-        Some(token_store),
+        Some(token_store.clone()),
         Arc::clone(&context),
     )
     .await?;
+    manager.start_connector(
+        crate::tools::ToolRegistry::new(),
+        crate::mcp::McpRuntimeConfig {
+            connect_timeout: std::time::Duration::from_secs(30),
+            stdio_concurrency: 1,
+            http_concurrency: 1,
+        },
+    );
+    manager.await_settled().await;
 
-    if manager.server_names().contains(&config.name) {
+    let connected = manager
+        .server_entry(&config.name)
+        .map(|entry| {
+            matches!(
+                futures::executor::block_on(entry.state.read()).clone(),
+                crate::mcp::ServerState::Connected { .. }
+            )
+        })
+        .unwrap_or(false);
+
+    if connected {
         tracing::info!("connected to '{}'", config.name);
-        manager.shutdown().await;
+        manager.shutdown_arc().await;
         Ok(())
     } else {
         Err(config_err(format!(
@@ -352,21 +432,39 @@ pub async fn run_login(
     let context = McpClientContext::new();
     // `login` is also out-of-band from the main agent loop; see the
     // note in `run_reconnect` for why we pass `None` here.
-    let manager = McpClientManager::connect_all(
+    let manager = McpClientManager::prepare(
         std::slice::from_ref(&config),
         None,
-        Some(token_store),
+        Some(token_store.clone()),
         context,
     )
     .await?;
+    manager.start_connector(
+        crate::tools::ToolRegistry::new(),
+        crate::mcp::McpRuntimeConfig {
+            connect_timeout: std::time::Duration::from_secs(30),
+            stdio_concurrency: 1,
+            http_concurrency: 1,
+        },
+    );
+    manager.await_settled().await;
 
-    if !manager.server_names().contains(&config.name) {
+    let connected = manager
+        .server_entry(&config.name)
+        .map(|entry| {
+            matches!(
+                futures::executor::block_on(entry.state.read()).clone(),
+                crate::mcp::ServerState::Connected { .. }
+            )
+        })
+        .unwrap_or(false);
+    if !connected {
         return Err(config_err(format!(
             "OAuth flow did not complete for '{}'",
             config.name
         )));
     }
-    manager.shutdown().await;
+    manager.shutdown_arc().await;
 
     if needs_persist && let Err(error) = persist_auth_block_for(name) {
         // Login worked — don't fail the whole command if we can't write
@@ -468,6 +566,9 @@ pub struct AddArgs {
     pub disable_tool: Vec<String>,
     /// Raw `NAME=LEVEL` pairs for per-tool permission overrides.
     pub tool_permission: Vec<String>,
+    /// Persist with `disabled = true` so the server is skipped at startup
+    /// until the user runs `agsh mcp enable <name>`.
+    pub disabled: bool,
 }
 
 /// What `add` looks like after validation: transport is chosen,
@@ -497,6 +598,7 @@ struct ResolvedAddArgs {
     sampling: bool,
     sampling_limit: Option<u32>,
     no_login: bool,
+    disabled: bool,
 }
 
 /// Run `agsh mcp add …`.
@@ -749,6 +851,7 @@ fn resolve_add_args(args: AddArgs) -> Result<ResolvedAddArgs> {
         allow_tool,
         disable_tool,
         tool_permission,
+        disabled,
     } = args;
 
     let looks_like_url = location
@@ -864,6 +967,7 @@ fn resolve_add_args(args: AddArgs) -> Result<ResolvedAddArgs> {
                 sampling,
                 sampling_limit,
                 no_login,
+                disabled,
             })
         }
         McpTransport::Http => {
@@ -909,6 +1013,7 @@ fn resolve_add_args(args: AddArgs) -> Result<ResolvedAddArgs> {
                 sampling,
                 sampling_limit,
                 no_login,
+                disabled,
             })
         }
     }
@@ -1073,6 +1178,7 @@ fn resolved_to_server_config(resolved: &ResolvedAddArgs) -> McpServerConfig {
         tool_permissions: resolved.tool_permissions.clone(),
         sampling: resolved.sampling,
         sampling_limit: resolved.sampling_limit,
+        disabled: resolved.disabled,
     }
 }
 
@@ -1134,6 +1240,9 @@ fn build_server_table(resolved: &ResolvedAddArgs) -> toml_edit::Table {
     }
     if let Some(limit) = resolved.sampling_limit {
         table.insert("sampling_limit", toml_edit::value(limit as i64));
+    }
+    if resolved.disabled {
+        table.insert("disabled", toml_edit::value(true));
     }
     if let Some(auth) = &resolved.auth {
         table.insert("auth", toml_edit::Item::Table(auth_to_toml(auth)));
@@ -1310,6 +1419,60 @@ pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
     Ok(())
 }
 
+/// Set `disabled = <value>` on a server entry in config.toml, preserving
+/// other fields and formatting. Backs `agsh mcp disable|enable`. Writes
+/// atomically via [`crate::config::write_config_atomic`].
+async fn set_server_disabled(name: &str, disabled: bool) -> Result<std::path::PathBuf> {
+    let path = crate::config::config_file_path()
+        .ok_or_else(|| config_err("could not determine config directory"))?;
+    let existing = std::fs::read_to_string(&path)
+        .map_err(|error| config_err(format!("failed to read config: {}", error)))?;
+    let mut document = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| config_err(format!("failed to parse config: {}", error)))?;
+
+    let servers = document
+        .get_mut("mcp")
+        .and_then(|m| m.as_table_mut())
+        .and_then(|t| t.get_mut("servers"))
+        .and_then(|s| s.as_array_of_tables_mut())
+        .ok_or_else(|| config_err("no MCP servers in config"))?;
+
+    let entry = servers
+        .iter_mut()
+        .find(|entry| entry.get("name").and_then(|v| v.as_str()) == Some(name))
+        .ok_or_else(|| config_err(format!("no server named '{}' in config", name)))?;
+
+    if disabled {
+        entry.insert("disabled", toml_edit::value(true));
+    } else {
+        // Remove the key entirely rather than setting `false` — keeps
+        // minimal diffs for users who never enabled the flag before.
+        entry.remove("disabled");
+    }
+
+    crate::config::write_config_atomic(&path, &document.to_string())
+        .map_err(|error| config_err(format!("failed to write config: {}", error)))?;
+    Ok(path)
+}
+
+/// Run `agsh mcp disable <name>` — set `disabled = true` in config.toml.
+/// The currently-running agsh session (if any) keeps its state; the
+/// change takes effect on the next start.
+pub async fn run_disable(name: &str) -> Result<()> {
+    let path = set_server_disabled(name, true).await?;
+    tracing::info!("disabled '{}' in {}", name, path.display());
+    Ok(())
+}
+
+/// Run `agsh mcp enable <name>` — clear `disabled` from the server
+/// entry in config.toml.
+pub async fn run_enable(name: &str) -> Result<()> {
+    let path = set_server_disabled(name, false).await?;
+    tracing::info!("enabled '{}' in {}", name, path.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,6 +1500,7 @@ mod tests {
             allow_tool: Vec::new(),
             disable_tool: Vec::new(),
             tool_permission: Vec::new(),
+            disabled: false,
         }
     }
 

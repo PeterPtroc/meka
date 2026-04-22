@@ -369,12 +369,25 @@ An array of MCP server configurations. Each entry defines a server to connect to
 | `tool_permissions` | No | Per-tool permission overrides keyed by raw tool name. Beats the server-level `permission` and the server's `readOnlyHint` when resolving a tool's required permission. |
 | `sampling` | No | Allow this server to call `sampling/createMessage` against your configured LLM provider. Default `false` (reject). Enabling this lets a compromised server inject arbitrary messages into your LLM context and burn your provider quota — opt in per-server, deliberately. |
 | `sampling_limit` | No | Cap on sampling calls per agsh session from this server when `sampling = true`. Default `10`. Requests beyond the limit return an `INTERNAL_ERROR` to the server. |
+| `disabled` | No | When `true`, the server is skipped entirely at startup — no process is spawned, no HTTP connect is attempted. Flip it back with `agsh mcp enable <name>` or by editing the config. Defaults to `false`. |
 
 ### `[mcp]` top-level table
 
 | Field | Purpose |
 |-------|---------|
 | `default_permission` | Fallback permission for MCP tools whose server didn't advertise `readOnlyHint` and doesn't have a `permission` override. Accepts `"none"`, `"read"`, `"ask"`, or `"write"`. If unset the hardcoded fallback is `"write"` (strict). |
+| `strict` | When `true` (default), every turn is gated on all enabled MCP servers being `Connected`. If any are not, the turn is rejected with a shell-style error instead of sending the request to the model. Set to `false` to proceed with whichever servers are ready (a warn log names the missing ones). |
+| `grace_seconds` | Per-turn cap on how long to wait for still-`Pending` servers to connect before applying the strict check. Default `3`. Set to `0` to skip waiting (useful for scripts that want to fail fast). |
+| `connect_timeout_seconds` | Per-server timeout for connect + `initialize` + `list_tools`. A hung stdio spawn or slow HTTPS handshake can't stall the whole fleet past this bound. Default `30`. |
+
+### Startup concurrency
+
+MCP servers connect in parallel at startup, partitioned by transport so a fleet of stdio servers (process-spawn bound) doesn't fight a fleet of HTTP servers (network bound):
+
+- stdio: `AGSH_MCP_STDIO_CONCURRENCY` (default `3`)
+- http: `AGSH_MCP_HTTP_CONCURRENCY` (default `20`)
+
+These env vars are tuning knobs — rarely needed, but useful if you're running ~30 stdio servers on a constrained box (lower it) or ~50 HTTP servers (raise it).
 
 ### Permission resolution
 
@@ -509,6 +522,8 @@ Manage configured servers without editing `config.toml` by hand:
 | `agsh mcp get <name>` | Print full details for one server. |
 | `agsh mcp add <name> <url-or-command> [args...] [flags]` | Persist a server. Transport is auto-detected: a URL starting with `http[s]://` means HTTP, anything else means stdio. Preserves existing formatting/comments via `toml_edit`. |
 | `agsh mcp remove <name>` | Best-effort revoke stored OAuth tokens (RFC 7009) at the provider, then delete the server entry, clear stored credentials, and drop any resource-update ledger entries. |
+| `agsh mcp disable <name>` | Set `disabled = true` on the server entry. The next `agsh` start skips it entirely. |
+| `agsh mcp enable <name>` | Clear the `disabled` flag, so the server connects on the next start. |
 | `agsh mcp reconnect <name>` | Smoke-test a connect; prints `ok` or the error. |
 | `agsh mcp tools <name>` | Connect and list every advertised tool with its resolved permission, the chain step that decided it, and whether the current config allows it. Useful for populating `--allow-tool`, `--disable-tool`, or `--tool-permission` overrides without leaving the CLI. |
 | `agsh mcp login <name>` | Drive interactive OAuth. If the server has no `[auth]` block and uses HTTP, assumes `type = "oauth"` and persists the block on success. |

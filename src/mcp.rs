@@ -359,21 +359,63 @@ pub struct McpClientManager {
     /// `readOnlyHint`. `None` means "no user default" — resolution
     /// falls through to the hardcoded strict `Write`.
     mcp_default_permission: Option<Permission>,
+    /// Flipped to `true` by the background connector once every enabled
+    /// entry has reached a terminal state (Connected or Failed). The turn
+    /// gate watches this via [`Self::await_settled`] / [`Self::all_ready`].
+    settled: tokio::sync::watch::Sender<bool>,
+    /// Entries waiting to be connected by [`Self::start_connector`].
+    /// `None` once the connector has been started so a second call is
+    /// a no-op; avoids re-spawning the connector if a test or the REPL
+    /// re-enters the same manager.
+    pending_entries: std::sync::Mutex<Option<Vec<Arc<ServerEntry>>>>,
 }
 
-/// Holds the live service for a single MCP server plus reconnection state.
-/// Wrapped in an [`Arc`] and shared between the manager, per-server tool
-/// adapters, and the resource/prompt builtin tools so they all see the
-/// current service after a reconnect.
+/// Lifecycle state of a single MCP server. Transitions:
+/// - Built as `Disabled` (config says so) or `Pending` (will be
+///   connected by the background connector).
+/// - `Pending` → `Connected` on successful `initialize` + `list_tools`.
+/// - `Pending` → `Failed` on connect error or connect-timeout.
+/// - `Connected` → `Connected` (with a new `service` Arc) on reconnect.
+#[derive(Clone)]
+pub enum ServerState {
+    Disabled,
+    Pending,
+    Connected {
+        service: Arc<McpRunningService>,
+    },
+    Failed {
+        error: String,
+        #[allow(dead_code)]
+        at: std::time::Instant,
+    },
+}
+
+impl ServerState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ServerState::Disabled => "disabled",
+            ServerState::Pending => "pending",
+            ServerState::Connected { .. } => "connected",
+            ServerState::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// Holds the lifecycle state of a single MCP server plus reconnection
+/// machinery. Wrapped in an [`Arc`] and shared between the manager, the
+/// per-server tool adapters, and the resource/prompt builtin tools so
+/// every caller sees the current service (or the current failure) via
+/// [`Self::require_connected`].
 pub struct ServerEntry {
     server_name: String,
     config: McpServerConfig,
     token_store: Option<TokenStore>,
     client_context: Arc<McpClientContext>,
-    service: RwLock<Arc<McpRunningService>>,
+    state: RwLock<ServerState>,
     reconnect_lock: Mutex<()>,
-    /// Optional `InitializeResult.instructions` captured at connect-time.
-    /// Immutable for the lifetime of the connection per the MCP spec.
+    /// Optional `InitializeResult.instructions` captured on the first
+    /// `Connected` transition. Immutable for the lifetime of the
+    /// connection per the MCP spec, so reconnects don't reset it.
     instructions: OnceLock<Option<String>>,
 }
 
@@ -384,11 +426,44 @@ impl ServerEntry {
     pub fn instructions(&self) -> Option<&str> {
         self.instructions.get().and_then(|opt| opt.as_deref())
     }
+
+    /// Snapshot of the current lifecycle state. `Connected` carries an
+    /// `Arc<McpRunningService>` which is cheap to clone.
+    pub async fn state(&self) -> ServerState {
+        self.state.read().await.clone()
+    }
 }
 
 impl ServerEntry {
-    async fn current_peer(&self) -> Peer<RoleClient> {
-        self.service.read().await.peer().clone()
+    /// Return the live peer if the server is currently `Connected`;
+    /// otherwise return an error describing the current lifecycle
+    /// state. Every tool dispatch / list-call path funnels through
+    /// this so the "MCP X not ready" error surfaces at one site.
+    async fn require_connected(&self) -> Result<Peer<RoleClient>> {
+        match &*self.state.read().await {
+            ServerState::Connected { service } => Ok(service.peer().clone()),
+            ServerState::Pending => Err(AgshError::McpConnection {
+                server_name: self.server_name.clone(),
+                message: "server is still connecting; try again".to_string(),
+            }),
+            ServerState::Failed { error, .. } => Err(AgshError::McpConnection {
+                server_name: self.server_name.clone(),
+                message: format!("server failed to connect: {}", error),
+            }),
+            ServerState::Disabled => Err(AgshError::McpConnection {
+                server_name: self.server_name.clone(),
+                message: "server is disabled in config".to_string(),
+            }),
+        }
+    }
+
+    /// Transport-close check used by [`Self::reconnect`]. Returns false
+    /// if the server isn't `Connected` (there's nothing to reconnect).
+    async fn needs_reconnect(&self) -> bool {
+        match &*self.state.read().await {
+            ServerState::Connected { service } => service.peer().is_transport_closed(),
+            _ => false,
+        }
     }
 
     /// Attempt to reconnect this server with exponential backoff. Serialised
@@ -408,7 +483,7 @@ impl ServerEntry {
     async fn reconnect(self: &Arc<Self>) -> Result<()> {
         let _guard = self.reconnect_lock.lock().await;
 
-        if !self.service.read().await.peer().is_transport_closed() {
+        if !self.needs_reconnect().await {
             return Ok(());
         }
 
@@ -446,7 +521,9 @@ impl ServerEntry {
 
             match result {
                 Ok(Ok(new_service)) => {
-                    *self.service.write().await = Arc::new(new_service);
+                    *self.state.write().await = ServerState::Connected {
+                        service: Arc::new(new_service),
+                    };
                     tracing::info!(
                         "reconnected to MCP server '{}' on attempt {}",
                         self.server_name,
@@ -484,14 +561,63 @@ impl ServerEntry {
     }
 }
 
+/// Runtime tuning for the background MCP connector. Pulled from
+/// `ResolvedConfig` by the binary; the manager uses it directly.
+pub struct McpRuntimeConfig {
+    /// Per-server wrap around connect + `initialize` + `list_tools`.
+    pub connect_timeout: std::time::Duration,
+    /// Max concurrent stdio spawns. Defaults to 3 (env
+    /// `AGSH_MCP_STDIO_CONCURRENCY`).
+    pub stdio_concurrency: usize,
+    /// Max concurrent HTTP connects. Defaults to 20 (env
+    /// `AGSH_MCP_HTTP_CONCURRENCY`).
+    pub http_concurrency: usize,
+}
+
+impl McpRuntimeConfig {
+    pub fn from_config(config: &crate::config::ResolvedConfig) -> Self {
+        Self {
+            connect_timeout: config.mcp_connect_timeout,
+            stdio_concurrency: resolve_concurrency_env("AGSH_MCP_STDIO_CONCURRENCY", 3),
+            http_concurrency: resolve_concurrency_env("AGSH_MCP_HTTP_CONCURRENCY", 20),
+        }
+    }
+}
+
+/// Parse a positive-integer concurrency override from `env_var`. Falls
+/// back to `default` when the variable is unset, unparseable, or zero.
+/// Extracted from `McpRuntimeConfig::from_config` so tests can exercise
+/// the env-var override path without constructing a full `ResolvedConfig`.
+fn resolve_concurrency_env(env_var: &str, default: usize) -> usize {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
 impl McpClientManager {
-    pub async fn connect_all(
+    /// Validate configs and build a manager with every non-empty entry
+    /// in `Disabled` or `Pending` state. Does NOT spawn any network /
+    /// process work — that happens in [`Self::start_connector`] once
+    /// the caller has built the [`crate::tools::ToolRegistry`]. Callers
+    /// typically:
+    /// 1. `let manager = McpClientManager::prepare(...).await?;`
+    /// 2. Register the manager on the `McpClientContext`.
+    /// 3. Build the tool registry.
+    /// 4. `manager.start_connector(registry, runtime);`
+    ///
+    /// The split exists so the connector can register MCP tools into
+    /// the registry as each server comes online, without forcing the
+    /// registry to exist before config validation.
+    pub async fn prepare(
         configs: &[McpServerConfig],
         mcp_default_permission: Option<Permission>,
-        token_store: Option<&TokenStore>,
+        token_store: Option<TokenStore>,
         client_context: Arc<McpClientContext>,
-    ) -> Result<Self> {
+    ) -> Result<Arc<Self>> {
         let mut servers = HashMap::new();
+        let mut pending: Vec<Arc<ServerEntry>> = Vec::new();
 
         for original_config in configs {
             // Apply env-var substitution (`${VAR}` / `${VAR:-default}`) once,
@@ -548,48 +674,112 @@ impl McpClientManager {
                 });
             }
 
-            let service =
-                match connect_server(&config.name, &config, token_store, &client_context).await {
-                    Ok(service) => service,
-                    Err(error) => {
-                        tracing::warn!(
-                            "failed to connect to MCP server '{}': {}",
-                            config.name,
-                            error
-                        );
-                        continue;
-                    }
-                };
-            tracing::info!("connected to MCP server '{}'", config.name);
-            let instructions_slot: OnceLock<Option<String>> = OnceLock::new();
-            let captured = service
-                .peer()
-                .peer_info()
-                .and_then(|info| info.instructions.as_ref())
-                .map(|raw| {
-                    crate::mcp::truncate(
-                        &crate::mcp::sanitize::sanitize_text(raw),
-                        MAX_MCP_DESCRIPTION_LENGTH,
-                    )
-                });
-            let _ = instructions_slot.set(captured);
+            let is_disabled = config.disabled;
+            if is_disabled {
+                tracing::info!(
+                    "MCP server '{}' is disabled in config, skipping",
+                    config.name
+                );
+            }
 
             let entry = Arc::new(ServerEntry {
                 server_name: config.name.clone(),
                 config: config.clone(),
-                token_store: token_store.cloned(),
+                token_store: token_store.clone(),
                 client_context: Arc::clone(&client_context),
-                service: RwLock::new(Arc::new(service)),
+                state: RwLock::new(if is_disabled {
+                    ServerState::Disabled
+                } else {
+                    ServerState::Pending
+                }),
                 reconnect_lock: Mutex::new(()),
-                instructions: instructions_slot,
+                instructions: OnceLock::new(),
             });
+            if !is_disabled {
+                pending.push(Arc::clone(&entry));
+            }
             servers.insert(config.name.clone(), entry);
         }
 
-        Ok(Self {
+        // Initialise the watch with `true` when nothing will ever be
+        // pending (all servers disabled, or no servers configured) so
+        // callers of `all_ready` / `await_settled` short-circuit
+        // immediately. `send` on a Sender with no receivers errors and
+        // drops the value, so the initial-value path is the only safe
+        // pre-subscription way to publish settled.
+        let initial_settled = pending.is_empty();
+        let (settled_tx, _) = tokio::sync::watch::channel(initial_settled);
+        let manager = Arc::new(Self {
             servers,
             mcp_default_permission,
-        })
+            settled: settled_tx,
+            pending_entries: std::sync::Mutex::new(Some(pending)),
+        });
+        Ok(manager)
+    }
+
+    /// Spawn the background connector. Consumes the `Pending` entry list
+    /// stashed by [`Self::prepare`] so subsequent calls are no-ops. Safe
+    /// to call on managers with no pending entries.
+    pub fn start_connector(
+        self: &Arc<Self>,
+        tool_registry: crate::tools::ToolRegistry,
+        runtime: McpRuntimeConfig,
+    ) {
+        let Some(pending) = self
+            .pending_entries
+            .lock()
+            .expect("pending_entries lock poisoned")
+            .take()
+        else {
+            return;
+        };
+        let settled = self.settled.clone();
+        let mcp_default_permission = self.mcp_default_permission;
+        tokio::spawn(async move {
+            run_connector(
+                pending,
+                tool_registry,
+                mcp_default_permission,
+                runtime,
+                settled,
+            )
+            .await;
+        });
+    }
+
+    /// True when every enabled server has reached a terminal state
+    /// (`Connected` or `Failed`). Returns `true` if there are no enabled
+    /// servers configured. Non-blocking.
+    pub fn all_ready(&self) -> bool {
+        *self.settled.borrow()
+    }
+
+    /// Parks until the background connector finishes processing every
+    /// enabled server. Returns immediately if already settled. Safe to
+    /// call concurrently from multiple turn dispatches.
+    pub async fn await_settled(&self) {
+        let mut rx = self.settled.subscribe();
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.wait_for(|done| *done).await;
+    }
+
+    /// Snapshot of enabled servers that are not currently `Connected`
+    /// (still `Pending` or `Failed`). Used by the per-turn strict gate
+    /// to compose the rejection message.
+    pub async fn enabled_not_connected(&self) -> Vec<(String, ServerState)> {
+        let mut out = Vec::new();
+        for (name, entry) in &self.servers {
+            let state = entry.state().await;
+            match state {
+                ServerState::Connected { .. } | ServerState::Disabled => {}
+                other => out.push((name.clone(), other)),
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     pub fn server_entry(&self, server_name: &str) -> Option<Arc<ServerEntry>> {
@@ -628,7 +818,7 @@ impl McpClientManager {
 
         let server_config = &entry.config;
 
-        let peer = entry.current_peer().await;
+        let peer = entry.require_connected().await?;
         let tools = peer
             .list_all_tools()
             .await
@@ -740,7 +930,7 @@ impl McpClientManager {
         };
 
         let server_config = &entry.config;
-        let peer = entry.current_peer().await;
+        let peer = entry.require_connected().await?;
         let tools = peer
             .list_all_tools()
             .await
@@ -782,6 +972,19 @@ impl McpClientManager {
         Ok(out)
     }
 
+    /// Shutdown helper for callers that hold the manager through an
+    /// `Arc`. Try-unwraps; if the Arc is unshared, drives the owned
+    /// [`Self::shutdown`]. If something still holds a reference, drops
+    /// the Arc and lets rmcp's drop guards clean up.
+    pub async fn shutdown_arc(self: Arc<Self>) {
+        match Arc::try_unwrap(self) {
+            Ok(manager) => manager.shutdown().await,
+            Err(_shared) => {
+                tracing::debug!("mcp manager still referenced; relying on drop guards");
+            }
+        }
+    }
+
     pub async fn shutdown(self) {
         /// Max time to wait for in-flight tool calls to complete before we
         /// drop the shared service Arc and let the drop-guard cancel it.
@@ -799,7 +1002,12 @@ impl McpClientManager {
                 continue;
             };
 
-            let service = entry.service.into_inner();
+            // Only Connected entries have a service to close; Pending /
+            // Failed / Disabled entries are tear-down no-ops.
+            let service = match entry.state.into_inner() {
+                ServerState::Connected { service } => service,
+                _ => continue,
+            };
 
             // In-flight tool calls hold their own Arc<RunningService> clone.
             // Wait up to `SHUTDOWN_GRACE` for those to complete so the normal
@@ -841,6 +1049,296 @@ impl McpClientManager {
             }
         }
     }
+}
+
+/// Drive the actual connect work for every `Pending` entry, split into a
+/// stdio stream and an HTTP stream, each bounded by its own concurrency
+/// cap. Runs in a spawned task so [`McpClientManager::start_connector`] can
+/// return immediately and the REPL paints without waiting.
+///
+/// When both streams drain, flips the `settled` watch so the turn gate
+/// can short-circuit.
+async fn run_connector(
+    pending: Vec<Arc<ServerEntry>>,
+    tool_registry: crate::tools::ToolRegistry,
+    mcp_default_permission: Option<Permission>,
+    runtime: McpRuntimeConfig,
+    settled: tokio::sync::watch::Sender<bool>,
+) {
+    use futures::StreamExt;
+
+    if pending.is_empty() {
+        let _ = settled.send(true);
+        return;
+    }
+
+    let (stdio_entries, http_entries): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|entry| matches!(entry.config.transport, McpTransport::Stdio));
+
+    let stdio_registry = tool_registry.clone();
+    let http_registry = tool_registry;
+    let stdio_limit = runtime.stdio_concurrency.max(1);
+    let http_limit = runtime.http_concurrency.max(1);
+    let timeout = runtime.connect_timeout;
+
+    let stdio_stream = futures::stream::iter(stdio_entries)
+        .map(move |entry| {
+            let registry = stdio_registry.clone();
+            async move {
+                connect_one(entry, registry, mcp_default_permission, timeout).await;
+            }
+        })
+        .buffer_unordered(stdio_limit)
+        .for_each(|_| async {});
+
+    let http_stream = futures::stream::iter(http_entries)
+        .map(move |entry| {
+            let registry = http_registry.clone();
+            async move {
+                connect_one(entry, registry, mcp_default_permission, timeout).await;
+            }
+        })
+        .buffer_unordered(http_limit)
+        .for_each(|_| async {});
+
+    tokio::join!(stdio_stream, http_stream);
+    let _ = settled.send(true);
+}
+
+/// Connect a single `Pending` server: wrap the existing `connect_server`
+/// in a per-server timeout, capture instructions, discover + register
+/// tools into the registry, and flip the entry's state to `Connected` on
+/// success or `Failed` on error. Never panics — errors are logged and
+/// reflected in [`ServerState::Failed`] so the turn gate can surface them.
+async fn connect_one(
+    entry: Arc<ServerEntry>,
+    tool_registry: crate::tools::ToolRegistry,
+    mcp_default_permission: Option<Permission>,
+    connect_timeout: std::time::Duration,
+) {
+    let server_name = entry.server_name.clone();
+
+    // connect_server's future can be `!Send` for OAuth-authenticated
+    // servers (rmcp 1.5 holds a `form_urlencoded::Serializer` across an
+    // await in its auth module, whose `Option<&dyn Fn(&str) -> Cow<[u8]>>`
+    // closure slot is not `Sync`). Drive it on a `spawn_blocking` thread
+    // using the outer runtime's `Handle` — same approach `reconnect` uses.
+    let handle = tokio::runtime::Handle::current();
+    let entry_for_connect = Arc::clone(&entry);
+    let server_name_for_task = server_name.clone();
+    let connect_task = tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            tokio::time::timeout(
+                connect_timeout,
+                connect_server(
+                    &server_name_for_task,
+                    &entry_for_connect.config,
+                    entry_for_connect.token_store.as_ref(),
+                    &entry_for_connect.client_context,
+                ),
+            )
+            .await
+        })
+    });
+
+    let connected = match connect_task.await {
+        Ok(Ok(Ok(service))) => service,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                "failed to connect to MCP server '{}': {}",
+                server_name,
+                error
+            );
+            *entry.state.write().await = ServerState::Failed {
+                error: error.to_string(),
+                at: std::time::Instant::now(),
+            };
+            return;
+        }
+        Ok(Err(_elapsed)) => {
+            tracing::warn!(
+                "MCP server '{}' connect timed out after {:?}",
+                server_name,
+                connect_timeout
+            );
+            *entry.state.write().await = ServerState::Failed {
+                error: format!("connect timed out after {:?}", connect_timeout),
+                at: std::time::Instant::now(),
+            };
+            return;
+        }
+        Err(join_error) => {
+            tracing::warn!(
+                "MCP server '{}' connect task panicked: {}",
+                server_name,
+                join_error
+            );
+            *entry.state.write().await = ServerState::Failed {
+                error: format!("connect task join error: {}", join_error),
+                at: std::time::Instant::now(),
+            };
+            return;
+        }
+    };
+
+    tracing::info!("connected to MCP server '{}'", server_name);
+
+    // Capture InitializeResult.instructions on the first Connected
+    // transition. Immutable per MCP spec so reconnects don't overwrite.
+    let captured = connected
+        .peer()
+        .peer_info()
+        .and_then(|info| info.instructions.as_ref())
+        .map(|raw| {
+            crate::mcp::truncate(
+                &crate::mcp::sanitize::sanitize_text(raw),
+                MAX_MCP_DESCRIPTION_LENGTH,
+            )
+        });
+    let _ = entry.instructions.set(captured);
+
+    // Flip state to Connected BEFORE tool registration so `list_all_tools`
+    // below goes through the live peer via `require_connected`.
+    let service_arc = Arc::new(connected);
+    *entry.state.write().await = ServerState::Connected {
+        service: Arc::clone(&service_arc),
+    };
+
+    // Discover + register tools. Any error here doesn't undo the
+    // Connected state — the server is reachable, just its tool list
+    // failed. Surface it as a warn and leave tool set empty.
+    match discover_and_register_tools(&entry, mcp_default_permission, &tool_registry).await {
+        Ok(count) => {
+            tracing::info!("MCP server '{}' registered {} tool(s)", server_name, count);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "MCP server '{}' connected but tool discovery failed: {}",
+                server_name,
+                error
+            );
+        }
+    }
+}
+
+/// Fetch `list_tools` from a just-connected server and install the
+/// resulting adapters in `tool_registry` via `replace_server_tools` +
+/// `mark_deferred`. Shares the adapter-construction path with
+/// [`McpClientManager::discover_tools_for_server`] via `build_mcp_adapters`.
+async fn discover_and_register_tools(
+    entry: &Arc<ServerEntry>,
+    mcp_default_permission: Option<Permission>,
+    tool_registry: &crate::tools::ToolRegistry,
+) -> Result<usize> {
+    use crate::tools::Tool as _;
+    let adapters = build_mcp_adapters(entry, mcp_default_permission).await?;
+    let registered_names: Vec<String> = adapters
+        .iter()
+        .map(|a| a.definition().name.clone())
+        .collect();
+    let arc_adapters: Vec<Arc<dyn crate::tools::Tool>> = adapters
+        .into_iter()
+        .map(|a| Arc::new(a) as Arc<dyn crate::tools::Tool>)
+        .collect();
+    tool_registry.replace_server_tools(&entry.server_name, arc_adapters);
+    for name in &registered_names {
+        tool_registry.mark_deferred(name);
+    }
+    Ok(registered_names.len())
+}
+
+/// Core adapter-construction logic shared between initial discovery (via
+/// the connector) and ad-hoc discovery (via
+/// [`McpClientManager::discover_tools_for_server`]).
+async fn build_mcp_adapters(
+    entry: &Arc<ServerEntry>,
+    mcp_default_permission: Option<Permission>,
+) -> Result<Vec<McpToolAdapter>> {
+    let server_name = entry.server_name.clone();
+    let server_config = &entry.config;
+    let peer = entry.require_connected().await?;
+    let tools = peer
+        .list_all_tools()
+        .await
+        .map_err(|error| AgshError::McpConnection {
+            server_name: server_name.clone(),
+            message: format!("list_tools failed: {}", error),
+        })?;
+
+    let advertised: std::collections::HashSet<&str> =
+        tools.iter().map(|t| t.name.as_ref()).collect();
+    warn_on_stale_tool_config(&server_name, server_config, &advertised);
+
+    let mut adapters = Vec::new();
+    for tool in tools {
+        let raw_tool_name = tool.name.as_ref().to_string();
+        if !tool_is_allowed(server_config, &raw_tool_name) {
+            continue;
+        }
+
+        let sanitised_tool_name = crate::mcp::sanitize::normalize_server_name(&raw_tool_name);
+        let namespaced_name = format!("{}__{}", server_name, sanitised_tool_name);
+
+        let raw_description = tool
+            .description
+            .as_ref()
+            .map(|d| d.as_ref().to_string())
+            .unwrap_or_default();
+        let description = truncate(
+            &crate::mcp::sanitize::sanitize_text(&raw_description),
+            MAX_MCP_DESCRIPTION_LENGTH,
+        );
+
+        let parameters = match serde_json::to_value(&*tool.input_schema) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    "MCP server '{}' tool '{}' has unserializable input schema ({}); \
+                     skipping registration",
+                    server_name,
+                    raw_tool_name,
+                    error
+                );
+                continue;
+            }
+        };
+
+        let permission = resolve_tool_permission(
+            &server_name,
+            &raw_tool_name,
+            tool.annotations.as_ref(),
+            server_config,
+            mcp_default_permission,
+        )?;
+
+        let annotations = tool
+            .annotations
+            .as_ref()
+            .and_then(|ann| serde_json::to_value(ann).ok());
+        let meta = tool
+            .meta
+            .as_ref()
+            .and_then(|m| serde_json::to_value(m).ok());
+        let title = tool
+            .title
+            .as_ref()
+            .map(|t| crate::mcp::sanitize::sanitize_text(t));
+
+        adapters.push(McpToolAdapter {
+            namespaced_name,
+            remote_tool_name: raw_tool_name,
+            description,
+            parameters,
+            permission,
+            entry: Arc::clone(entry),
+            annotations,
+            meta,
+            title,
+        });
+    }
+
+    Ok(adapters)
 }
 
 /// Build a [`Command`] for a stdio MCP server, wrapping shell shims in
@@ -2625,12 +3123,12 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
 /// List all resources advertised by a server. Returned verbatim from the
 /// current peer; no caching is done here.
 pub async fn list_resources(entry: &Arc<ServerEntry>) -> Result<Vec<Resource>> {
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     match peer.list_all_resources().await {
         Ok(resources) => Ok(resources),
         Err(ServiceError::TransportClosed) => {
             entry.reconnect().await?;
-            let peer = entry.current_peer().await;
+            let peer = entry.require_connected().await?;
             peer.list_all_resources()
                 .await
                 .map_err(|error| AgshError::McpConnection {
@@ -2647,12 +3145,12 @@ pub async fn list_resources(entry: &Arc<ServerEntry>) -> Result<Vec<Resource>> {
 
 pub async fn read_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<ReadResourceResult> {
     let params = ReadResourceRequestParams::new(uri.clone());
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     match peer.read_resource(params.clone()).await {
         Ok(result) => Ok(result),
         Err(ServiceError::TransportClosed) => {
             entry.reconnect().await?;
-            let peer = entry.current_peer().await;
+            let peer = entry.require_connected().await?;
             peer.read_resource(params)
                 .await
                 .map_err(|error| AgshError::McpConnection {
@@ -2668,12 +3166,12 @@ pub async fn read_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<Read
 }
 
 pub async fn list_prompts(entry: &Arc<ServerEntry>) -> Result<Vec<Prompt>> {
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     match peer.list_all_prompts().await {
         Ok(prompts) => Ok(prompts),
         Err(ServiceError::TransportClosed) => {
             entry.reconnect().await?;
-            let peer = entry.current_peer().await;
+            let peer = entry.require_connected().await?;
             peer.list_all_prompts()
                 .await
                 .map_err(|error| AgshError::McpConnection {
@@ -2689,7 +3187,7 @@ pub async fn list_prompts(entry: &Arc<ServerEntry>) -> Result<Vec<Prompt>> {
 }
 
 pub async fn subscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<()> {
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     let params = rmcp::model::SubscribeRequestParams::new(uri.clone());
     peer.subscribe(params)
         .await
@@ -2700,7 +3198,7 @@ pub async fn subscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result
 }
 
 pub async fn unsubscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<()> {
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     let params = rmcp::model::UnsubscribeRequestParams::new(uri.clone());
     peer.unsubscribe(params)
         .await
@@ -2718,12 +3216,12 @@ pub async fn get_prompt(
     let mut params = GetPromptRequestParams::new(name.clone());
     params.arguments = arguments;
 
-    let peer = entry.current_peer().await;
+    let peer = entry.require_connected().await?;
     match peer.get_prompt(params.clone()).await {
         Ok(result) => Ok(result),
         Err(ServiceError::TransportClosed) => {
             entry.reconnect().await?;
-            let peer = entry.current_peer().await;
+            let peer = entry.require_connected().await?;
             peer.get_prompt(params)
                 .await
                 .map_err(|error| AgshError::McpConnection {
@@ -2788,7 +3286,14 @@ impl McpToolAdapter {
         }
         params.meta = Some(meta);
 
-        let peer = self.entry.current_peer().await;
+        // Same error surface as an actually-closed transport — the
+        // upstream retry logic already handles `TransportClosed` by
+        // attempting a reconnect.
+        let peer = self
+            .entry
+            .require_connected()
+            .await
+            .map_err(|_| ServiceError::TransportClosed)?;
         let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
         let handle = peer
             .send_cancellable_request(request, PeerRequestOptions::no_options())
@@ -3121,6 +3626,7 @@ mod tests {
             tool_permissions: None,
             sampling: false,
             sampling_limit: None,
+            disabled: false,
         }
     }
 
@@ -3993,5 +4499,256 @@ mod tests {
         let input = "🦀🦀🦀🦀🦀";
         let out = truncate(input, 2);
         assert_eq!(out, "🦀🦀...");
+    }
+
+    /// Build a bare server entry in `Pending` state for pure-state tests.
+    /// No network, no process spawn.
+    fn pending_entry(name: &str, transport: McpTransport) -> Arc<ServerEntry> {
+        let mut config = bare_server_config(name);
+        config.transport = transport;
+        Arc::new(ServerEntry {
+            server_name: name.to_string(),
+            config,
+            token_store: None,
+            client_context: McpClientContext::new(),
+            state: RwLock::new(ServerState::Pending),
+            reconnect_lock: Mutex::new(()),
+            instructions: OnceLock::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn require_connected_errors_for_pending() {
+        let entry = pending_entry("pending-srv", McpTransport::Http);
+        let err = entry
+            .require_connected()
+            .await
+            .expect_err("pending should not yield a peer");
+        match err {
+            AgshError::McpConnection {
+                server_name,
+                message,
+            } => {
+                assert_eq!(server_name, "pending-srv");
+                assert!(message.contains("connecting"), "got: {}", message);
+            }
+            other => panic!("expected McpConnection, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn require_connected_errors_for_failed() {
+        let entry = pending_entry("failed-srv", McpTransport::Http);
+        *entry.state.write().await = ServerState::Failed {
+            error: "boom".to_string(),
+            at: std::time::Instant::now(),
+        };
+        let err = entry.require_connected().await.unwrap_err();
+        assert!(matches!(err, AgshError::McpConnection { .. }));
+    }
+
+    #[tokio::test]
+    async fn require_connected_errors_for_disabled() {
+        let entry = pending_entry("off-srv", McpTransport::Http);
+        *entry.state.write().await = ServerState::Disabled;
+        let err = entry.require_connected().await.unwrap_err();
+        match err {
+            AgshError::McpConnection { message, .. } => assert!(message.contains("disabled")),
+            other => panic!("expected McpConnection, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn server_state_label_matches_variant() {
+        assert_eq!(ServerState::Pending.label(), "pending");
+        assert_eq!(ServerState::Disabled.label(), "disabled");
+        assert_eq!(
+            ServerState::Failed {
+                error: "x".into(),
+                at: std::time::Instant::now()
+            }
+            .label(),
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_all_disabled_publishes_settled_immediately() {
+        let mut config = bare_server_config("off");
+        config.disabled = true;
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[config], None, None, context)
+            .await
+            .expect("prepare should succeed with a disabled-only config");
+        assert!(manager.all_ready(), "manager should be settled immediately");
+        let not_ready = manager.enabled_not_connected().await;
+        assert!(
+            not_ready.is_empty(),
+            "disabled servers don't count as not-ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_pending_entries_not_ready_until_connector_runs() {
+        let config = bare_server_config("waiting");
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[config], None, None, context)
+            .await
+            .expect("prepare should succeed");
+        assert!(
+            !manager.all_ready(),
+            "pending server shouldn't be ready yet"
+        );
+        let not_ready = manager.enabled_not_connected().await;
+        assert_eq!(not_ready.len(), 1);
+        assert_eq!(not_ready[0].0, "waiting");
+    }
+
+    #[test]
+    fn resolve_concurrency_env_uses_default_when_unset() {
+        // Unique var names so parallel tests can't race on env state.
+        let var = "AGSH_TEST_CONCURRENCY_UNSET";
+        unsafe {
+            std::env::remove_var(var);
+        }
+        assert_eq!(resolve_concurrency_env(var, 7), 7);
+    }
+
+    #[test]
+    fn resolve_concurrency_env_parses_positive_override() {
+        let var = "AGSH_TEST_CONCURRENCY_OVERRIDE";
+        unsafe {
+            std::env::set_var(var, "11");
+        }
+        assert_eq!(resolve_concurrency_env(var, 3), 11);
+        unsafe {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn resolve_concurrency_env_falls_back_on_garbage() {
+        let var = "AGSH_TEST_CONCURRENCY_GARBAGE";
+        unsafe {
+            std::env::set_var(var, "not-a-number");
+        }
+        assert_eq!(resolve_concurrency_env(var, 5), 5);
+        unsafe {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn resolve_concurrency_env_rejects_zero() {
+        // Zero would deadlock `buffer_unordered(0)`; must fall back.
+        let var = "AGSH_TEST_CONCURRENCY_ZERO";
+        unsafe {
+            std::env::set_var(var, "0");
+        }
+        assert_eq!(resolve_concurrency_env(var, 4), 4);
+        unsafe {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[tokio::test]
+    async fn await_settled_returns_immediately_when_already_settled() {
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[], None, None, context)
+            .await
+            .expect("prepare with no servers should succeed");
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            manager.await_settled(),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "await_settled blocked past the no-pending fast path"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_settled_unblocks_when_connector_finishes() {
+        // `/bin/false` exits immediately, so the connector reaches
+        // `settled.send(true)` via Failed state on the first entry.
+        let mut config = bare_server_config("quick-fail");
+        config.transport = McpTransport::Stdio;
+        config.command = Some("/bin/false".to_string());
+        config.url = None;
+
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[config], None, None, context)
+            .await
+            .expect("prepare should succeed");
+        assert!(!manager.all_ready());
+
+        manager.start_connector(
+            crate::tools::ToolRegistry::new(),
+            McpRuntimeConfig {
+                connect_timeout: std::time::Duration::from_secs(2),
+                stdio_concurrency: 1,
+                http_concurrency: 1,
+            },
+        );
+
+        let res =
+            tokio::time::timeout(std::time::Duration::from_secs(5), manager.await_settled()).await;
+        assert!(
+            res.is_ok(),
+            "await_settled didn't unblock after connector finished"
+        );
+        assert!(manager.all_ready());
+
+        let entry = manager.server_entry("quick-fail").expect("entry");
+        let state = entry.state().await;
+        assert!(
+            matches!(state, ServerState::Failed { .. }),
+            "expected Failed, got: {}",
+            state.label()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_one_timeout_marks_entry_failed() {
+        // A hung stdio process (`sleep 999`) forces `connect_server`'s
+        // initialize handshake to never complete. With a 50 ms timeout,
+        // `connect_one` must bail and mark the entry Failed.
+        let mut config = bare_server_config("hung");
+        config.transport = McpTransport::Stdio;
+        config.command = Some("/bin/sleep".to_string());
+        config.args = Some(vec!["999".to_string()]);
+        config.url = None;
+
+        let entry = Arc::new(ServerEntry {
+            server_name: "hung".to_string(),
+            config,
+            token_store: None,
+            client_context: McpClientContext::new(),
+            state: RwLock::new(ServerState::Pending),
+            reconnect_lock: Mutex::new(()),
+            instructions: OnceLock::new(),
+        });
+
+        connect_one(
+            Arc::clone(&entry),
+            crate::tools::ToolRegistry::new(),
+            None,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        let state = entry.state().await;
+        match state {
+            ServerState::Failed { error, .. } => {
+                assert!(
+                    error.contains("timed out"),
+                    "expected 'timed out' in Failed error, got: {}",
+                    error
+                );
+            }
+            other => panic!("expected Failed, got: {}", other.label()),
+        }
     }
 }

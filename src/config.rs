@@ -55,6 +55,17 @@ pub struct McpConfig {
     /// also unset the hardcoded fallback is `Write` — i.e. strict.
     pub default_permission: Option<String>,
     pub servers: Option<Vec<McpServerConfig>>,
+    /// When true (default), every turn is gated on all enabled MCP
+    /// servers being `Connected`. If any are not, the turn is rejected
+    /// with a shell-style error instead of sending the request.
+    pub strict: Option<bool>,
+    /// Per-turn cap on how long to wait for still-`Pending` MCP servers
+    /// to settle before applying the strict check. Default: 3.
+    pub grace_seconds: Option<u64>,
+    /// Per-server wrap around connect + `initialize` + `list_tools`.
+    /// A hung stdio spawn or slow HTTPS handshake can't stall the whole
+    /// fleet past this bound. Default: 30.
+    pub connect_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -97,6 +108,11 @@ pub struct McpServerConfig {
     /// Cap on the number of sampling calls this server may issue per agsh
     /// session. Only meaningful when `sampling = true`. Default: 10.
     pub sampling_limit: Option<u32>,
+    /// When true, this server is skipped at startup — no process is
+    /// spawned, no HTTP connect attempt is made. Lets users mute a
+    /// flaky or in-development server without removing the entry.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -215,6 +231,13 @@ pub struct ResolvedConfig {
     pub builtin_disabled_tools: Vec<String>,
     pub builtin_tool_permissions: HashMap<String, Permission>,
     pub input_style: nu_ansi_term::Style,
+    /// Per-turn MCP readiness gate. When true, a turn is rejected if
+    /// any enabled server isn't `Connected` after `mcp_grace`.
+    pub mcp_strict: bool,
+    /// First-turn await cap for still-connecting MCP servers.
+    pub mcp_grace: std::time::Duration,
+    /// Per-server connect+initialize timeout.
+    pub mcp_connect_timeout: std::time::Duration,
 }
 
 /// Default input style: bold, white-ish foreground, slate-blue background.
@@ -407,10 +430,23 @@ impl ResolvedConfig {
         let file_tools = config_file.tools.unwrap_or_default();
         // Destructure the [mcp] table into its two independent fields so
         // we don't have to re-open the config file later for resolution.
-        let (mcp_default_permission_str, mcp_servers) = match config_file.mcp {
-            Some(mcp) => (mcp.default_permission, mcp.servers.unwrap_or_default()),
-            None => (None, Vec::new()),
-        };
+        let (mcp_default_permission_str, mcp_servers, mcp_strict, mcp_grace, mcp_connect_timeout) =
+            match config_file.mcp {
+                Some(mcp) => (
+                    mcp.default_permission,
+                    mcp.servers.unwrap_or_default(),
+                    mcp.strict.unwrap_or(true),
+                    std::time::Duration::from_secs(mcp.grace_seconds.unwrap_or(3)),
+                    std::time::Duration::from_secs(mcp.connect_timeout_seconds.unwrap_or(30)),
+                ),
+                None => (
+                    None,
+                    Vec::new(),
+                    true,
+                    std::time::Duration::from_secs(3),
+                    std::time::Duration::from_secs(30),
+                ),
+            };
         let mcp_default_permission = match mcp_default_permission_str.as_deref() {
             Some(raw) => match raw.parse::<Permission>() {
                 Ok(permission) => Some(permission),
@@ -544,6 +580,9 @@ impl ResolvedConfig {
                 .as_deref()
                 .map(parse_input_style)
                 .unwrap_or_else(default_input_style),
+            mcp_strict,
+            mcp_grace,
+            mcp_connect_timeout,
         }
     }
 
@@ -625,6 +664,50 @@ fn resolve_auth_credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mcp_runtime_fields_parse() {
+        let toml_str = r#"
+[mcp]
+default_permission = "read"
+strict = false
+grace_seconds = 5
+connect_timeout_seconds = 60
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).expect("parse toml");
+        let mcp = config.mcp.expect("mcp present");
+        assert_eq!(mcp.strict, Some(false));
+        assert_eq!(mcp.grace_seconds, Some(5));
+        assert_eq!(mcp.connect_timeout_seconds, Some(60));
+    }
+
+    #[test]
+    fn test_mcp_server_disabled_parses() {
+        let toml_str = r#"
+[[mcp.servers]]
+name = "flaky"
+transport = "stdio"
+command = "npx"
+disabled = true
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).expect("parse toml");
+        let servers = config.mcp.unwrap().servers.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(servers[0].disabled);
+    }
+
+    #[test]
+    fn test_mcp_server_disabled_defaults_false() {
+        let toml_str = r#"
+[[mcp.servers]]
+name = "normal"
+transport = "stdio"
+command = "npx"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).expect("parse toml");
+        let servers = config.mcp.unwrap().servers.unwrap();
+        assert!(!servers[0].disabled);
+    }
 
     #[test]
     fn test_config_file_deserialization() {

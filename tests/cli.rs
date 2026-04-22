@@ -163,6 +163,76 @@ fn mcp_add_stdio_positional_command_and_args() {
 }
 
 #[test]
+fn mcp_disable_sets_disabled_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let add = run_isolated(
+        dir.path(),
+        &["mcp", "add", "flaky", "npx", "-y", "mcp-flaky"],
+    );
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let disable = run_isolated(dir.path(), &["mcp", "disable", "flaky"]);
+    assert!(
+        disable.status.success(),
+        "disable: {}",
+        String::from_utf8_lossy(&disable.stderr)
+    );
+
+    let config_path = dir.path().join("agsh").join("config.toml");
+    let toml_text = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_text.contains("disabled = true"),
+        "expected disabled = true in config, got:\n{}",
+        toml_text
+    );
+
+    let enable = run_isolated(dir.path(), &["mcp", "enable", "flaky"]);
+    assert!(
+        enable.status.success(),
+        "enable: {}",
+        String::from_utf8_lossy(&enable.stderr)
+    );
+    let toml_text = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        !toml_text.contains("disabled = true"),
+        "disabled flag should be cleared, got:\n{}",
+        toml_text
+    );
+}
+
+#[test]
+fn mcp_add_with_disabled_flag_persists() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = run_isolated(
+        dir.path(),
+        &[
+            "mcp",
+            "add",
+            "staging",
+            "https://mcp.example.com/mcp",
+            "--no-login",
+            "--disabled",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "add --disabled: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_path = dir.path().join("agsh").join("config.toml");
+    let toml_text = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_text.contains("disabled = true"),
+        "expected disabled = true from --disabled flag, got:\n{}",
+        toml_text
+    );
+}
+
+#[test]
 fn mcp_add_http_without_url_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_isolated(dir.path(), &["mcp", "add", "broken", "--transport", "http"]);
