@@ -47,7 +47,7 @@ Only fetch image URLs when the current model supports vision input — text-only
 
 ## `web_search`
 
-Search the web and return results. Supports multiple search engines.
+Search DuckDuckGo and return the top results.
 
 **Permission:** Read
 
@@ -56,21 +56,24 @@ Search the web and return results. Supports multiple search engines.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `query` | string | yes | The search query |
-| `engine` | string | no | Search engine to use (default: `duckduckgo`) |
-| `headers` | object | no | Custom HTTP headers |
+| `headers` | object | no | Custom HTTP headers (overrides defaults like `User-Agent`) |
 | `scratchpad` | string | no | Save output to the scratchpad under this name |
-
-### Search Engines
-
-| Value | Engine |
-|-------|--------|
-| `duckduckgo` | DuckDuckGo (default) |
-| `google` | Google Search |
-| `bing` | Bing Search |
 
 ### Behavior
 
 - Returns up to 10 results per search.
-- Each result includes the title, URL, and a snippet (when available).
-- Uses HTML scraping (no API keys required for any search engine).
+- Each result includes the title, source domain, URL, and a snippet with matched terms emphasised in **bold**.
+- Snippets are capped at 300 characters; use `fetch_url` on the result URL for the full page.
+- Uses HTML scraping (no API key required).
 - HTTP timeout: 30 seconds.
+
+### CAPTCHA detection
+
+DuckDuckGo occasionally serves a bot-challenge page instead of results (detected by the `anomaly-modal` element). `web_search` returns a distinct error so the agent doesn't silently retry:
+
+```
+DuckDuckGo served a CAPTCHA challenge (bot detection / rate limit).
+Retry later.
+```
+
+If this happens often in your environment, configure a search-capable MCP server — see the [MCP configuration examples](../configuration/config-file.md) for patterns that work well.

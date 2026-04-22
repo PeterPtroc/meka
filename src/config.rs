@@ -548,7 +548,7 @@ impl ResolvedConfig {
             show_session_id_on_exit: file_display.show_session_id_on_exit.unwrap_or(true),
             show_path_in_prompt: file_display.show_path_in_prompt.unwrap_or(true),
             user_agent: file_web.user_agent.unwrap_or_else(|| {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
                     .to_string()
             }),
             sandbox: file_shell.sandbox.unwrap_or(true),

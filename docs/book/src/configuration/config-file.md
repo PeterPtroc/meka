@@ -409,6 +409,16 @@ User-supplied config (1, 2, 4) always beats the server's self-classification —
 
 #### Examples
 
+**Exa** — reliable web search when the built-in DuckDuckGo scraper gets CAPTCHA'd. The free tier works without an API key; paste a key into the `headers` table for the paid tier:
+```bash
+# Free tier — no key required
+agsh mcp add exa https://mcp.exa.ai/mcp
+```
+```bash
+# Paid tier — expands from EXA_API_KEY at connect time
+agsh mcp add exa https://mcp.exa.ai/mcp --header "x-api-key=${EXA_API_KEY}"
+```
+
 Well-annotated server — no config needed. Every tool is classified by its own `readOnlyHint` (read tools Read, write tools Write):
 ```toml
 [[mcp.servers]]

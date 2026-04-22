@@ -14,12 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[[mcp.servers]].disabled` skips a server at startup without removing it from config.
 - `agsh mcp disable <name>` / `agsh mcp enable <name>` toggle the disabled flag in config.toml.
 - `agsh mcp add --disabled` stages a server without connecting to it on the next start.
+- `web_search` detects DuckDuckGo CAPTCHA pages and returns a clear error instead of silent empty.
 
 ### Changed
 
 - MCP servers connect in parallel in the background; REPL opens immediately, not after Σ(connect).
 - Default strict gate: turns abort when any enabled MCP server isn't connected.
 - `/mcp list` in the REPL shows live state (connected / pending / failed / disabled) per server.
+- `web_search` output: normalized whitespace, source-domain line, bold markdown on matched terms.
+
+### Removed
+
+- `web_search` Google and Bing engines (both consistently bot-blocked).
 
 ## [0.14.0] - 2026-04-20
 
