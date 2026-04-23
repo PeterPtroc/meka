@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- MCP tool namespace is now `mcp__<server>__<tool>` (was `<server>__<tool>`); matches Claude Code.
+
 ## [0.15.1] - 2026-04-22
 
 ### Changed
@@ -99,6 +105,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - System prompt and `body["tools"]` no longer depend on permission level; toggles keep the cache warm.
 - **Breaking**: MCP tools with no `readOnlyHint` and no `[mcp].default_permission` now require `Write`.
 
+### Fixed
+
+- `${VAR}` expansion for MCP config preserves multi-byte UTF-8 (previously corrupted non-ASCII).
+- MCP tools with an unserializable input schema are skipped with a warning.
+- OAuth-authenticated MCP transports now reconnect cleanly mid-session.
+- MCP `sampling/createMessage` has a 60 s provider timeout and refunds the sampling slot on error.
+- `agsh mcp remove` now clears that server's entries from the resource-update ledger.
+- `agsh mcp remove` now also best-effort revokes stored OAuth tokens at the provider (RFC 7009).
+- MCP auth-probe cache with `ttl = 0` now correctly treats every entry as stale.
+- rmcp's SSE-reconnect warning floored at `error` in default filter; CDN idle resets no longer spam.
+
 ### Security
 
 - MCP progress + elicitation strings sanitised before reaching the terminal; no ANSI/RTL spoofing.
@@ -114,30 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agsh mcp add`/`remove` writes config.toml atomically and chmods it 0600 (dir 0700) on Unix.
 - `agsh mcp add` propagates config-read errors instead of silently treating them as an empty file.
 
-### Fixed
-
-- `${VAR}` expansion for MCP config preserves multi-byte UTF-8 (previously corrupted non-ASCII).
-- MCP tools with an unserializable input schema are skipped with a warning.
-- OAuth-authenticated MCP transports now reconnect cleanly mid-session.
-- MCP `sampling/createMessage` has a 60 s provider timeout and refunds the sampling slot on error.
-- `agsh mcp remove` now clears that server's entries from the resource-update ledger.
-- `agsh mcp remove` now also best-effort revokes stored OAuth tokens at the provider (RFC 7009).
-- MCP auth-probe cache with `ttl = 0` now correctly treats every entry as stale.
-- rmcp's SSE-reconnect warning floored at `error` in default filter; CDN idle resets no longer spam.
-
 ## [0.12.0] - 2026-04-18
-
-### Security
-
-- File tools route I/O through the canonical path with `O_NOFOLLOW` on Unix, closing a symlink-swap TOCTOU.
-- `fetch_url` caps response body at 10 MiB to defend against gzip/brotli decompression bombs.
-- Session data dir, lock dir, and DB file are created 0700/0700/0600 on Unix regardless of umask.
-- Tool calls with unparseable JSON arguments are now rejected instead of silently run with `{}`.
-- Windows Low-integrity sandbox scrubs the child environment so provider API keys aren't inherited.
-- `execute_command` on Unix kills the whole process group on timeout so grandchildren can't outlive it.
-- LLM-supplied regex patterns are compiled with 1 MiB size/DFA limits to bound compile-time memory.
-- Tool indicators strip ANSI CSI escapes and C0 controls so commands can't spoof the permission prompt.
-- Permission enforcement now reads the shared permission atomically at the dispatch site.
 
 ### Added
 
@@ -161,6 +155,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `default_database_path` falls back to `$HOME/.local/share` and errors cleanly when unset.
 - Stuck sessions from PID-based locking surviving hard kills (resolved via OS file locks).
 - Windows sandbox normal-exit drain now times out after 5s instead of hanging on a grandchild.
+
+### Security
+
+- File tools route I/O through the canonical path with `O_NOFOLLOW` on Unix, closing a symlink-swap TOCTOU.
+- `fetch_url` caps response body at 10 MiB to defend against gzip/brotli decompression bombs.
+- Session data dir, lock dir, and DB file are created 0700/0700/0600 on Unix regardless of umask.
+- Tool calls with unparseable JSON arguments are now rejected instead of silently run with `{}`.
+- Windows Low-integrity sandbox scrubs the child environment so provider API keys aren't inherited.
+- `execute_command` on Unix kills the whole process group on timeout so grandchildren can't outlive it.
+- LLM-supplied regex patterns are compiled with 1 MiB size/DFA limits to bound compile-time memory.
+- Tool indicators strip ANSI CSI escapes and C0 controls so commands can't spoof the permission prompt.
+- Permission enforcement now reads the shared permission atomically at the dispatch site.
 
 ## [0.11.0] - 2026-04-17
 
@@ -383,15 +389,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.3] - 2026-03-18
 
+### Changed
+
+- Reduced `fetch_url` default `max_length` from 50000 to 30000.
+
 ### Fixed
 
 - User prompts are no longer recorded in history when the server returns an error.
 - The blank line after the agent's response is now printed even when an error occurs.
 - Partial assistant responses are now saved to history on Ctrl+C interrupt.
-
-### Changed
-
-- Reduced `fetch_url` default `max_length` from 50000 to 30000.
 
 ## [0.5.2] - 2026-03-17
 
@@ -401,11 +407,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.1] - 2026-03-17
 
-### Fixed
-
-- Claude OAuth requests failing with 400.
-- `urldecode` incorrectly handling multi-byte UTF-8 percent-encoded sequences.
-
 ### Changed
 
 - Generate dynamic billing header with content-based hashing for Claude OAuth requests.
@@ -414,6 +415,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced custom `ceil_char_boundary` utility with stdlib `str::ceil_char_boundary`.
 - Reuse a single `reqwest::Client` for web tools instead of constructing one per request.
 - Extracted duplicated timestamp calculation in Claude provider into a helper function.
+
+### Fixed
+
+- Claude OAuth requests failing with 400.
+- `urldecode` incorrectly handling multi-byte UTF-8 percent-encoded sequences.
 
 ## [0.5.0] - 2026-03-16
 

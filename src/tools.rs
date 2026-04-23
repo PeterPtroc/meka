@@ -215,13 +215,13 @@ impl ToolRegistry {
         Ok(())
     }
 
-    /// Replace every tool whose name starts with `<server_name>__` with the
-    /// supplied set. Used by `AgshClientHandler::on_tool_list_changed` to
+    /// Replace every tool whose name starts with `mcp__<server_name>__` with
+    /// the supplied set. Used by `AgshClientHandler::on_tool_list_changed` to
     /// hot-swap a server's tools without restarting the agent. Deferred
     /// markers for removed tool names are cleared so the registry's deferred
     /// set doesn't grow unbounded.
     pub fn replace_server_tools(&self, server_name: &str, new_tools: Vec<Arc<dyn Tool>>) {
-        let prefix = format!("{}__", server_name);
+        let prefix = format!("mcp__{}__", server_name);
         let mut tools = self.tools.write().expect("tools lock poisoned");
         let removed: Vec<String> = tools
             .iter()

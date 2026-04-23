@@ -86,8 +86,8 @@ fn is_format_char(code: u32) -> bool {
     )
 }
 
-/// Normalise a user-supplied MCP server name into the alphabet accepted as a
-/// prefix in tool names.
+/// Normalise a user-supplied MCP server name into the alphabet accepted as
+/// the `<server>` segment of a `mcp__<server>__<tool>` tool name.
 ///
 /// Any character outside `[A-Za-z0-9_-]` is replaced with `_`; runs of `_`
 /// are collapsed, and leading/trailing `_` are trimmed. Empty results are

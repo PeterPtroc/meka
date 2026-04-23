@@ -640,7 +640,7 @@ impl McpClientManager {
             }
 
             // Reject anything that would collide with agsh-internal names or
-            // our `<server>__<tool>` namespace separator.
+            // our `mcp__<server>__<tool>` namespace separator.
             if crate::mcp::sanitize::is_reserved_server_name(&config.name) {
                 return Err(AgshError::McpConnection {
                     server_name: config.name.clone(),
@@ -846,7 +846,7 @@ impl McpClientManager {
             // wild, but a server returning `my.tool` or anything with
             // Unicode would cause the provider to reject the schema.
             let sanitised_tool_name = crate::mcp::sanitize::normalize_server_name(&raw_tool_name);
-            let namespaced_name = format!("{}__{}", server_name, sanitised_tool_name);
+            let namespaced_name = format!("mcp__{}__{}", server_name, sanitised_tool_name);
 
             let raw_description = tool
                 .description
@@ -1278,7 +1278,7 @@ async fn build_mcp_adapters(
         }
 
         let sanitised_tool_name = crate::mcp::sanitize::normalize_server_name(&raw_tool_name);
-        let namespaced_name = format!("{}__{}", server_name, sanitised_tool_name);
+        let namespaced_name = format!("mcp__{}__{}", server_name, sanitised_tool_name);
 
         let raw_description = tool
             .description

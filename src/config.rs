@@ -88,7 +88,7 @@ pub struct McpServerConfig {
     pub auth: Option<McpAuthConfig>,
     pub permission: Option<String>,
     /// Optional allow-list of raw tool names (the server-advertised
-    /// form, not the `<server>__<tool>` namespaced form). When set and
+    /// form, not the `mcp__<server>__<tool>` namespaced form). When set and
     /// non-empty, only these tools from this server are registered.
     pub allowed_tools: Option<Vec<String>>,
     /// Optional block-list of raw tool names. Applied after
