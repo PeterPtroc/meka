@@ -28,7 +28,7 @@ pub(super) fn is_thinking_enabled(override_raw: i8, default: bool) -> bool {
     }
 }
 
-/// Convenience wrapper that loads the atomic with [`Ordering::Relaxed`] and
+/// Convenience wrapper that loads the atomic with relaxed ordering and
 /// applies [`is_thinking_enabled`]. Most callers want this form.
 pub(super) fn resolve_thinking_enabled(override_atomic: &AtomicI8, default: bool) -> bool {
     is_thinking_enabled(
