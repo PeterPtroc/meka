@@ -28,7 +28,7 @@ cargo install --locked --git https://github.com/k4yt3x/agsh.git
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-v1-..."
 model = "anthropic/claude-opus-4.6"

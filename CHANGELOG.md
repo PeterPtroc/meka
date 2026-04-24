@@ -7,9 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `[provider].effort` (claude-oauth): `output_config.effort` low/medium/high. Default high.
+- `[provider].redact_thinking` (claude-oauth): send `redact-thinking-2026-02-12`. Default false.
+- `[provider].device_id` (claude-oauth): override the persistent `metadata.user_id` device ID.
+
 ### Changed
 
-- MCP tool namespace is now `mcp__<server>__<tool>` (was `<server>__<tool>`); matches Claude Code.
+- MCP tool namespace is now `mcp__<server>__<tool>`; matches Claude Code.
+- Renamed provider `openai` → `openai-api` (room for a future Codex provider).
+- Split provider `claude` into `claude-api` (API key) and `claude-oauth` (Claude Code OAuth).
+- OAuth refresh tokens are preserved across the `claude` → `claude-oauth` rename.
+- `claude-api` reads `CLAUDE_API_KEY` (no longer reads `ANTHROPIC_API_KEY`).
+- `claude-oauth` wire format matches recent Claude Code (betas, context, fingerprint, cache, effort).
+- `device_id` is generated/persisted only when the active provider is `claude-oauth`.
+- `device_id` seeds from `~/.claude.json`'s `userID` when unset before generating a random one.
+- `src/mcp.rs` (4754 lines) split into `mcp::{auth, transport, connector, handler}` submodules.
+- `src/provider/claude/oauth.rs` (3286 lines) split into `oauth::attestation` + `claude::shared`.
+- `src/config.rs` device_id / effort / credential helpers grouped into private inline submodules.
+- `create_provider` replaced by `ProviderBuilder` (13 positional params → per-field setters).
+- `claude-oauth` error-path body reads log at `warn!` on IO failure instead of silent fallback.
+- MCP progress/elicitation sends log at `debug!` when the REPL receiver has been dropped.
+
+### Fixed
+
+- Missing `provider.name` errors with "no provider configured" before credential resolution.
+- Unsupported `provider.name` errors with the list of valid providers.
 
 ## [0.15.1] - 2026-04-22
 

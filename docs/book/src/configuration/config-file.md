@@ -16,7 +16,7 @@ Set the `AGSH_CONFIG_DIR` environment variable to override the default location 
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "gpt-4o"
 api_key = "sk-..."
 base_url = "https://api.openai.com/v1"
@@ -32,8 +32,9 @@ The LLM provider to use.
 
 | Value | Description |
 |-------|-------------|
-| `openai` | OpenAI Chat Completions API (also works with OpenAI-compatible APIs) |
-| `claude` | Claude API (Messages endpoint) |
+| `openai-api` | OpenAI Chat Completions API (also works with OpenAI-compatible APIs) |
+| `claude-api` | Claude Messages API with `x-api-key` auth |
+| `claude-oauth` | Claude Messages API via Claude Code OAuth (fingerprinting + attestation) |
 
 ### `provider.model`
 
@@ -49,7 +50,7 @@ The API key for authentication. It is recommended to use environment variables (
 
 ### `provider.oauth_token`
 
-OAuth access token for the Claude provider. Can also be set via `CLAUDE_OAUTH_TOKEN` env var. The token is saved to the database on first use and loaded automatically on subsequent launches.
+OAuth access token for the `claude-oauth` provider. Can also be set via `CLAUDE_OAUTH_TOKEN` env var. The token is saved to the database on first use and loaded automatically on subsequent launches.
 
 ### `provider.oauth_token_url`
 
@@ -65,8 +66,8 @@ Custom API base URL. Useful for:
 
 If not set, defaults to:
 
-- `https://api.openai.com/v1` for the `openai` provider
-- `https://api.anthropic.com` for the `claude` provider
+- `https://api.openai.com/v1` for the `openai-api` provider
+- `https://api.anthropic.com` for the `claude-api` and `claude-oauth` providers
 
 ### `provider.reasoning_effort`
 
@@ -79,32 +80,76 @@ Accepted values: `low`, `medium`, `high`. Omitted by default.
 reasoning_effort = "medium"
 ```
 
-## Examples
+### `provider.effort`
 
-### OpenAI
+`claude-oauth` only. Controls the `output_config.effort` field that the `effort-2025-11-24` beta unlocks for adaptive-thinking-capable models (`opus-4-6`, `sonnet-4-6`). Higher values give the model more time to think; the field is ignored on non-effort-capable models.
+
+Accepted values: `low`, `medium`, `high`. Defaults to `high`. Unrecognised values fall back to `high` and are logged at `warn`.
 
 ```toml
 [provider]
-name = "openai"
+effort = "medium"
+```
+
+### `provider.redact_thinking`
+
+`claude-oauth` only. When `true`, agsh sends the `redact-thinking-2026-02-12` beta header so the API returns `redacted_thinking` blocks instead of full thinking summaries — useful when you don't render thinking in the UI and want the smaller response. Defaults to `false` (full thinking summaries).
+
+Caveat: `redacted_thinking` blocks carry a signed payload that must be replayed verbatim on subsequent turns; agsh currently flattens them to `[redacted]` text on receipt, which means multi-turn conversations after enabling this flag may be rejected by the server. Treat as experimental.
+
+```toml
+[provider]
+redact_thinking = true
+```
+
+### `provider.device_id`
+
+`claude-oauth` only. Stable per-device identifier embedded in `metadata.user_id` to mirror Claude Code's `~/.claude.json` device ID (`getOrCreateUserID` in `utils/config.ts`).
+
+If unset, agsh first tries to adopt `userID` from `~/.claude.json` (so agsh and Claude Code on the same machine look like the same device). If that file is missing or has no `userID`, agsh generates a 64-character hex string. Either way, the resolved value is persisted back to this same config file under `[provider].device_id`. This file write only happens for the `claude-oauth` provider — other providers don't need a device ID.
+
+You can supply your own value if you want to control attribution explicitly:
+
+```toml
+[provider]
+device_id = "your-stable-id-here"
+```
+
+## Examples
+
+### OpenAI API
+
+```toml
+[provider]
+name = "openai-api"
 model = "gpt-4o"
 # API key via env: export OPENAI_API_KEY=sk-...
 ```
 
-### Claude
+### Claude API
 
 ```toml
 [provider]
-name = "claude"
+name = "claude-api"
 model = "claude-sonnet-4-20250514"
 # API key via env: export CLAUDE_API_KEY=sk-ant-api03-...
-# Or OAuth token via env: export CLAUDE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+### Claude OAuth
+
+```toml
+[provider]
+name = "claude-oauth"
+model = "claude-sonnet-4-20250514"
+# Run `agsh setup` to perform the OAuth login, or:
+# export CLAUDE_OAUTH_TOKEN=sk-ant-oat01-...
 ```
 
 ### Ollama (local)
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "llama3"
 api_key = "unused"
 base_url = "http://localhost:11434/v1"
@@ -114,7 +159,7 @@ base_url = "http://localhost:11434/v1"
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "anthropic/claude-sonnet-4-20250514"
 base_url = "https://openrouter.ai/api/v1"
 # API key via env: export OPENAI_API_KEY=sk-or-...
@@ -323,7 +368,7 @@ context_window = 200000
 
 ## `[thinking]`
 
-Settings for extended thinking (Claude provider only). Claude 4.6+ models use adaptive thinking automatically; older models use a fixed token budget.
+Settings for extended thinking (`claude-api` and `claude-oauth` providers). Claude 4.6+ models use adaptive thinking automatically; older models use a fixed token budget.
 
 ### `thinking.enabled`
 
@@ -437,7 +482,7 @@ User-supplied config (1, 2, 4) always beats the server's self-classification —
 
 **Stale config**: entries in `allowed_tools` / `disabled_tools` / `tool_permissions` that don't match any advertised tool get a `warn!` line at connect time. The server still connects; you just see a heads-up so you can clean up after the server renames a tool.
 
-**Visibility across levels**: the resolved permission doesn't hide a tool from the agent. Every registered tool is listed in the system prompt with its required level noted inline, and a per-turn `[Permission context]` block names the current level plus any tools it blocks. The agent can still reason about an inaccessible tool and suggest `/permission <level>` to enable it; the permission gate is enforced at dispatch time. Keeping the tool catalogue visible across levels is also what lets the Anthropic prompt cache survive mid-session permission toggles.
+**Visibility across levels**: the resolved permission doesn't hide a tool from the agent. Every registered tool is listed in the system prompt with its required level noted inline, and a per-turn `[Permission context]` block names the current level plus any tools it blocks. The agent can still reason about an inaccessible tool and suggest `/permission <level>` to enable it; the permission gate is enforced at dispatch time. Keeping the tool catalogue visible across levels is also what lets the Claude prompt cache survive mid-session permission toggles.
 
 #### Examples
 

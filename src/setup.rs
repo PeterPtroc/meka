@@ -140,10 +140,18 @@ fn prompt_choice(prompt: &str, options: &[&str]) -> io::Result<usize> {
 pub async fn run_setup(token_store: &TokenStore) -> anyhow::Result<()> {
     println!("Welcome to agsh! Let's set up your configuration.\n");
 
-    let provider_index = prompt_choice("Select a provider:", &["claude", "openai"])?;
+    let provider_index = prompt_choice(
+        "Select a provider:",
+        &[
+            "claude-oauth (Claude Code OAuth login)",
+            "claude-api (Claude API key)",
+            "openai-api (OpenAI API key)",
+        ],
+    )?;
     let provider_name = match provider_index {
-        0 => "claude",
-        _ => "openai",
+        0 => "claude-oauth",
+        1 => "claude-api",
+        _ => "openai-api",
     };
 
     println!();
@@ -151,22 +159,15 @@ pub async fn run_setup(token_store: &TokenStore) -> anyhow::Result<()> {
     let mut api_key: Option<String> = None;
 
     match provider_name {
-        "claude" => {
-            let auth_index = prompt_choice("Authentication method:", &["OAuth login", "API key"])?;
-            println!();
-
-            match auth_index {
-                0 => {
-                    run_oauth_login(token_store).await?;
-                }
-                _ => {
-                    let key = prompt_line("Enter your Claude API key: ")?;
-                    if key.is_empty() {
-                        anyhow::bail!("API key cannot be empty");
-                    }
-                    api_key = Some(key);
-                }
+        "claude-oauth" => {
+            run_oauth_login(token_store).await?;
+        }
+        "claude-api" => {
+            let key = prompt_line("Enter your Claude API key: ")?;
+            if key.is_empty() {
+                anyhow::bail!("API key cannot be empty");
             }
+            api_key = Some(key);
         }
         _ => {
             let key = prompt_line("Enter your OpenAI API key: ")?;

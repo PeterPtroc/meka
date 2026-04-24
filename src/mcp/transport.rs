@@ -1,0 +1,222 @@
+//! Transport construction helpers for MCP: building stdio child commands
+//! and the streamable-HTTP transport config (headers, auth tokens, dynamic
+//! header helpers).
+
+use tokio::process::Command;
+
+use crate::config::McpServerConfig;
+use crate::error::{AgshError, Result};
+
+/// Build a [`Command`] for a stdio MCP server, wrapping shell shims in
+/// `cmd /c` on Windows so `npx`, `*.cmd`, and `*.bat` executables can be
+/// launched directly as a command string. Unix paths pass through unchanged.
+pub fn build_stdio_command(command_str: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        let lower = command_str.to_ascii_lowercase();
+        let is_shim = lower == "npx"
+            || lower == "yarn"
+            || lower == "pnpm"
+            || lower.ends_with(".cmd")
+            || lower.ends_with(".bat")
+            || lower.ends_with(".ps1");
+        if is_shim {
+            // `cmd /c <command> <args...>` — Windows wraps argument quoting.
+            // We don't try to shell-quote the args; the `Command` API does
+            // the OS-appropriate escaping via CreateProcess's lpCommandLine.
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/c").arg(command_str).args(args);
+            return cmd;
+        }
+    }
+    let _ = (command_str, args);
+    let mut cmd = Command::new(command_str);
+    cmd.args(args);
+    cmd
+}
+
+/// Build the shared HTTP transport config (URL, bearer token, custom headers)
+/// used by both the auth and no-auth paths.
+pub(super) fn build_http_transport_config(
+    server_name: &str,
+    config: &McpServerConfig,
+) -> Result<rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig> {
+    let url = config
+        .url
+        .as_deref()
+        .ok_or_else(|| AgshError::McpConnection {
+            server_name: server_name.to_string(),
+            message: "http transport requires 'url' field".to_string(),
+        })?;
+
+    let mut transport_config =
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+
+    if let Some(token) = &config.auth_token {
+        transport_config = transport_config.auth_header(token.clone());
+    }
+
+    // Merge dynamic headers from the optional `headers_helper` script on
+    // top of the static `headers` map (dynamic values override static ones).
+    let mut merged_headers: std::collections::HashMap<String, String> =
+        config.headers.clone().unwrap_or_default();
+    if let Some(script) = &config.headers_helper {
+        let dynamic = run_headers_helper(server_name, url, script)?;
+        merged_headers.extend(dynamic);
+    }
+
+    if !merged_headers.is_empty() {
+        let mut header_map = std::collections::HashMap::new();
+        for (key, value) in &merged_headers {
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
+                    AgshError::McpConnection {
+                        server_name: server_name.to_string(),
+                        message: format!("invalid header name '{}': {}", key, error),
+                    }
+                })?;
+            let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                AgshError::McpConnection {
+                    server_name: server_name.to_string(),
+                    message: format!("invalid header value for '{}': {}", key, error),
+                }
+            })?;
+            header_map.insert(header_name, header_value);
+        }
+        transport_config = transport_config.custom_headers(header_map);
+    }
+
+    Ok(transport_config)
+}
+
+/// Execute `headers_helper` and parse its stdout as an `Name: Value\n`
+/// stream, returning a map merged into the HTTP transport's custom headers.
+///
+/// The script is spawned synchronously (it's a startup-path helper, not
+/// called per-request) with a 15-second wall-clock timeout. `AGSH_MCP_SERVER_NAME`
+/// and `AGSH_MCP_SERVER_URL` are injected so one helper can serve multiple
+/// servers.
+fn run_headers_helper(
+    server_name: &str,
+    url: &str,
+    script: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use std::process::Stdio;
+    let err_ctx = |msg: String| AgshError::McpConnection {
+        server_name: server_name.to_string(),
+        message: msg,
+    };
+
+    // Resolve the script path. If it's relative and doesn't exist as-is,
+    // try resolving against the agsh config directory for safety (same place
+    // config.toml lives).
+    let script_path = std::path::Path::new(script);
+    let resolved: std::path::PathBuf = if script_path.is_absolute() || script_path.exists() {
+        script_path.to_path_buf()
+    } else if let Some(config_dir) = crate::config::agsh_config_dir() {
+        let candidate = config_dir.join(script);
+        if candidate.exists() {
+            candidate
+        } else {
+            script_path.to_path_buf()
+        }
+    } else {
+        script_path.to_path_buf()
+    };
+
+    let mut command = std::process::Command::new(&resolved);
+    command
+        .env("AGSH_MCP_SERVER_NAME", server_name)
+        .env("AGSH_MCP_SERVER_URL", url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        err_ctx(format!(
+            "headers_helper '{}' spawn failed: {}",
+            script, error
+        ))
+    })?;
+
+    // Poll for exit with a 15-second budget. std::process::Child doesn't
+    // expose a blocking wait_timeout, so loop on try_wait with a short sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return Err(err_ctx(format!(
+                        "headers_helper '{}' timed out after 15s",
+                        script
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(err_ctx(format!(
+                    "headers_helper '{}' wait failed: {}",
+                    script, error
+                )));
+            }
+        }
+    };
+
+    // Caps on how much helper output we're willing to buffer. stdout is the
+    // header list (rarely more than a few KiB); stderr is surfaced verbatim
+    // in the error message so keep it tight.
+    const MAX_HELPER_STDOUT_BYTES: u64 = 64 * 1024;
+    const MAX_HELPER_STDERR_BYTES: u64 = 4 * 1024;
+
+    if !status.success() {
+        let mut stderr_buf = Vec::new();
+        if let Some(stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr
+                .take(MAX_HELPER_STDERR_BYTES)
+                .read_to_end(&mut stderr_buf);
+        }
+        let stderr_text = String::from_utf8_lossy(&stderr_buf);
+        return Err(err_ctx(format!(
+            "headers_helper '{}' exited with status {}: {}",
+            script,
+            status.code().unwrap_or(-1),
+            stderr_text.trim()
+        )));
+    }
+
+    let mut stdout_buf = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        use std::io::Read;
+        pipe.take(MAX_HELPER_STDOUT_BYTES)
+            .read_to_end(&mut stdout_buf)
+            .map_err(|error| {
+                err_ctx(format!(
+                    "headers_helper '{}' stdout read failed: {}",
+                    script, error
+                ))
+            })?;
+    }
+    let stdout = String::from_utf8_lossy(&stdout_buf);
+
+    parse_header_lines(&stdout)
+        .map_err(|msg| err_ctx(format!("headers_helper '{}' output: {}", script, msg)))
+}
+
+fn parse_header_lines(
+    text: &str,
+) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+    let mut out = std::collections::HashMap::new();
+    for (line_no, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| format!("line {} missing ':' separator", line_no + 1))?;
+        out.insert(name.trim().to_string(), value.trim().to_string());
+    }
+    Ok(out)
+}

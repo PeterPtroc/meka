@@ -87,10 +87,10 @@ Default: `read`.
 Set the LLM provider. Overrides `AGSH_PROVIDER` and the config file.
 
 ```bash
-agsh --provider claude
+agsh --provider claude-oauth
 ```
 
-Supported values: `openai`, `claude`.
+Supported values: `openai-api`, `claude-api`, `claude-oauth`.
 
 ### `-m`, `--model <MODEL>`
 
@@ -132,7 +132,7 @@ Can also be set permanently via `display.render_mode` in the config file.
 
 ### `--thinking`
 
-Enable extended thinking (Claude provider only).
+Enable extended thinking (`claude-api` and `claude-oauth` providers).
 
 ```bash
 agsh --thinking

@@ -15,10 +15,12 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{AgshError, Result};
 use crate::session::TokenStore;
 
-pub use claude::ClaudeProvider;
+pub use claude::{ClaudeApiProvider, ClaudeOAuthProvider};
 pub use openai::OpenAiProvider;
 
 pub(crate) const DEFAULT_CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+pub const SUPPORTED_PROVIDERS: &[&str] = &["openai-api", "claude-api", "claude-oauth"];
 
 #[derive(Debug, Clone)]
 pub enum AuthCredential {
@@ -37,18 +39,6 @@ impl AuthCredential {
             AuthCredential::OAuthToken { access_token, .. } => {
                 ("Authorization", format!("Bearer {}", access_token))
             }
-        }
-    }
-
-    pub fn from_token_string(token: String) -> Self {
-        if token.starts_with("sk-ant-oat01-") {
-            AuthCredential::OAuthToken {
-                access_token: token,
-                refresh_token: None,
-                expires_at: None,
-            }
-        } else {
-            AuthCredential::ApiKey(token)
         }
     }
 }
@@ -353,9 +343,14 @@ fn finalize_tool_call_accumulators(
     has_tools
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn create_provider(
-    provider_name: &str,
+/// Constructs a concrete [`Provider`] (Claude API, Claude OAuth, or
+/// OpenAI-compatible) from a bag of provider-specific settings. Each
+/// setter documents which provider(s) consume it; unused settings are
+/// silently ignored by providers that don't need them. The only
+/// required inputs are the provider name, the credential, and the
+/// model — everything else has a sensible default.
+pub struct ProviderBuilder {
+    provider_name: String,
     credential: AuthCredential,
     model: String,
     base_url: Option<String>,
@@ -365,34 +360,154 @@ pub fn create_provider(
     thinking_enabled: bool,
     thinking_budget_tokens: u64,
     reasoning_effort: Option<String>,
-) -> Result<Arc<dyn Provider>> {
-    match provider_name {
-        "openai" => {
-            let api_key = match credential {
-                AuthCredential::ApiKey(key) => key,
-                AuthCredential::OAuthToken { access_token, .. } => access_token,
-            };
-            Ok(Arc::new(OpenAiProvider::new(
-                api_key,
-                model,
-                base_url,
-                reasoning_effort,
-            )))
-        }
-        "claude" => Ok(Arc::new(ClaudeProvider::new(
+    device_id: String,
+    effort: String,
+    redact_thinking: bool,
+}
+
+impl ProviderBuilder {
+    pub fn new(
+        provider_name: impl Into<String>,
+        credential: AuthCredential,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider_name: provider_name.into(),
             credential,
-            model,
-            base_url,
-            client_id,
-            oauth_token_url,
-            token_store,
-            thinking_enabled,
-            thinking_budget_tokens,
-        ))),
-        other => Err(AgshError::Config(format!(
-            "unknown provider: '{}'. Supported providers: openai, claude",
-            other
-        ))),
+            model: model.into(),
+            base_url: None,
+            client_id: None,
+            oauth_token_url: None,
+            token_store: None,
+            thinking_enabled: false,
+            thinking_budget_tokens: 0,
+            reasoning_effort: None,
+            device_id: String::new(),
+            effort: "high".to_string(),
+            redact_thinking: false,
+        }
+    }
+
+    /// Override the HTTP endpoint. Applies to every provider variant;
+    /// defaults to the Claude or OpenAI production URL.
+    pub fn base_url(mut self, value: Option<String>) -> Self {
+        self.base_url = value;
+        self
+    }
+
+    /// OAuth client ID. Only consumed by `claude-oauth`.
+    pub fn client_id(mut self, value: Option<String>) -> Self {
+        self.client_id = value;
+        self
+    }
+
+    /// OAuth token endpoint. Only consumed by `claude-oauth`.
+    pub fn oauth_token_url(mut self, value: Option<String>) -> Self {
+        self.oauth_token_url = value;
+        self
+    }
+
+    /// Sink for refreshed OAuth tokens. Only consumed by `claude-oauth`;
+    /// when `None`, refreshed tokens are held in memory only.
+    pub fn token_store(mut self, value: Option<Arc<TokenStore>>) -> Self {
+        self.token_store = value;
+        self
+    }
+
+    /// Claude-only: turn on extended thinking with the given budget cap.
+    /// Ignored by `openai-api`.
+    pub fn thinking(mut self, enabled: bool, budget_tokens: u64) -> Self {
+        self.thinking_enabled = enabled;
+        self.thinking_budget_tokens = budget_tokens;
+        self
+    }
+
+    /// OpenAI-only: maps to `reasoning.effort` for reasoning models.
+    pub fn reasoning_effort(mut self, value: Option<String>) -> Self {
+        self.reasoning_effort = value;
+        self
+    }
+
+    /// Stable device identity embedded in `metadata.user_id`. Only
+    /// consumed by `claude-oauth`.
+    pub fn device_id(mut self, value: String) -> Self {
+        self.device_id = value;
+        self
+    }
+
+    /// Claude Code `output_config.effort` (`low` / `medium` / `high`).
+    /// Only consumed by `claude-oauth`.
+    pub fn effort(mut self, value: String) -> Self {
+        self.effort = value;
+        self
+    }
+
+    /// Request `redacted_thinking` blocks. Only consumed by `claude-oauth`.
+    pub fn redact_thinking(mut self, value: bool) -> Self {
+        self.redact_thinking = value;
+        self
+    }
+
+    pub fn build(self) -> Result<Arc<dyn Provider>> {
+        match self.provider_name.as_str() {
+            "openai-api" => {
+                let api_key = match self.credential {
+                    AuthCredential::ApiKey(key) => key,
+                    AuthCredential::OAuthToken { access_token, .. } => access_token,
+                };
+                Ok(Arc::new(OpenAiProvider::new(
+                    api_key,
+                    self.model,
+                    self.base_url,
+                    self.reasoning_effort,
+                )))
+            }
+            "claude-api" => {
+                let api_key = match self.credential {
+                    AuthCredential::ApiKey(key) => key,
+                    AuthCredential::OAuthToken { .. } => {
+                        return Err(AgshError::Config(
+                            "provider 'claude-api' requires an API key, not an OAuth token. \
+                             Use 'claude-oauth' for Claude Code OAuth."
+                                .to_string(),
+                        ));
+                    }
+                };
+                Ok(Arc::new(ClaudeApiProvider::new(
+                    api_key,
+                    self.model,
+                    self.base_url,
+                    self.thinking_enabled,
+                    self.thinking_budget_tokens,
+                )))
+            }
+            "claude-oauth" => {
+                if matches!(self.credential, AuthCredential::ApiKey(_)) {
+                    return Err(AgshError::Config(
+                        "provider 'claude-oauth' requires an OAuth token, not an API key. \
+                         Use 'claude-api' for direct API access."
+                            .to_string(),
+                    ));
+                }
+                Ok(Arc::new(ClaudeOAuthProvider::new(
+                    self.credential,
+                    self.model,
+                    self.base_url,
+                    self.client_id,
+                    self.oauth_token_url,
+                    self.token_store,
+                    self.thinking_enabled,
+                    self.thinking_budget_tokens,
+                    self.device_id,
+                    self.effort,
+                    self.redact_thinking,
+                )))
+            }
+            other => Err(AgshError::Config(format!(
+                "unknown provider: '{}'. Supported providers: openai-api, claude-api, claude-oauth",
+                other
+            ))),
+        }
     }
 }
 
@@ -542,66 +657,80 @@ mod tests {
     }
 
     #[test]
-    fn test_create_provider_openai() {
-        let result = create_provider(
-            "openai",
+    fn test_create_provider_openai_api() {
+        let result = ProviderBuilder::new(
+            "openai-api",
             AuthCredential::ApiKey("key".to_string()),
-            "gpt-4o".to_string(),
-            None,
-            None,
-            None,
-            None,
-            false,
-            10000,
-            None,
-        );
+            "gpt-4o",
+        )
+        .device_id("a".repeat(64))
+        .build();
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_create_provider_claude() {
-        let result = create_provider(
-            "claude",
+    fn test_create_provider_claude_api() {
+        let result = ProviderBuilder::new(
+            "claude-api",
             AuthCredential::ApiKey("key".to_string()),
-            "claude-sonnet-4-20250514".to_string(),
-            None,
-            None,
-            None,
-            None,
-            false,
-            10000,
-            None,
-        );
+            "claude-sonnet-4-20250514",
+        )
+        .thinking(false, 10000)
+        .build();
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_create_provider_unknown() {
-        let result = create_provider(
-            "unknown",
-            AuthCredential::ApiKey("key".to_string()),
-            "model".to_string(),
-            None,
-            None,
-            None,
-            None,
-            false,
-            10000,
-            None,
-        );
+    fn test_create_provider_claude_oauth() {
+        let result = ProviderBuilder::new(
+            "claude-oauth",
+            AuthCredential::OAuthToken {
+                access_token: "sk-ant-oat01-test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
+            "claude-sonnet-4-20250514",
+        )
+        .device_id("a".repeat(64))
+        .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_provider_claude_api_rejects_oauth_token() {
+        let result = ProviderBuilder::new(
+            "claude-api",
+            AuthCredential::OAuthToken {
+                access_token: "sk-ant-oat01-test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
+            "claude-sonnet-4-20250514",
+        )
+        .build();
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_auth_credential_from_token_string_api_key() {
-        let credential = AuthCredential::from_token_string("sk-ant-api03-test".to_string());
-        assert!(matches!(credential, AuthCredential::ApiKey(_)));
+    fn test_create_provider_claude_oauth_rejects_api_key() {
+        let result = ProviderBuilder::new(
+            "claude-oauth",
+            AuthCredential::ApiKey("sk-ant-api03-test".to_string()),
+            "claude-sonnet-4-20250514",
+        )
+        .build();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_auth_credential_from_token_string_oauth() {
-        let credential = AuthCredential::from_token_string("sk-ant-oat01-test".to_string());
-        assert!(matches!(credential, AuthCredential::OAuthToken { .. }));
+    fn test_create_provider_unknown() {
+        let result = ProviderBuilder::new(
+            "unknown",
+            AuthCredential::ApiKey("key".to_string()),
+            "model",
+        )
+        .build();
+        assert!(result.is_err());
     }
 
     #[test]

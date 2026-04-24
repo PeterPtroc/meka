@@ -14,13 +14,13 @@ Instead of remembering `find . -name '*.rs' | xargs wc -l`, you describe what yo
 - **Built-in tools** -- file read/write/edit, glob search, regex content search (ripgrep), web fetch, web search, shell command execution
 - **Scratchpad** -- session-scoped working memory for the agent to store and retrieve intermediate results
 - **Sub-agents** -- delegate research tasks to read-only sub-agents
-- **Multiple LLM providers** -- OpenAI and Claude, with support for any OpenAI-compatible API
+- **Multiple LLM providers** -- OpenAI API, Claude API, and Claude OAuth (Claude Code subscription), with support for any OpenAI-compatible endpoint
 - **MCP support** -- extend the agent with tools from external MCP servers
 - **Permission system** -- control what the agent can do (none/read/ask/write), switchable mid-session
 - **Session management** -- conversations are persisted in SQLite; resume, export, or compact any session
 - **Streaming output** -- responses stream to the terminal in real time with syntax highlighting
 - **Interactive and one-shot modes** -- use it as a REPL or pipe a single prompt
-- **Extended thinking** -- Claude provider supports extended thinking for complex reasoning
+- **Extended thinking** -- `claude-api` and `claude-oauth` support extended thinking for complex reasoning
 
 ## How It Works
 

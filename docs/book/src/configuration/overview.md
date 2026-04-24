@@ -4,7 +4,7 @@ The recommended way to configure agsh is with a config file at `~/.config/agsh/c
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "gpt-4o"
 api_key = "sk-..."
 ```
@@ -36,7 +36,8 @@ For example, `--model gpt-4o-mini` on the command line overrides both `AGSH_MODE
 
 The API key environment variable depends on the configured provider:
 
-- Provider `openai`: reads `OPENAI_API_KEY`
-- Provider `claude`: reads `CLAUDE_API_KEY` (or `CLAUDE_OAUTH_TOKEN` for OAuth)
+- Provider `openai-api`: reads `OPENAI_API_KEY`
+- Provider `claude-api`: reads `CLAUDE_API_KEY`
+- Provider `claude-oauth`: reads `CLAUDE_OAUTH_TOKEN`, otherwise loads the OAuth token saved by `agsh setup`
 
-If the environment variable is not set, it falls back to `provider.api_key` in the config file.
+If the environment variable is not set, it falls back to `provider.api_key` (or `provider.oauth_token` for `claude-oauth`) in the config file.

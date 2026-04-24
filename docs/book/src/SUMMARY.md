@@ -25,8 +25,9 @@
 # Providers
 
 - [Overview](./providers/overview.md)
-- [OpenAI](./providers/openai.md)
-- [Claude](./providers/claude.md)
+- [OpenAI API](./providers/openai-api.md)
+- [Claude API](./providers/claude-api.md)
+- [Claude OAuth](./providers/claude-oauth.md)
 
 # Tools
 

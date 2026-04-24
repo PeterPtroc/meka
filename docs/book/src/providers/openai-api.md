@@ -1,12 +1,12 @@
-# OpenAI Provider
+# OpenAI API Provider
 
-The OpenAI provider uses the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). It also works with any OpenAI-compatible API endpoint.
+The `openai-api` provider uses the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). It also works with any OpenAI-compatible API endpoint (Ollama, vLLM, OpenRouter, etc.).
 
 ## Configuration
 
 | Setting | Value |
 |---------|-------|
-| Provider name | `openai` |
+| Provider name | `openai-api` |
 | Default base URL | `https://api.openai.com/v1` |
 | API key env var | `OPENAI_API_KEY` |
 | Auth method | Bearer token (`Authorization: Bearer <key>`) |
@@ -14,7 +14,7 @@ The OpenAI provider uses the [Chat Completions API](https://platform.openai.com/
 ### Minimal Setup
 
 ```bash
-export AGSH_PROVIDER=openai
+export AGSH_PROVIDER=openai-api
 export AGSH_MODEL=gpt-4o
 export OPENAI_API_KEY=sk-...
 agsh
@@ -24,7 +24,7 @@ agsh
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "gpt-4o"
 ```
 
@@ -43,17 +43,17 @@ To use an OpenAI-compatible endpoint, set the base URL:
 
 ```bash
 # Ollama
-agsh --provider openai --model llama3 --base-url http://localhost:11434/v1
+agsh --provider openai-api --model llama3 --base-url http://localhost:11434/v1
 
 # OpenRouter
-agsh --provider openai --model anthropic/claude-sonnet-4-20250514 --base-url https://openrouter.ai/api/v1
+agsh --provider openai-api --model anthropic/claude-sonnet-4-20250514 --base-url https://openrouter.ai/api/v1
 ```
 
 Or in the config file:
 
 ```toml
 [provider]
-name = "openai"
+name = "openai-api"
 model = "llama3"
 api_key = "unused"
 base_url = "http://localhost:11434/v1"

@@ -335,6 +335,17 @@ pub struct ProviderConfig {
     pub oauth_token_url: Option<String>,
     pub base_url: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub device_id: Option<String>,
+    /// `claude-oauth` only: value emitted as `output_config.effort`. Mirrors
+    /// Claude Code's effort knob — see `temp/claude-code/src/utils/effort.ts`.
+    /// Accepted values: `"low" | "medium" | "high"`. Defaults to `"high"`.
+    pub effort: Option<String>,
+    /// `claude-oauth` only: when true, agsh sends the
+    /// `redact-thinking-2026-02-12` beta header so the server returns
+    /// `redacted_thinking` blocks instead of full thinking summaries
+    /// (saves bandwidth, but the redacted payloads can't be replayed back
+    /// to the server in multi-turn conversations). Defaults to false.
+    pub redact_thinking: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -364,6 +375,16 @@ pub struct ResolvedConfig {
     pub thinking_budget_tokens: u64,
     pub thinking_show_content: bool,
     pub reasoning_effort: Option<String>,
+    /// Stable per-device identifier for `claude-oauth`'s `metadata.user_id`.
+    /// Empty string for non-`claude-oauth` providers (the value is ignored
+    /// downstream).
+    pub device_id: String,
+    /// `claude-oauth` `output_config.effort` value. Always one of
+    /// `"low" | "medium" | "high"` after `validate()`. Default `"high"`.
+    pub effort: String,
+    /// `claude-oauth`: when true, request `redacted_thinking` blocks via
+    /// `redact-thinking-2026-02-12` beta. Default false.
+    pub redact_thinking: bool,
     pub auto_compact: bool,
     pub context_window: Option<u64>,
     pub mcp_servers: Vec<McpServerConfig>,
@@ -660,7 +681,7 @@ impl ResolvedConfig {
             .or_else(|| std::env::var("AGSH_MODEL").ok())
             .or_else(|| file_provider.model.clone());
 
-        let auth_credential = resolve_auth_credential(provider_name.as_deref(), &file_provider);
+        let auth_credential = credential::resolve(provider_name.as_deref(), &file_provider);
 
         let base_url = cli
             .base_url
@@ -676,6 +697,14 @@ impl ResolvedConfig {
                     .and_then(|s| s.parse().ok())
             })
             .unwrap_or(Permission::Read);
+
+        // Compute device_id before the struct literal so we can borrow
+        // `provider_name` here without conflicting with the `provider_name`
+        // field move below.
+        let device_id =
+            device_id::resolve(provider_name.as_deref(), file_provider.device_id.as_deref());
+        let effort = effort::resolve(file_provider.effort.as_deref());
+        let redact_thinking = file_provider.redact_thinking.unwrap_or(false);
 
         Self {
             provider_name,
@@ -710,6 +739,9 @@ impl ResolvedConfig {
                 .unwrap_or_else(|| file_thinking.budget_tokens.unwrap_or(16_000)),
             thinking_show_content: file_thinking.show_content.unwrap_or(false),
             reasoning_effort: file_provider.reasoning_effort.clone(),
+            device_id,
+            effort,
+            redact_thinking,
             auto_compact: file_session.auto_compact.unwrap_or(true),
             context_window: file_session.context_window,
             mcp_servers,
@@ -730,12 +762,23 @@ impl ResolvedConfig {
     }
 
     pub fn validate(&self) -> crate::error::Result<()> {
-        if self.provider_name.is_none() {
-            return Err(crate::error::AgshError::Config(
-                "no provider configured. Set --provider, AGSH_PROVIDER env var, \
-                 or provider.name in config file (~/.config/agsh/config.toml)"
-                    .to_string(),
-            ));
+        match self.provider_name.as_deref() {
+            None => {
+                return Err(crate::error::AgshError::Config(format!(
+                    "no provider configured. Set --provider, AGSH_PROVIDER env var, or \
+                     provider.name in config file (~/.config/agsh/config.toml). Supported \
+                     providers: {}",
+                    crate::provider::SUPPORTED_PROVIDERS.join(", "),
+                )));
+            }
+            Some(name) if !crate::provider::SUPPORTED_PROVIDERS.contains(&name) => {
+                return Err(crate::error::AgshError::Config(format!(
+                    "'{}' is not a valid provider. Supported providers: {}",
+                    name,
+                    crate::provider::SUPPORTED_PROVIDERS.join(", "),
+                )));
+            }
+            Some(_) => {}
         }
         if self.model.is_none() {
             return Err(crate::error::AgshError::Config(
@@ -762,44 +805,160 @@ pub fn context_window_for_model(model: &str) -> u64 {
     }
 }
 
-fn resolve_auth_credential(
-    provider_name: Option<&str>,
-    file_provider: &ProviderConfig,
-) -> Option<AuthCredential> {
-    match provider_name {
-        Some("claude") => {
-            // 1. CLAUDE_API_KEY env var (auto-detects OAuth vs API key by prefix)
-            if let Ok(key) = std::env::var("CLAUDE_API_KEY") {
-                return Some(AuthCredential::from_token_string(key));
-            }
-            // 2. CLAUDE_OAUTH_TOKEN env var (always treated as OAuth)
-            if let Ok(token) = std::env::var("CLAUDE_OAUTH_TOKEN") {
-                return Some(AuthCredential::OAuthToken {
-                    access_token: token,
-                    refresh_token: None,
-                    expires_at: None,
-                });
-            }
-            // 3. provider.api_key from config (auto-detects)
-            if let Some(key) = &file_provider.api_key {
-                return Some(AuthCredential::from_token_string(key.clone()));
-            }
-            // 4. provider.oauth_token from config
-            if let Some(token) = &file_provider.oauth_token {
-                return Some(AuthCredential::OAuthToken {
-                    access_token: token.clone(),
-                    refresh_token: None,
-                    expires_at: None,
-                });
-            }
-            // Database fallback happens in main.rs
-            None
+/// Stable per-device identity for `claude-oauth` (embedded in
+/// `metadata.user_id`). Other providers get an empty string — we don't
+/// write a stub config file just to hold an unused value.
+mod device_id {
+    use std::path::Path;
+
+    use super::{config_file_path, write_config_atomic};
+
+    /// Lookup order: configured → persisted → Claude Code's `~/.claude.json`
+    /// userID → freshly generated. The claude.json fallback lets agsh and
+    /// Claude Code on the same machine share a device identity.
+    pub(super) fn resolve(provider_name: Option<&str>, configured: Option<&str>) -> String {
+        if provider_name != Some("claude-oauth") {
+            return String::new();
         }
-        _ => {
-            let key = std::env::var("OPENAI_API_KEY")
-                .ok()
-                .or_else(|| file_provider.api_key.clone())?;
-            Some(AuthCredential::ApiKey(key))
+
+        if let Some(id) = configured
+            && !id.is_empty()
+        {
+            return id.to_string();
+        }
+
+        let path = match config_file_path() {
+            Some(path) => path,
+            None => return read_claude_code_user_id().unwrap_or_else(generate),
+        };
+
+        if let Ok(contents) = std::fs::read_to_string(&path)
+            && let Ok(doc) = contents.parse::<toml_edit::DocumentMut>()
+            && let Some(id) = doc
+                .get("provider")
+                .and_then(|t| t.get("device_id"))
+                .and_then(|v| v.as_str())
+            && !id.is_empty()
+        {
+            return id.to_string();
+        }
+
+        let (id, source) = match read_claude_code_user_id() {
+            Some(id) => (id, "~/.claude.json"),
+            None => (generate(), "random"),
+        };
+        tracing::info!("seeded claude-oauth device_id from {}", source);
+        if let Err(error) = persist(&path, &id) {
+            tracing::warn!("failed to persist device_id: {}", error);
+        }
+        id
+    }
+
+    fn generate() -> String {
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill(&mut bytes);
+        bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+    }
+
+    fn read_claude_code_user_id() -> Option<String> {
+        read_user_id_from(&dirs::home_dir()?.join(".claude.json"))
+    }
+
+    pub(super) fn read_user_id_from(path: &Path) -> Option<String> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let document: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let id = document.get("userID")?.as_str()?.trim();
+        if id.is_empty() {
+            return None;
+        }
+        Some(id.to_string())
+    }
+
+    fn persist(path: &Path, id: &str) -> std::io::Result<()> {
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc: toml_edit::DocumentMut = contents
+            .parse()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+        if !doc.contains_key("provider") {
+            doc["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        doc["provider"]["device_id"] = toml_edit::value(id);
+
+        write_config_atomic(path, &doc.to_string())
+    }
+}
+
+/// `[provider].effort` normalisation for Claude Code's `output_config.effort`.
+mod effort {
+    /// Resolves to one of `"low" | "medium" | "high"`, falling back to
+    /// `"high"` for missing or unrecognised values (with a warn log for the
+    /// latter so a typo isn't silently lost).
+    pub(super) fn resolve(configured: Option<&str>) -> String {
+        const DEFAULT: &str = "high";
+        let Some(value) = configured else {
+            return DEFAULT.to_string();
+        };
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "low" | "medium" | "high" => trimmed.to_ascii_lowercase(),
+            other => {
+                tracing::warn!(
+                    "ignoring [provider].effort = {:?}: expected one of \"low\", \"medium\", \"high\"; \
+                     falling back to \"{}\"",
+                    other,
+                    DEFAULT,
+                );
+                DEFAULT.to_string()
+            }
+        }
+    }
+}
+
+/// Provider credential lookup: env var → config file, with provider-specific
+/// env-var precedence. OAuth database fallback happens in `main.rs`.
+mod credential {
+    use super::{AuthCredential, ProviderConfig};
+
+    pub(super) fn resolve(
+        provider_name: Option<&str>,
+        file_provider: &ProviderConfig,
+    ) -> Option<AuthCredential> {
+        match provider_name {
+            Some("claude-api") => {
+                if let Ok(key) = std::env::var("CLAUDE_API_KEY") {
+                    return Some(AuthCredential::ApiKey(key));
+                }
+                if let Some(key) = &file_provider.api_key {
+                    return Some(AuthCredential::ApiKey(key.clone()));
+                }
+                None
+            }
+            Some("claude-oauth") => {
+                if let Ok(token) = std::env::var("CLAUDE_OAUTH_TOKEN") {
+                    return Some(AuthCredential::OAuthToken {
+                        access_token: token,
+                        refresh_token: None,
+                        expires_at: None,
+                    });
+                }
+                if let Some(token) = &file_provider.oauth_token {
+                    return Some(AuthCredential::OAuthToken {
+                        access_token: token.clone(),
+                        refresh_token: None,
+                        expires_at: None,
+                    });
+                }
+                // Database fallback happens in main.rs
+                None
+            }
+            _ => {
+                let key = std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .or_else(|| file_provider.api_key.clone())?;
+                Some(AuthCredential::ApiKey(key))
+            }
         }
     }
 }
@@ -984,14 +1143,14 @@ command = "npx"
     fn test_config_file_deserialization() {
         let toml_str = r#"
 [provider]
-name = "openai"
+name = "openai-api"
 model = "gpt-4o"
 api_key = "sk-test"
 base_url = "https://api.openai.com/v1"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).expect("failed to parse toml");
         let provider = config.provider.expect("provider should be present");
-        assert_eq!(provider.name.as_deref(), Some("openai"));
+        assert_eq!(provider.name.as_deref(), Some("openai-api"));
         assert_eq!(provider.model.as_deref(), Some("gpt-4o"));
         assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
         assert_eq!(
@@ -1010,14 +1169,150 @@ base_url = "https://api.openai.com/v1"
     fn test_partial_config_file() {
         let toml_str = r#"
 [provider]
-name = "claude"
+name = "claude-oauth"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).expect("failed to parse toml");
         let provider = config.provider.expect("provider should be present");
-        assert_eq!(provider.name.as_deref(), Some("claude"));
+        assert_eq!(provider.name.as_deref(), Some("claude-oauth"));
         assert!(provider.model.is_none());
         assert!(provider.api_key.is_none());
         assert!(provider.base_url.is_none());
+    }
+
+    #[test]
+    fn test_resolve_effort_default_high() {
+        assert_eq!(effort::resolve(None), "high");
+    }
+
+    #[test]
+    fn test_resolve_effort_recognized_values() {
+        assert_eq!(effort::resolve(Some("low")), "low");
+        assert_eq!(effort::resolve(Some("medium")), "medium");
+        assert_eq!(effort::resolve(Some("high")), "high");
+        // Case-insensitive + trims surrounding whitespace.
+        assert_eq!(effort::resolve(Some("  Medium ")), "medium");
+        assert_eq!(effort::resolve(Some("HIGH")), "high");
+    }
+
+    #[test]
+    fn test_resolve_effort_unknown_falls_back_to_high() {
+        assert_eq!(effort::resolve(Some("max")), "high");
+        assert_eq!(effort::resolve(Some("")), "high");
+        assert_eq!(effort::resolve(Some("ultra")), "high");
+    }
+
+    #[test]
+    fn test_resolve_device_id_returns_empty_for_non_claude_oauth() {
+        // Should not generate / persist anything when the provider doesn't
+        // need a device_id. Empty string flows through but is ignored by
+        // non-claude-oauth providers.
+        assert_eq!(device_id::resolve(Some("openai-api"), None), "");
+        assert_eq!(device_id::resolve(Some("claude-api"), None), "");
+        assert_eq!(device_id::resolve(None, None), "");
+        // Even an explicit configured value is suppressed when the
+        // provider isn't claude-oauth — the field is provider-scoped.
+        assert_eq!(device_id::resolve(Some("openai-api"), Some("explicit")), "");
+    }
+
+    #[test]
+    fn test_resolve_device_id_uses_configured_value_for_claude_oauth() {
+        let id = "deadbeef".repeat(8);
+        assert_eq!(
+            device_id::resolve(Some("claude-oauth"), Some(&id)),
+            id,
+            "configured value must be used verbatim for claude-oauth"
+        );
+    }
+
+    #[test]
+    fn test_read_user_id_from_valid_claude_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(
+            &path,
+            r#"{"userID": "af5986c7cb3b5e8d00eaf3da3b81730c6f523b1e68e1720c7128a96167534be3", "other": "stuff"}"#,
+        )
+        .expect("write");
+        assert_eq!(
+            device_id::read_user_id_from(&path).as_deref(),
+            Some("af5986c7cb3b5e8d00eaf3da3b81730c6f523b1e68e1720c7128a96167534be3")
+        );
+    }
+
+    #[test]
+    fn test_read_user_id_from_missing_file_returns_none() {
+        let path = std::path::Path::new("/nonexistent/path/claude.json");
+        assert!(device_id::read_user_id_from(path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_malformed_json_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, "{not valid json").expect("write");
+        assert!(device_id::read_user_id_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_missing_field_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"foo": "bar"}"#).expect("write");
+        assert!(device_id::read_user_id_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_empty_string_returns_none() {
+        // An empty `userID` in claude.json shouldn't override agsh's
+        // own random-generation fallback — treat it as "not configured".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"userID": ""}"#).expect("write");
+        assert!(device_id::read_user_id_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_whitespace_only_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"userID": "   "}"#).expect("write");
+        assert!(device_id::read_user_id_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_non_string_returns_none() {
+        // A non-string `userID` (number, object, …) shouldn't crash —
+        // just decline to use the value.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"userID": 12345}"#).expect("write");
+        assert!(device_id::read_user_id_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_user_id_from_trims_surrounding_whitespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"userID": "  abcdef123  "}"#).expect("write");
+        assert_eq!(
+            device_id::read_user_id_from(&path).as_deref(),
+            Some("abcdef123")
+        );
+    }
+
+    #[test]
+    fn test_provider_config_deserializes_effort_and_redact_thinking() {
+        let toml_str = r#"
+[provider]
+name = "claude-oauth"
+model = "claude-opus-4-6-20250514"
+effort = "medium"
+redact_thinking = true
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).expect("failed to parse toml");
+        let provider = config.provider.expect("provider should be present");
+        assert_eq!(provider.effort.as_deref(), Some("medium"));
+        assert_eq!(provider.redact_thinking, Some(true));
     }
 
     #[test]

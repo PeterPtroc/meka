@@ -614,7 +614,7 @@ pub fn render_error(error: &dyn std::fmt::Display) {
 /// initialize. Centralized so the wording stays in sync everywhere.
 pub fn render_provider_setup_hint() {
     eprintln!("Configure a provider and model to use agsh.");
-    eprintln!("Example: agsh --provider openai --model gpt-4o \"hello\"");
+    eprintln!("Example: agsh --provider openai-api --model gpt-4o \"hello\"");
     eprintln!("Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables.");
 }
 

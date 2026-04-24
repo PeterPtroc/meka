@@ -10,8 +10,8 @@ agsh
 
 The wizard will guide you through:
 
-1. **Provider selection** — Choose between `claude` and `openai`
-2. **Authentication** — OAuth login (Claude only) or API key entry
+1. **Provider selection** — Choose between `claude-oauth`, `claude-api`, or `openai-api`
+2. **Authentication** — OAuth login (`claude-oauth`) or API key entry (`claude-api`, `openai-api`)
 3. **Model selection** — Enter the model name to use
 4. **Base URL** — Optionally set a custom API endpoint
 

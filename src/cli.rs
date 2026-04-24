@@ -238,7 +238,7 @@ pub struct Cli {
     #[arg(long = "permission", value_parser = parse_permission)]
     pub permission: Option<Permission>,
 
-    /// LLM provider to use (openai, claude)
+    /// LLM provider to use (openai-api, claude-api, claude-oauth)
     #[arg(long = "provider")]
     pub provider: Option<String>,
 
@@ -324,14 +324,14 @@ mod tests {
         let cli = Cli::parse_from([
             "agsh",
             "--provider",
-            "openai",
+            "openai-api",
             "--model",
             "gpt-4o",
             "--no-stream",
             "-c",
             "-vv",
         ]);
-        assert_eq!(cli.provider.as_deref(), Some("openai"));
+        assert_eq!(cli.provider.as_deref(), Some("openai-api"));
         assert_eq!(cli.model.as_deref(), Some("gpt-4o"));
         assert!(cli.no_stream);
         assert_eq!(cli.continue_session.as_deref(), Some("last"));

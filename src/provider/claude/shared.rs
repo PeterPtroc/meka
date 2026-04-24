@@ -1,0 +1,653 @@
+//! Helpers shared by [`super::api::ClaudeApiProvider`] and
+//! [`super::oauth::ClaudeOAuthProvider`]. Everything in this module is
+//! independent of the authentication scheme: message/tool conversion to
+//! the Claude wire format, SSE streaming, response parsing, per-model
+//! capability detection, and the thinking-override helper.
+
+use std::sync::atomic::AtomicI8;
+
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::error::{AgshError, Result};
+use crate::provider::{
+    ContentBlock, Message, Role, StopReason, StreamEvent, TokenUsage, ToolDefinition,
+};
+
+/// Resolves the effective thinking state given the override atomic's raw
+/// value (`-1` = unset, `0` = forced off, `1` = forced on) and the configured
+/// default. Kept separate from the atomic itself so the providers can own
+/// their own `AtomicI8` without duplicating the branching logic.
+pub(super) fn is_thinking_enabled(override_raw: i8, default: bool) -> bool {
+    match override_raw {
+        0 => false,
+        1 => true,
+        _ => default,
+    }
+}
+
+/// Convenience wrapper that loads the atomic with [`Ordering::Relaxed`] and
+/// applies [`is_thinking_enabled`]. Most callers want this form.
+pub(super) fn resolve_thinking_enabled(override_atomic: &AtomicI8, default: bool) -> bool {
+    is_thinking_enabled(
+        override_atomic.load(std::sync::atomic::Ordering::Relaxed),
+        default,
+    )
+}
+
+/// Mirrors Claude Code's `modelSupportsAdaptiveThinking`
+/// (`utils/thinking.ts:113-144`): explicit allowlist for `opus-4-6` /
+/// `sonnet-4-6`, explicit deny for any other named opus/sonnet/haiku
+/// (covers Claude 4.0 / 4.5 and Haiku 4.5), default-true for unknown
+/// 1P model strings.
+pub(super) fn model_supports_adaptive_thinking(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("opus-4-6") || lower.contains("sonnet-4-6") {
+        return true;
+    }
+    if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
+        return false;
+    }
+    true
+}
+
+pub(super) fn model_is_haiku(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("haiku")
+}
+
+/// Mirrors Claude Code's `modelSupportsThinking` (and the equivalent
+/// `modelSupportsISP` / `modelSupportsContextManagement`) on the 1P API:
+/// any Claude 4+ model. Claude-3.x is excluded.
+pub(super) fn model_supports_modern_features(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("claude") && !lower.contains("claude-3-")
+}
+
+/// Mirrors Claude Code's `modelSupportsEffort` (`utils/effort.ts:23-49`):
+/// `opus-4-6` / `sonnet-4-6` allowlist, explicit deny for other named
+/// opus/sonnet/haiku, default-true for unknown model strings (agsh is 1P).
+pub(super) fn model_supports_effort(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("opus-4-6") || lower.contains("sonnet-4-6") {
+        return true;
+    }
+    if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
+        return false;
+    }
+    true
+}
+
+pub(super) fn convert_messages_to_claude_content(messages: &[Message]) -> Vec<serde_json::Value> {
+    let message_count = messages.len();
+    let mut claude_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(message_index, message)| {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+
+            let is_last_message = message_index + 1 == message_count;
+            let block_count = message.content.len();
+
+            let content: Vec<serde_json::Value> = message
+                .content
+                .iter()
+                .enumerate()
+                .map(|(block_index, block)| {
+                    let mut value = match block {
+                        ContentBlock::Text { text } => {
+                            serde_json::json!({
+                                "type": "text",
+                                "text": text,
+                            })
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            serde_json::json!({
+                                "type": "tool_use",
+                                "id": id,
+                                "name": name,
+                                "input": input,
+                            })
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
+                            serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": content,
+                                "is_error": is_error,
+                            })
+                        }
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        } => {
+                            let mut obj = serde_json::json!({
+                                "type": "thinking",
+                                "thinking": thinking
+                            });
+                            if let Some(sig) = signature {
+                                obj["signature"] = serde_json::json!(sig);
+                            }
+                            obj
+                        }
+                    };
+
+                    if is_last_message
+                        && block_index + 1 == block_count
+                        && let Some(obj) = value.as_object_mut()
+                    {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                        );
+                    }
+
+                    value
+                })
+                .collect();
+
+            serde_json::json!({
+                "role": role,
+                "content": content,
+            })
+        })
+        .collect();
+
+    // Strip trailing thinking blocks from the last assistant message
+    // (Claude API requirement).
+    if let Some(last_assistant) = claude_messages
+        .iter_mut()
+        .rev()
+        .find(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        && let Some(content) = last_assistant
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+    {
+        while content
+            .last()
+            .and_then(|b| b.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("thinking")
+        {
+            content.pop();
+        }
+        if content.is_empty() {
+            content.push(serde_json::json!({
+                "type": "text",
+                "text": "[No message content]"
+            }));
+        }
+    }
+
+    claude_messages
+}
+
+pub(super) fn convert_tools_to_claude_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    let tool_count = tools.len();
+    tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            let mut schema = serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.parameters,
+            });
+            if index + 1 == tool_count
+                && let Some(obj) = schema.as_object_mut()
+            {
+                obj.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                );
+            }
+            schema
+        })
+        .collect()
+}
+
+pub(super) fn parse_claude_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "end_turn" => StopReason::EndTurn,
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        other => StopReason::Unknown(other.to_string()),
+    }
+}
+
+pub(super) fn parse_non_streaming_response(
+    response: &serde_json::Value,
+) -> Result<(Message, StopReason, TokenUsage)> {
+    let stop_reason_str = response
+        .get("stop_reason")
+        .and_then(|reason| reason.as_str())
+        .unwrap_or("end_turn");
+
+    let stop_reason = parse_claude_stop_reason(stop_reason_str);
+
+    let token_usage = TokenUsage {
+        input_tokens: response
+            .get("usage")
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_tokens: response
+            .get("usage")
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    };
+
+    let content_array = response
+        .get("content")
+        .and_then(|content| content.as_array())
+        .ok_or_else(|| AgshError::Provider("no content array in response".to_string()))?;
+
+    let mut content_blocks = Vec::new();
+
+    for block in content_array {
+        let block_type = block
+            .get("type")
+            .and_then(|block_type| block_type.as_str())
+            .unwrap_or("");
+
+        match block_type {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|text| text.as_str()) {
+                    content_blocks.push(ContentBlock::Text {
+                        text: text.to_string(),
+                    });
+                }
+            }
+            "tool_use" => {
+                let id = block
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .ok_or_else(|| {
+                        AgshError::Provider("tool_use block missing 'id' field".to_string())
+                    })?
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .ok_or_else(|| {
+                        AgshError::Provider("tool_use block missing 'name' field".to_string())
+                    })?
+                    .to_string();
+                let input = block.get("input").cloned().unwrap_or_else(|| {
+                    tracing::warn!("missing 'input' in tool_use block");
+                    serde_json::json!({})
+                });
+
+                content_blocks.push(ContentBlock::ToolUse { id, name, input });
+            }
+            "thinking" => {
+                if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                    let signature = block
+                        .get("signature")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                    content_blocks.push(ContentBlock::Thinking {
+                        thinking: thinking.to_string(),
+                        signature,
+                    });
+                }
+            }
+            "redacted_thinking" => {
+                let signature = block
+                    .get("signature")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                content_blocks.push(ContentBlock::Thinking {
+                    thinking: "[redacted]".to_string(),
+                    signature,
+                });
+            }
+            _ => {
+                tracing::warn!("unknown Claude content block type: {}", block_type);
+            }
+        }
+    }
+
+    Ok((
+        Message {
+            role: Role::Assistant,
+            content: content_blocks,
+        },
+        stop_reason,
+        token_usage,
+    ))
+}
+
+pub(super) async fn drive_claude_sse_stream(
+    response: reqwest::Response,
+    event_sender: mpsc::UnboundedSender<StreamEvent>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let status = response.status();
+    if !status.is_success() {
+        let response_text = response.text().await.unwrap_or_else(|error| {
+            tracing::warn!("failed to read Claude error response body: {}", error);
+            String::new()
+        });
+        return Err(AgshError::Provider(format!(
+            "API returned status {}: {}",
+            status, response_text
+        )));
+    }
+
+    let mut event_stream = response.bytes_stream().eventsource();
+
+    let mut current_tool_input = String::new();
+    let mut in_tool_use = false;
+    let mut in_thinking = false;
+    let mut current_thinking_signature: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(AgshError::Interrupted);
+            }
+            event = event_stream.next() => {
+                let Some(event) = event else {
+                    break;
+                };
+
+                match event {
+                    Ok(event) => {
+                        let data: serde_json::Value = match serde_json::from_str(&event.data) {
+                            Ok(data) => data,
+                            Err(error) => {
+                                tracing::warn!("failed to parse SSE data: {}", error);
+                                continue;
+                            }
+                        };
+
+                        match event.event.as_str() {
+                            "content_block_start" => {
+                                let Some(content_block) = data.get("content_block") else {
+                                    continue;
+                                };
+                                let block_type = content_block
+                                    .get("type")
+                                    .and_then(|block_type| block_type.as_str())
+                                    .unwrap_or("");
+
+                                if block_type == "thinking" {
+                                    in_thinking = true;
+                                } else if block_type == "redacted_thinking" {
+                                    // Emit a stub thinking block so the UI
+                                    // shows something for redacted content.
+                                    let _ = event_sender.send(
+                                        StreamEvent::ThinkingDelta("[redacted]".to_string()),
+                                    );
+                                    let signature = content_block
+                                        .get("signature")
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string());
+                                    let _ = event_sender
+                                        .send(StreamEvent::ThinkingComplete { signature });
+                                } else if block_type == "tool_use" {
+                                    let id = content_block
+                                        .get("id")
+                                        .and_then(|id| id.as_str())
+                                        .ok_or_else(|| {
+                                            AgshError::Provider(
+                                                "tool_use block missing 'id' field".to_string(),
+                                            )
+                                        })?
+                                        .to_string();
+                                    let name = content_block
+                                        .get("name")
+                                        .and_then(|name| name.as_str())
+                                        .ok_or_else(|| {
+                                            AgshError::Provider(
+                                                "tool_use block missing 'name' field"
+                                                    .to_string(),
+                                            )
+                                        })?
+                                        .to_string();
+
+                                    current_tool_input.clear();
+                                    in_tool_use = true;
+                                    if event_sender.send(StreamEvent::ToolUseStart {
+                                        id,
+                                        name,
+                                    }).is_err() {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                }
+                            }
+                            "content_block_delta" => {
+                                let Some(delta) = data.get("delta") else {
+                                    continue;
+                                };
+                                let delta_type = delta
+                                    .get("type")
+                                    .and_then(|delta_type| delta_type.as_str())
+                                    .unwrap_or("");
+
+                                match delta_type {
+                                    "thinking_delta" => {
+                                        if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str())
+                                            && !thinking.is_empty()
+                                                && event_sender.send(
+                                                    StreamEvent::ThinkingDelta(thinking.to_string()),
+                                                ).is_err() {
+                                                    tracing::trace!("stream event receiver dropped");
+                                                    break;
+                                                }
+                                    }
+                                    "text_delta" => {
+                                        if let Some(text) = delta.get("text").and_then(|text| text.as_str())
+                                            && !text.is_empty()
+                                                && event_sender.send(
+                                                    StreamEvent::TextDelta(text.to_string()),
+                                                ).is_err() {
+                                                    tracing::trace!("stream event receiver dropped");
+                                                    break;
+                                                }
+                                    }
+                                    "signature_delta" => {
+                                        if let Some(sig) = delta.get("signature").and_then(|s| s.as_str()) {
+                                            current_thinking_signature = Some(
+                                                current_thinking_signature
+                                                    .map_or_else(|| sig.to_string(), |existing| existing + sig),
+                                            );
+                                        }
+                                    }
+                                    "input_json_delta" => {
+                                        if let Some(partial_json) =
+                                            delta.get("partial_json").and_then(|partial_json| partial_json.as_str())
+                                        {
+                                            current_tool_input.push_str(partial_json);
+                                            if event_sender.send(
+                                                StreamEvent::ToolInputDelta(
+                                                    partial_json.to_string(),
+                                                ),
+                                            ).is_err() {
+                                                tracing::trace!("stream event receiver dropped");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            "content_block_stop" => {
+                                if in_thinking {
+                                    in_thinking = false;
+                                    let signature = current_thinking_signature.take();
+                                    if event_sender
+                                        .send(StreamEvent::ThinkingComplete { signature })
+                                        .is_err()
+                                    {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                } else if in_tool_use {
+                                    let input = if current_tool_input.is_empty() {
+                                        serde_json::json!({})
+                                    } else {
+                                        match serde_json::from_str(&current_tool_input) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                tracing::warn!("failed to parse tool input JSON: {}", error);
+                                                serde_json::json!({})
+                                            }
+                                        }
+                                    };
+                                    if event_sender
+                                        .send(StreamEvent::ToolUseEnd { input })
+                                        .is_err()
+                                    {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                    current_tool_input.clear();
+                                    in_tool_use = false;
+                                }
+                            }
+                            "message_delta" => {
+                                let Some(delta) = data.get("delta") else {
+                                    continue;
+                                };
+                                if let Some(usage) = data.get("usage") {
+                                    let token_usage = TokenUsage {
+                                        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    };
+                                    if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                }
+                                if let Some(stop_reason_str) =
+                                    delta.get("stop_reason").and_then(|reason| reason.as_str())
+                                {
+                                    let stop_reason = parse_claude_stop_reason(stop_reason_str);
+                                    if event_sender
+                                        .send(StreamEvent::MessageEnd { stop_reason })
+                                        .is_err()
+                                    {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                }
+                            }
+                            "message_stop" => {
+                                break;
+                            }
+                            "message_start" => {
+                                if let Some(usage) = data.get("message").and_then(|m| m.get("usage")) {
+                                    let token_usage = TokenUsage {
+                                        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    };
+                                    if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                        tracing::trace!("stream event receiver dropped");
+                                        break;
+                                    }
+                                }
+                            }
+                            "ping" => {}
+                            other => {
+                                tracing::debug!("unknown Claude SSE event: {}", other);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if event_sender.send(StreamEvent::Error(error.to_string())).is_err() {
+                            tracing::trace!("stream event receiver dropped");
+                        }
+                        return Err(AgshError::StreamError(error.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_thinking_enabled_override_off() {
+        assert!(!is_thinking_enabled(0, true));
+        assert!(!is_thinking_enabled(0, false));
+    }
+
+    #[test]
+    fn test_is_thinking_enabled_override_on() {
+        assert!(is_thinking_enabled(1, true));
+        assert!(is_thinking_enabled(1, false));
+    }
+
+    #[test]
+    fn test_is_thinking_enabled_unset_uses_default() {
+        assert!(is_thinking_enabled(-1, true));
+        assert!(!is_thinking_enabled(-1, false));
+        // Any non-0/1 value should be treated as "unset" and fall through
+        // to the configured default.
+        assert!(is_thinking_enabled(42, true));
+        assert!(!is_thinking_enabled(-99, false));
+    }
+
+    #[test]
+    fn test_model_supports_modern_features() {
+        assert!(model_supports_modern_features("claude-opus-4-6-20250514"));
+        assert!(model_supports_modern_features("claude-sonnet-4-20250514"));
+        assert!(model_supports_modern_features("claude-haiku-4-5-20251001"));
+        assert!(!model_supports_modern_features(
+            "claude-3-5-sonnet-20241022"
+        ));
+        assert!(!model_supports_modern_features("claude-3-opus-20240229"));
+        assert!(!model_supports_modern_features("gpt-4o"));
+    }
+
+    #[test]
+    fn test_model_supports_effort() {
+        assert!(model_supports_effort("claude-opus-4-6-20250514"));
+        assert!(model_supports_effort("claude-sonnet-4-6"));
+        // Older / non-4-6 sonnet/opus/haiku are explicitly denied.
+        assert!(!model_supports_effort("claude-sonnet-4-20250514"));
+        assert!(!model_supports_effort("claude-opus-4-1"));
+        assert!(!model_supports_effort("claude-haiku-4-5-20251001"));
+        // Unknown 1P model defaults to true.
+        assert!(model_supports_effort("claude-future-experimental-7"));
+    }
+
+    #[test]
+    fn test_model_is_haiku() {
+        assert!(model_is_haiku("claude-haiku-4-5-20251001"));
+        assert!(model_is_haiku("claude-haiku-4-5"));
+        assert!(!model_is_haiku("claude-opus-4-6-20250514"));
+        assert!(!model_is_haiku("claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn test_parse_claude_stop_reason_all_variants() {
+        assert_eq!(parse_claude_stop_reason("end_turn"), StopReason::EndTurn);
+        assert_eq!(parse_claude_stop_reason("tool_use"), StopReason::ToolUse);
+        assert_eq!(
+            parse_claude_stop_reason("max_tokens"),
+            StopReason::MaxTokens
+        );
+        assert_eq!(
+            parse_claude_stop_reason("something_else"),
+            StopReason::Unknown("something_else".to_string())
+        );
+    }
+}

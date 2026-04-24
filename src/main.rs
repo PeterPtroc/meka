@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::agent::{Agent, AgentOptions};
 use crate::config::ResolvedConfig;
 use crate::permission::SharedPermission;
-use crate::provider::{AuthCredential, create_provider};
+use crate::provider::{AuthCredential, ProviderBuilder};
 use crate::repl::ReplEvent;
 use crate::session::{SessionManager, TokenStore};
 use crate::tools::ToolRegistry;
@@ -144,6 +144,11 @@ fn build_log_filter(log_level: &str) -> tracing_subscriber::EnvFilter {
 }
 
 async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
+    // Validate provider name and model before opening the session store or
+    // resolving credentials so the user sees a clear "not configured" or
+    // "invalid value" message instead of the downstream credential error.
+    config.validate()?;
+
     let session_manager = SessionManager::open(None).await?;
     let token_store = session_manager.token_store();
 
@@ -163,10 +168,12 @@ async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
         }
     }
 
-    // If no credential from env/config, try loading from database
+    // If no credential from env/config, try loading from database.
+    // Storage key stays "claude" across the rename to "claude-oauth" so existing
+    // users keep their tokens.
     if config.auth_credential.is_none()
         && let Some(provider_name) = config.provider_name.as_deref()
-        && provider_name == "claude"
+        && provider_name == "claude-oauth"
     {
         match token_store.load_oauth_token("claude").await {
             Ok(Some(credential)) => {
@@ -180,12 +187,12 @@ async fn async_main(mut config: ResolvedConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Save OAuth token from env/config to database for future use
+    // Save OAuth token from env/config to database for future use.
+    // Storage key stays "claude" across the rename to "claude-oauth".
     if let Some(credential @ AuthCredential::OAuthToken { .. }) = &config.auth_credential
         && let Some(provider_name) = config.provider_name.as_deref()
-        && let Err(error) = token_store
-            .save_oauth_token(provider_name, credential)
-            .await
+        && provider_name == "claude-oauth"
+        && let Err(error) = token_store.save_oauth_token("claude", credential).await
     {
         tracing::warn!("failed to save OAuth token to database: {}", error);
     }
@@ -250,25 +257,25 @@ async fn create_agent_from_config(
         .ok_or_else(|| anyhow::anyhow!("provider_name missing after validation"))?;
     let needs_token_store = matches!(credential, AuthCredential::OAuthToken { .. });
 
-    let provider = create_provider(
-        provider_name,
-        credential,
-        config
-            .model
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("model missing after validation"))?,
-        config.base_url.clone(),
-        config.client_id.clone(),
-        config.oauth_token_url.clone(),
-        if needs_token_store {
+    let model = config
+        .model
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("model missing after validation"))?;
+    let provider = ProviderBuilder::new(provider_name, credential, model)
+        .base_url(config.base_url.clone())
+        .client_id(config.client_id.clone())
+        .oauth_token_url(config.oauth_token_url.clone())
+        .token_store(if needs_token_store {
             Some(Arc::new(token_store))
         } else {
             None
-        },
-        config.thinking_enabled,
-        config.thinking_budget_tokens,
-        config.reasoning_effort.clone(),
-    )?;
+        })
+        .thinking(config.thinking_enabled, config.thinking_budget_tokens)
+        .reasoning_effort(config.reasoning_effort.clone())
+        .device_id(config.device_id.clone())
+        .effort(config.effort.clone())
+        .redact_thinking(config.redact_thinking)
+        .build()?;
 
     let sandbox_capability = crate::sandbox::detect();
     let sandboxed_shell = config.sandbox
@@ -464,11 +471,21 @@ async fn run_interactive(
     {
         let sender_for_progress = agent_event_sender.clone();
         mcp::progress::set_ui_sink(Box::new(move |update| {
-            let _ = sender_for_progress.send(repl::AgentToReplEvent::McpProgress(update));
+            if sender_for_progress
+                .send(repl::AgentToReplEvent::McpProgress(update))
+                .is_err()
+            {
+                tracing::debug!("MCP progress dropped (REPL disconnected)");
+            }
         }));
         let sender_for_elicitation = agent_event_sender.clone();
         mcp::elicitation::set_shell_sink(Some(Box::new(move |prompt| {
-            let _ = sender_for_elicitation.send(repl::AgentToReplEvent::McpElicitation(prompt));
+            if sender_for_elicitation
+                .send(repl::AgentToReplEvent::McpElicitation(prompt))
+                .is_err()
+            {
+                tracing::debug!("MCP elicitation dropped (REPL disconnected)");
+            }
         })));
     }
 

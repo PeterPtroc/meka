@@ -365,7 +365,7 @@ pub async fn run_logout(
     if let Some(config) = servers
         .iter()
         .find(|c| c.name == name && matches!(c.transport, McpTransport::Http))
-        && let Err(error) = crate::mcp::revoke_stored_token(token_store, &config.name).await
+        && let Err(error) = crate::mcp::auth::revoke_stored_token(token_store, &config.name).await
     {
         tracing::warn!(
             "failed to revoke token at server '{}': {} (continuing)",
@@ -791,9 +791,9 @@ enum ProbeOutcome {
 /// Probe the HTTP endpoint, print a one-line hint, and collapse the
 /// probe result into a login-decision summary.
 async fn probe_and_announce(name: &str, url: &str) -> ProbeOutcome {
-    use crate::mcp::McpAuthProbe;
+    use crate::mcp::auth::McpAuthProbe;
 
-    match crate::mcp::probe_http_auth(url).await {
+    match crate::mcp::auth::probe_http_auth(url).await {
         McpAuthProbe::Open => {
             tracing::info!("probe: '{}' reachable and does not require auth.", name);
             ProbeOutcome::Open
@@ -1397,7 +1397,7 @@ async fn purge_server(name: &str, token_store: &TokenStore) -> Result<std::path:
     // local credentials. If the caller is rolling back a never-succeeded
     // login there won't be any credentials; `revoke_stored_token` early-
     // returns in that case so the call is safe regardless.
-    if let Err(error) = crate::mcp::revoke_stored_token(token_store, name).await {
+    if let Err(error) = crate::mcp::auth::revoke_stored_token(token_store, name).await {
         tracing::warn!(
             "failed to revoke token at server '{}' during purge: {} (continuing)",
             name,
