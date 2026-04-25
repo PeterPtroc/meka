@@ -855,7 +855,7 @@ mod device_id {
     }
 
     fn generate() -> String {
-        use rand::Rng;
+        use rand::RngExt;
         let mut bytes = [0u8; 32];
         rand::rng().fill(&mut bytes);
         bytes.iter().map(|byte| format!("{:02x}", byte)).collect()

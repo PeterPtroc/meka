@@ -164,7 +164,7 @@ impl SessionManager {
 
     async fn initialize_schema(&self) -> Result<()> {
         self.connection
-            .call(|connection| {
+            .call(|connection| -> rusqlite::Result<_> {
                 connection.execute_batch(
                     "CREATE TABLE IF NOT EXISTS sessions (
                         id TEXT PRIMARY KEY,
@@ -259,7 +259,7 @@ impl SessionManager {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT INTO sessions (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
                     rusqlite::params![session_id.to_string(), now, now],
@@ -328,7 +328,7 @@ impl SessionManager {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![session_id.to_string(), role, content, now],
@@ -349,7 +349,7 @@ impl SessionManager {
 
     pub async fn load_messages(&self, session_id: Uuid) -> Result<Vec<StoredMessage>> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let mut statement = connection.prepare(
                     "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC",
                 )?;
@@ -372,7 +372,7 @@ impl SessionManager {
 
     pub async fn last_session_id(&self) -> Result<Option<Uuid>> {
         self.connection
-            .call(|connection| {
+            .call(|connection| -> rusqlite::Result<_> {
                 let result: std::result::Result<String, _> = connection.query_row(
                     "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1",
                     [],
@@ -387,7 +387,7 @@ impl SessionManager {
                         Ok(Some(uuid))
                     }
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(error),
                 }
             })
             .await
@@ -396,7 +396,7 @@ impl SessionManager {
 
     pub async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let count: i64 = connection.query_row(
                     "SELECT COUNT(*) FROM sessions WHERE id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -412,7 +412,7 @@ impl SessionManager {
 
     pub async fn list_sessions(&self, limit: u32) -> Result<Vec<SessionSummary>> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let mut statement = connection.prepare(
                     "SELECT s.id, s.updated_at,
                             COALESCE(
@@ -459,7 +459,7 @@ impl SessionManager {
         let cutoff_str = cutoff.to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM tool_outputs WHERE session_id IN (
                         SELECT id FROM sessions WHERE updated_at < ?1
@@ -490,7 +490,7 @@ impl SessionManager {
     #[cfg(test)]
     pub async fn clear_messages(&self, session_id: Uuid) -> Result<()> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM tool_outputs WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -514,7 +514,7 @@ impl SessionManager {
     /// Clear messages but preserve scratchpad (tool_outputs). Used by compaction.
     pub async fn clear_messages_only(&self, session_id: Uuid) -> Result<()> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM messages WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -532,7 +532,7 @@ impl SessionManager {
 
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM tool_outputs WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -556,7 +556,7 @@ impl SessionManager {
 
     pub async fn delete_all_sessions(&self) -> Result<u64> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute("DELETE FROM tool_outputs", [])?;
                 connection.execute("DELETE FROM messages", [])?;
                 let deleted = connection.execute("DELETE FROM sessions", [])?;
@@ -579,7 +579,7 @@ impl SessionManager {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT OR REPLACE INTO tool_outputs (session_id, name, content, created_at) \
                      VALUES (?1, ?2, ?3, ?4)",
@@ -601,7 +601,7 @@ impl SessionManager {
         let content = content.to_string();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let updated = connection.execute(
                     "UPDATE tool_outputs SET content = ?1 \
                      WHERE session_id = ?2 AND name = ?3",
@@ -619,7 +619,7 @@ impl SessionManager {
         let name = name.to_string();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let deleted = connection.execute(
                     "DELETE FROM tool_outputs WHERE session_id = ?1 AND name = ?2",
                     rusqlite::params![session_id.to_string(), name],
@@ -634,7 +634,7 @@ impl SessionManager {
 
     pub async fn list_tool_outputs(&self, session_id: Uuid) -> Result<Vec<ToolOutputSummary>> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let mut statement = connection.prepare(
                     "SELECT name, LENGTH(content), created_at \
                      FROM tool_outputs WHERE session_id = ?1 ORDER BY created_at ASC",
@@ -660,7 +660,7 @@ impl SessionManager {
         let name = name.to_string();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let result = connection.query_row(
                     "SELECT content FROM tool_outputs \
                      WHERE session_id = ?1 AND name = ?2",
@@ -671,7 +671,7 @@ impl SessionManager {
                 match result {
                     Ok(content) => Ok(Some(content)),
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(error),
                 }
             })
             .await
@@ -680,7 +680,7 @@ impl SessionManager {
 
     pub async fn load_all_tool_outputs(&self, session_id: Uuid) -> Result<Vec<(String, String)>> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let mut statement = connection.prepare(
                     "SELECT name, content FROM tool_outputs \
                      WHERE session_id = ?1 ORDER BY created_at ASC",
@@ -700,7 +700,7 @@ impl SessionManager {
 
     pub async fn enforce_storage_limit(&self, max_bytes: u64) -> Result<u64> {
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let mut deleted: u64 = 0;
 
                 loop {
@@ -737,7 +737,7 @@ impl SessionManager {
                             deleted += 1;
                         }
                         Err(rusqlite::Error::QueryReturnedNoRows) => break,
-                        Err(error) => return Err(error.into()),
+                        Err(error) => return Err(error),
                     }
                 }
 
@@ -759,7 +759,7 @@ impl TokenStore {
     pub async fn load_oauth_token(&self, provider: &str) -> Result<Option<AuthCredential>> {
         let provider = provider.to_string();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let result = connection.query_row(
                     "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider = ?1",
                     rusqlite::params![provider],
@@ -778,7 +778,7 @@ impl TokenStore {
                 match result {
                     Ok(credential) => Ok(Some(credential)),
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(error),
                 }
             })
             .await
@@ -788,7 +788,7 @@ impl TokenStore {
     pub async fn load_mcp_credentials(&self, server_name: &str) -> Result<Option<String>> {
         let server_name = server_name.to_string();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let result = connection.query_row(
                     "SELECT credentials_json FROM mcp_oauth_credentials WHERE server_name = ?1",
                     rusqlite::params![server_name],
@@ -798,7 +798,7 @@ impl TokenStore {
                 match result {
                     Ok(json) => Ok(Some(json)),
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(error),
                 }
             })
             .await
@@ -813,7 +813,7 @@ impl TokenStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT INTO mcp_oauth_credentials (server_name, credentials_json, updated_at)
                      VALUES (?1, ?2, ?3)
@@ -833,7 +833,7 @@ impl TokenStore {
     pub async fn clear_mcp_credentials(&self, server_name: &str) -> Result<()> {
         let server_name = server_name.to_string();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM mcp_oauth_credentials WHERE server_name = ?1",
                     rusqlite::params![server_name],
@@ -857,7 +857,7 @@ impl TokenStore {
         let ttl_seconds = ttl.as_secs() as i64;
         let now = chrono::Utc::now().timestamp();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 let result = connection.query_row(
                     "SELECT needs_auth, cached_at FROM mcp_auth_cache WHERE server_name = ?1",
                     rusqlite::params![server_name],
@@ -875,7 +875,7 @@ impl TokenStore {
                     }
                     Ok(_) => Ok(None),
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(error),
                 }
             })
             .await
@@ -890,7 +890,7 @@ impl TokenStore {
         let server_name = server_name.to_string();
         let now = chrono::Utc::now().timestamp();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT INTO mcp_auth_cache (server_name, needs_auth, cached_at)
                      VALUES (?1, ?2, ?3)
@@ -911,7 +911,7 @@ impl TokenStore {
     pub async fn clear_auth_probe(&self, server_name: &str) -> Result<()> {
         let server_name = server_name.to_string();
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "DELETE FROM mcp_auth_cache WHERE server_name = ?1",
                     rusqlite::params![server_name],
@@ -945,7 +945,7 @@ impl TokenStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         self.connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "INSERT INTO oauth_tokens (provider, access_token, refresh_token, expires_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1188,7 +1188,7 @@ mod tests {
         let old_date = (chrono::Utc::now() - chrono::TimeDelta::days(100)).to_rfc3339();
         manager
             .connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
                     rusqlite::params![old_date, session_id.to_string()],
@@ -1228,7 +1228,7 @@ mod tests {
         let old_date = (chrono::Utc::now() - chrono::TimeDelta::days(100)).to_rfc3339();
         manager
             .connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
                     rusqlite::params![old_date, old_session.to_string()],
@@ -1263,7 +1263,7 @@ mod tests {
         let old_date = (chrono::Utc::now() - chrono::TimeDelta::days(10)).to_rfc3339();
         manager
             .connection
-            .call(move |connection| {
+            .call(move |connection| -> rusqlite::Result<_> {
                 connection.execute(
                     "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
                     rusqlite::params![old_date, session1.to_string()],

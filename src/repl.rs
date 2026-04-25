@@ -421,6 +421,16 @@ pub fn run_repl(
                 }
                 break;
             }
+            Ok(other) => {
+                // `Signal` is `#[non_exhaustive]` (reedline 0.47+); future
+                // variants we don't recognise fall through to the same
+                // teardown as a read error.
+                tracing::warn!("unexpected reedline signal: {:?}", other);
+                if input_sender.send(ReplEvent::Exit).is_err() {
+                    tracing::trace!("REPL event receiver already dropped");
+                }
+                break;
+            }
             Err(error) => {
                 tracing::error!("readline error: {}", error);
                 if input_sender.send(ReplEvent::Exit).is_err() {

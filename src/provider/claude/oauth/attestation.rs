@@ -30,7 +30,14 @@ fn compute_fingerprint(message_text: &str, version: &str) -> String {
 
     let input = format!("{}{}{}", FINGERPRINT_SALT, chars, version);
     let hash = Sha256::digest(input.as_bytes());
-    let hex = format!("{:x}", hash);
+    // Match Claude Code's `SHA256(...)[:3]`: take the first 3 hex chars of
+    // the byte-by-byte 2-digit-hex encoding. Two bytes give us 4 chars,
+    // enough to slice 3 and drop the rest.
+    let hex: String = hash
+        .iter()
+        .take(2)
+        .map(|byte| format!("{:02x}", byte))
+        .collect();
     hex[..3].to_string()
 }
 
