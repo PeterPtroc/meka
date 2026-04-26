@@ -1186,6 +1186,9 @@ async fn resolve_session_resume(
             Some(id) => {
                 let lock = session_manager.lock_session(id)?;
                 render::render_session_id("Continuing session", &id.to_string());
+                if config.newline_after_prompt {
+                    println!();
+                }
                 let messages = load_session_messages(session_manager, id).await?;
                 Ok((Some(id), messages, Some(lock)))
             }
@@ -1200,6 +1203,9 @@ async fn resolve_session_resume(
         }
         let lock = session_manager.lock_session(id)?;
         render::render_session_id("Continuing session", &id.to_string());
+        if config.newline_after_prompt {
+            println!();
+        }
         let messages = load_session_messages(session_manager, id).await?;
         Ok((Some(id), messages, Some(lock)))
     }
