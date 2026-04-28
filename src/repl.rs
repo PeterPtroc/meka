@@ -150,6 +150,17 @@ pub enum SlashCommand {
     McpLogout {
         server: String,
     },
+    /// `/skill` (no argument) — list installed skills.
+    SkillList,
+    /// `/skill <name> [args]` — invoke a user-invocable skill directly.
+    /// `args` is captured for forward compatibility with positional
+    /// substitution into the skill body (`${ARG_1}`, etc.); v1 ignores
+    /// everything past `name`.
+    SkillInvoke {
+        name: String,
+        #[allow(dead_code)]
+        args: Vec<String>,
+    },
 }
 
 pub enum ReplEvent {
@@ -197,8 +208,28 @@ fn parse_slash_command(input: &str) -> Option<SlashCommand> {
         "export" => Some(SlashCommand::Export),
         "cd" => Some(SlashCommand::Cd(argument)),
         "mcp" => parse_mcp_slash(argument.as_deref().unwrap_or("")),
+        "skill" => Some(parse_skill_slash(argument.as_deref().unwrap_or(""))),
         _ => None,
     }
+}
+
+/// Parse the argument to `/skill …`.
+///
+/// - Empty argument (bare `/skill`) → list installed skills. There is
+///   no `list` keyword: that token would be treated as a skill name to
+///   invoke.
+/// - Otherwise: first whitespace token is the skill name, remaining
+///   tokens are positional args (currently unused; v1 ignores them but
+///   the parse keeps them for forward compatibility).
+fn parse_skill_slash(rest: &str) -> SlashCommand {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return SlashCommand::SkillList;
+    }
+    let mut tokens = rest.split_whitespace();
+    let name = tokens.next().expect("non-empty after trim").to_string();
+    let args = tokens.map(|s| s.to_string()).collect();
+    SlashCommand::SkillInvoke { name, args }
 }
 
 /// Parse the argument to `/mcp …`.
@@ -259,6 +290,13 @@ fn print_help() {
     eprintln!("  /compact                       Summarize and compact the session");
     eprintln!("  /export                        Export the current session as Markdown");
     eprintln!("  /cd <path>                     Change working directory");
+    eprintln!("  /skill                         List installed skills");
+    eprintln!("  /skill <name>                  Invoke a skill directly");
+    eprintln!("  /mcp                           List configured MCP servers");
+    eprintln!("  /mcp reconnect <server>        Reconnect smoke-test for one server");
+    eprintln!("  /mcp login <server>            Run the OAuth flow for a server");
+    eprintln!("  /mcp logout <server>           Clear stored credentials for a server");
+    eprintln!("  /mcp <server>:<prompt> [args]  Render an MCP prompt as the next turn");
     eprintln!();
     eprintln!("Shortcuts:");
     eprintln!("  !<command>    Execute a shell command directly");
@@ -357,7 +395,9 @@ pub fn run_repl(
                             | SlashCommand::McpList
                             | SlashCommand::McpReconnect { .. }
                             | SlashCommand::McpLogin { .. }
-                            | SlashCommand::McpLogout { .. }),
+                            | SlashCommand::McpLogout { .. }
+                            | SlashCommand::SkillList
+                            | SlashCommand::SkillInvoke { .. }),
                         ) => {
                             if input_sender.send(ReplEvent::Command(command)).is_err() {
                                 break;
@@ -984,6 +1024,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_skill_slash_empty_is_list() {
+        assert!(matches!(
+            parse_slash_command("/skill"),
+            Some(SlashCommand::SkillList)
+        ));
+        // Trailing whitespace is treated as no argument.
+        assert!(matches!(
+            parse_slash_command("/skill   "),
+            Some(SlashCommand::SkillList)
+        ));
+    }
+
+    #[test]
+    fn test_parse_skill_slash_invokes_named_skill() {
+        match parse_slash_command("/skill demo") {
+            Some(SlashCommand::SkillInvoke { name, args }) => {
+                assert_eq!(name, "demo");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected SkillInvoke, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_skill_slash_collects_positional_args() {
+        match parse_slash_command("/skill demo arg1 arg2") {
+            Some(SlashCommand::SkillInvoke { name, args }) => {
+                assert_eq!(name, "demo");
+                assert_eq!(args, vec!["arg1".to_string(), "arg2".to_string()]);
+            }
+            other => panic!("expected SkillInvoke, got {:?}", option_label(&other)),
+        }
+    }
+
+    #[test]
+    fn test_parse_skill_slash_no_list_keyword() {
+        // The token "list" is treated as a skill name, not a subcommand.
+        // (Bare `/skill` is the listing form; `/skill list` would error
+        // at dispatch with "unknown skill 'list'" if no such skill exists.)
+        match parse_slash_command("/skill list") {
+            Some(SlashCommand::SkillInvoke { name, args }) => {
+                assert_eq!(name, "list");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected SkillInvoke, got {:?}", option_label(&other)),
+        }
+    }
+
     /// Short debug label — SlashCommand doesn't implement Debug so we map
     /// the few variants we care about manually to keep assertion messages
     /// readable.
@@ -1003,6 +1092,8 @@ mod tests {
             Some(SlashCommand::McpLogin { .. }) => "McpLogin",
             Some(SlashCommand::McpLogout { .. }) => "McpLogout",
             Some(SlashCommand::McpPrompt { .. }) => "McpPrompt",
+            Some(SlashCommand::SkillList) => "SkillList",
+            Some(SlashCommand::SkillInvoke { .. }) => "SkillInvoke",
         }
     }
 

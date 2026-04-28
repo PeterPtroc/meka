@@ -48,12 +48,73 @@ pub enum Command {
         #[command(subcommand)]
         action: ToolsAction,
     },
+    /// Manage user skills (list, add, remove, show)
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ToolsAction {
     /// List every built-in tool with its effective permission and status.
     List,
+}
+
+// `Add` is the outlier with several flags inline; same one-shot CLI
+// dispatch reasoning as [`Command`] and [`McpAction`] above.
+#[allow(clippy::large_enum_variant)]
+#[derive(clap::Subcommand, Debug)]
+pub enum SkillAction {
+    /// List installed skills
+    List,
+    /// Print one skill's frontmatter and on-disk paths
+    Get { name: String },
+    /// Print the rendered skill body
+    Show { name: String },
+    /// Scaffold a new skill at `~/.config/agsh/skills/<name>/SKILL.md`.
+    ///
+    /// Examples:
+    ///   agsh skill add demo --description "X" --when-to-use "Y"
+    ///   agsh skill add custom --from-file ./template.md
+    Add {
+        /// Unique skill name (alphanumerics, `-`, `_` only)
+        name: String,
+
+        /// One-line description for the system prompt
+        #[arg(long)]
+        description: Option<String>,
+
+        /// One-line "when to use" hint
+        #[arg(long = "when-to-use")]
+        when_to_use: Option<String>,
+
+        /// Allowed-tool name (repeatable; advisory)
+        #[arg(long = "allowed-tools", value_name = "TOOL")]
+        allowed_tools: Vec<String>,
+
+        /// Version label
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Allow user invocation via `/skill <name>` (default true)
+        #[arg(long = "user-invocable")]
+        user_invocable: Option<bool>,
+
+        /// Copy this file's contents instead of the default template
+        #[arg(long = "from-file", value_name = "PATH")]
+        from_file: Option<std::path::PathBuf>,
+
+        /// Overwrite the skill directory if it exists
+        #[arg(long)]
+        force: bool,
+
+        /// Open the new SKILL.md in $EDITOR after scaffolding
+        #[arg(long)]
+        edit: bool,
+    },
+    /// Remove a skill's directory
+    Remove { name: String },
 }
 
 // Same reasoning as `Command` above: `Add` is the outlier and the enum

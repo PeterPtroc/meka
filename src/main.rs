@@ -105,6 +105,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
                     run_mcp_subcommand(&session_manager, action, cli_ref).await
                 }
                 cli::Command::Tools { action } => run_tools_subcommand(action, cli_ref).await,
+                cli::Command::Skill { action } => run_skill_subcommand(action).await,
             }
         });
     }
@@ -737,6 +738,52 @@ async fn run_interactive(
                             eprintln!("no MCP servers configured");
                         }
                     },
+                    repl::SlashCommand::SkillList => {
+                        if let Err(error) = skills::cli::run_list().await {
+                            render::render_error(&error);
+                        }
+                    }
+                    repl::SlashCommand::SkillInvoke { name, args: _ } => {
+                        let installed = skills::discover_skills();
+                        let Some(skill) = installed.iter().find(|s| s.name == name) else {
+                            let available: Vec<&str> =
+                                installed.iter().map(|s| s.name.as_str()).collect();
+                            render::render_error(&format!(
+                                "unknown skill '{}'; available: {:?}",
+                                name, available
+                            ));
+                            continue;
+                        };
+                        if !skill.user_invocable {
+                            render::render_error(&format!(
+                                "skill '{}' is not user-invocable; remove `user_invocable: false` from its frontmatter to allow direct invocation",
+                                name
+                            ));
+                            continue;
+                        }
+                        let session_str = session_id.map(|id| id.to_string());
+                        let body = match skills::load_skill_body(skill, session_str.as_deref()) {
+                            Ok(body) => body,
+                            Err(error) => {
+                                render::render_error(&format!(
+                                    "failed to load skill '{}': {}",
+                                    name, error
+                                ));
+                                continue;
+                            }
+                        };
+                        if let Err(error) = agent
+                            .run_turn(
+                                &mut session_id,
+                                &mut messages,
+                                body,
+                                CancellationToken::new(),
+                            )
+                            .await
+                        {
+                            render::render_error(&error);
+                        }
+                    }
                     _ => {}
                 }
 
@@ -985,6 +1032,40 @@ async fn run_tools_subcommand(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+async fn run_skill_subcommand(action: &cli::SkillAction) -> anyhow::Result<()> {
+    match action {
+        cli::SkillAction::List => skills::cli::run_list().await?,
+        cli::SkillAction::Get { name } => skills::cli::run_get(name).await?,
+        cli::SkillAction::Show { name } => skills::cli::run_show(name).await?,
+        cli::SkillAction::Add {
+            name,
+            description,
+            when_to_use,
+            allowed_tools,
+            version,
+            user_invocable,
+            from_file,
+            force,
+            edit,
+        } => {
+            skills::cli::run_add(skills::cli::AddArgs {
+                name,
+                description: description.as_deref(),
+                when_to_use: when_to_use.as_deref(),
+                allowed_tools,
+                version: version.as_deref(),
+                user_invocable: *user_invocable,
+                from_file: from_file.as_deref(),
+                force: *force,
+                edit: *edit,
+            })
+            .await?
+        }
+        cli::SkillAction::Remove { name } => skills::cli::run_remove(name).await?,
     }
     Ok(())
 }

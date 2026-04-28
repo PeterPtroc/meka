@@ -3,6 +3,8 @@
 //! version, user_invocable), and exposes the resulting [`Skill`] structs to
 //! the agent for system-prompt injection and `skill` tool dispatch.
 
+pub mod cli;
+
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -14,11 +16,11 @@ pub struct Skill {
     pub description: String,
     pub when_to_use: String,
     pub allowed_tools: Vec<String>,
-    // Parsed but not yet consumed — planned for future features
-    // (version reporting, user-invocable gating via `/skills` command).
-    #[allow(dead_code)]
     pub version: Option<String>,
-    #[allow(dead_code)]
+    /// User-side invocability gate consulted by the REPL `/skill <name>`
+    /// command. Defaults to `true` when the frontmatter omits the field.
+    /// The agent-side `SkillTool` (in `src/tools/skill.rs`) ignores this
+    /// — gating model invocation is a separate concern.
     pub user_invocable: bool,
     pub body_path: PathBuf,
 }
@@ -177,6 +179,113 @@ fn substitute_variables(text: &str, skill: &Skill, session_id: Option<&str>) -> 
         result = result.replace("${AGSH_SESSION_ID}", id);
     }
     result
+}
+
+/// Maximum length of a skill name. Kept small so the system-prompt
+/// `## Skills` listing stays readable and per-line bounded.
+pub const MAX_SKILL_NAME_LEN: usize = 64;
+
+/// Validate that `name` is a safe filesystem-and-prompt-embeddable skill
+/// identifier. Accepts `[A-Za-z0-9][A-Za-z0-9_-]*`, max
+/// [`MAX_SKILL_NAME_LEN`] characters. Rejects anything that could escape
+/// the skills directory (path components, hidden files) or break parsing
+/// of the slash-command grammar (whitespace, `:`).
+pub fn validate_skill_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("skill name cannot be empty".to_string());
+    }
+    if name.len() > MAX_SKILL_NAME_LEN {
+        return Err(format!(
+            "skill name '{}' exceeds {} characters",
+            name, MAX_SKILL_NAME_LEN
+        ));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "skill name '{}' must start with a letter or digit",
+            name
+        ));
+    }
+    for ch in chars {
+        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            return Err(format!(
+                "skill name '{}' contains invalid character '{}'; only [A-Za-z0-9_-] are allowed",
+                name, ch
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `~/.config/agsh/skills/<name>` for a given skill name.
+/// Returns `None` if the agsh config directory cannot be determined.
+/// Performs no I/O and does not validate the name — callers are expected
+/// to call [`validate_skill_name`] first.
+pub fn skill_dir_for(name: &str) -> Option<PathBuf> {
+    skills_dir().map(|root| root.join(name))
+}
+
+/// Render the default `SKILL.md` template for a new skill. Optional
+/// fields are emitted only when set, so the resulting file stays as
+/// minimal as the user's input — `--user-invocable true` (the default)
+/// is *not* written to keep the frontmatter lean.
+pub fn render_template(
+    name: &str,
+    description: &str,
+    when_to_use: &str,
+    allowed_tools: &[String],
+    version: Option<&str>,
+    user_invocable: bool,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    let _ = writeln!(out, "description: {}", yaml_scalar(description));
+    let _ = writeln!(out, "when_to_use: {}", yaml_scalar(when_to_use));
+    if !allowed_tools.is_empty() {
+        let joined = allowed_tools
+            .iter()
+            .map(|t| yaml_scalar(t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "allowed_tools: [{}]", joined);
+    }
+    if let Some(v) = version {
+        let _ = writeln!(out, "version: {}", yaml_scalar(v));
+    }
+    if !user_invocable {
+        out.push_str("user_invocable: false\n");
+    }
+    out.push_str("---\n\n");
+    let _ = writeln!(out, "# {}", name);
+    out.push('\n');
+    out.push_str(
+        "Skill body. Use `${AGSH_SKILL_DIR}` to reference files bundled in this skill's\n\
+         directory, or `${AGSH_SESSION_ID}` for the active session UUID.\n",
+    );
+    out
+}
+
+/// YAML-quote a scalar when it contains characters that would otherwise
+/// require structural interpretation. Plain ASCII text without leading
+/// punctuation, colons, or hash marks passes through unquoted.
+fn yaml_scalar(text: &str) -> String {
+    let needs_quotes = text.is_empty()
+        || text.starts_with([
+            '-', '?', ':', '!', '&', '*', '#', '|', '>', '%', '@', '`', '"', '\'',
+        ])
+        || text.contains(':')
+        || text.contains('#')
+        || text.contains('\n');
+    if needs_quotes {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    } else {
+        text.to_string()
+    }
 }
 
 #[cfg(test)]

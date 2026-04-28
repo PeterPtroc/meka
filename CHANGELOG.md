@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `agsh skill list | get | show | add | remove` CLI subcommands for managing user skills.
+- `/skill` REPL command: bare form lists installed skills; `/skill <name>` invokes one directly.
+- `--edit` flag on `agsh skill add` opens the new `SKILL.md` in `$EDITOR` after scaffolding.
+- `--from-file` on `agsh skill add` copies an existing template instead of scaffolding from flags.
+
+### Changed
+
+- `Skill::user_invocable` is now consumed: `/skill <name>` rejects skills marked
+  `user_invocable: false`. The agent-side `SkillTool` ignores the gate as before.
+- `/help` now lists `/skill` and `/mcp` slash commands (previously omitted).
+
 ## [0.17.2] - 2026-04-28
 
 ### Fixed
