@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Startup log lines no longer get clobbered by reedline's prompt redraw.
-  `tracing` output flows through reedline's `ExternalPrinter` and prints above the live prompt.
+- `tracing` output flows through reedline's `ExternalPrinter` and prints above the live prompt.
 
 ## [0.17.0] - 2026-04-28
 
