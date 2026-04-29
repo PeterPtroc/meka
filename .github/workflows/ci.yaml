@@ -23,6 +23,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Cancel superseded runs on the same PR (rapid force-pushes / amends),
+  # but let master pushes finish — we don't want a back-to-back master
+  # commit killing CI for the previous one.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
