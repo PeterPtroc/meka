@@ -83,13 +83,15 @@ fn build_large_output_preview(name: &str, text: &str) -> String {
 
     let mut replacement = format!(
         "<large-output name=\"{}\" size=\"{}\">\n\
-         Output too large ({}). \
-         Use scratchpad_read to access full content.\n\n\
+         Output too large ({}). Read with `scratchpad_read` — use \
+         `limit: {}` to load the full content in one call, or page \
+         with `offset`/`limit` if a partial read is enough.\n\n\
          Preview (first {} characters):\n\
          {}",
         name,
         size,
         format_size(size),
+        size,
         preview_end,
         preview,
     );
@@ -291,10 +293,15 @@ impl Tool for ScratchpadReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "scratchpad_read".to_string(),
-            description: "Read or search a scratchpad entry by name. Use offset/limit to page \
-                through large entries, or provide a regex to search for matching lines. Also \
-                used to access content referenced by <large-output> tags."
-                .to_string(),
+            description: format!(
+                "Read or search a scratchpad entry by name. Default returns {} \
+                 characters from offset; pass a larger `limit` (no hard cap) to load the full \
+                 entry in one call, or page with `offset`/`limit` for partial reads. Provide \
+                 `regex` to return matching lines (max {}) instead of a character range. Also \
+                 used to access content referenced by <large-output> tags — pass the `size` \
+                 value from the tag as `limit` when you intend to read everything.",
+                DEFAULT_READ_LIMIT, MAX_SEARCH_MATCHES,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -308,12 +315,15 @@ impl Tool for ScratchpadReadTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum characters to return. Default: 30000."
+                        "description": format!("Maximum characters to return. Default: {}.", DEFAULT_READ_LIMIT)
                     },
                     "regex": {
                         "type": "string",
-                        "description": "If provided, search the entry with this regex pattern \
-                            and return matching lines (max 100 matches) instead of a character range."
+                        "description": format!(
+                            "If provided, search the entry with this regex pattern \
+                             and return matching lines (max {} matches) instead of a character range.",
+                            MAX_SEARCH_MATCHES,
+                        )
                     }
                 },
                 "required": ["name"]

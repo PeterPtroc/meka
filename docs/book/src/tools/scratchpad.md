@@ -31,8 +31,8 @@ Read or search a scratchpad entry by name.
 |------|------|----------|-------------|
 | `name` | string | yes | The entry name |
 | `offset` | integer | no | Character offset to start reading from (default: 0) |
-| `limit` | integer | no | Maximum characters to return (default: 30000) |
-| `regex` | string | no | Search the entry and return matching lines (max 100) |
+| `limit` | integer | no | Maximum characters to return; no hard cap — pass the entry's `size` to load all content in one call. (Default and exact value are advertised in the tool's parameter schema.) |
+| `regex` | string | no | Search the entry and return matching lines (capped — exact value advertised in the tool's parameter schema). |
 
 ### `scratchpad_edit`
 

@@ -10,6 +10,10 @@ use crate::provider::ToolDefinition;
 use super::util::{redirects_to_scratchpad, require_str};
 use super::{Tool, ToolOutput};
 
+/// Inline result cap when the agent isn't redirecting to the scratchpad.
+/// Single source of truth for the description and the runtime cap.
+const MAX_INLINE_RESULTS: usize = 200;
+
 pub(super) struct FindFilesTool;
 
 #[async_trait]
@@ -17,17 +21,19 @@ impl Tool for FindFilesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "find_files".to_string(),
-            description: "Find files matching a glob pattern (e.g., '**/*.rs', 'src/*.txt'). \
-                          Avoid overly broad searches: scanning a large tree can take \
-                          a long time and will hit many directories the user has no \
-                          read permission for, producing noisy errors. Start with the \
-                          smallest `path` and most specific pattern that plausibly \
-                          contains the answer; if that returns nothing, widen the \
-                          `path` by one level or loosen the pattern, and repeat. Only \
-                          fall back to a tree-wide scan if targeted attempts have all \
-                          failed. Inline results are capped at 200 entries; use the \
-                          `scratchpad` parameter to collect an unbounded result set."
-                .to_string(),
+            description: format!(
+                "Find files matching a glob pattern (e.g., '**/*.rs', 'src/*.txt'). \
+                 Avoid overly broad searches: scanning a large tree can take \
+                 a long time and will hit many directories the user has no \
+                 read permission for, producing noisy errors. Start with the \
+                 smallest `path` and most specific pattern that plausibly \
+                 contains the answer; if that returns nothing, widen the \
+                 `path` by one level or loosen the pattern, and repeat. Only \
+                 fall back to a tree-wide scan if targeted attempts have all \
+                 failed. Inline results are capped at {} entries; use the \
+                 `scratchpad` parameter to collect an unbounded result set.",
+                MAX_INLINE_RESULTS,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -72,7 +78,7 @@ impl Tool for FindFilesTool {
         let max_results = if redirects_to_scratchpad(&input) {
             usize::MAX
         } else {
-            200
+            MAX_INLINE_RESULTS
         };
 
         let result = tokio::task::spawn_blocking(move || {

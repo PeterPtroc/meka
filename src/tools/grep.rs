@@ -11,6 +11,10 @@ use crate::provider::ToolDefinition;
 use super::util::{redirects_to_scratchpad, require_str};
 use super::{Tool, ToolOutput};
 
+/// Inline match cap when the agent isn't redirecting to the scratchpad.
+/// Single source of truth for the description and the runtime cap.
+const MAX_INLINE_MATCHES: usize = 100;
+
 pub(super) struct SearchContentsTool;
 
 #[async_trait]
@@ -18,17 +22,19 @@ impl Tool for SearchContentsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "search_contents".to_string(),
-            description: "Search file contents using a regex pattern (powered by ripgrep). \
-                          Avoid overly broad searches: scanning a large tree is slow \
-                          and will hit many directories the user has no read permission \
-                          for, producing noisy errors. Start with the smallest `path` \
-                          and a tight `glob` filter that plausibly contains the match; \
-                          if that returns nothing, widen the `path` by one level or \
-                          loosen the `glob`, and repeat. Only fall back to a tree-wide \
-                          scan if targeted attempts have all failed. Inline results are \
-                          capped at 100 matches; use the `scratchpad` parameter to \
-                          collect an unbounded result set."
-                .to_string(),
+            description: format!(
+                "Search file contents using a regex pattern (powered by ripgrep). \
+                 Avoid overly broad searches: scanning a large tree is slow \
+                 and will hit many directories the user has no read permission \
+                 for, producing noisy errors. Start with the smallest `path` \
+                 and a tight `glob` filter that plausibly contains the match; \
+                 if that returns nothing, widen the `path` by one level or \
+                 loosen the `glob`, and repeat. Only fall back to a tree-wide \
+                 scan if targeted attempts have all failed. Inline results are \
+                 capped at {} matches; use the `scratchpad` parameter to \
+                 collect an unbounded result set.",
+                MAX_INLINE_MATCHES,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -72,7 +78,7 @@ impl Tool for SearchContentsTool {
         let max_results = if redirects_to_scratchpad(&input) {
             usize::MAX
         } else {
-            100
+            MAX_INLINE_MATCHES
         };
 
         let result = tokio::task::spawn_blocking(move || {

@@ -167,6 +167,11 @@ static DDG_CAPTCHA: LazyLock<scraper::Selector> = LazyLock::new(|| {
 /// `fetch_url` on the result URL.
 const SNIPPET_MAX_CHARS: usize = 300;
 
+/// Default `max_length` applied when the caller doesn't pass one.
+/// Single source of truth for both the parameter unwrap and the
+/// description shown to the agent. Pass `0` to disable the cap.
+const DEFAULT_MAX_LENGTH: usize = 30_000;
+
 fn apply_headers(
     mut builder: reqwest::RequestBuilder,
     input: &serde_json::Value,
@@ -209,7 +214,10 @@ impl Tool for FetchUrlTool {
                     },
                     "max_length": {
                         "type": "integer",
-                        "description": "Maximum number of characters to return. Default: 30000. Set to 0 for no limit."
+                        "description": format!(
+                            "Maximum number of characters to return. Default: {}. Set to 0 for no limit.",
+                            DEFAULT_MAX_LENGTH,
+                        )
                     },
                     "headers": {
                         "type": "object",
@@ -340,7 +348,7 @@ impl Tool for FetchUrlTool {
             input["max_length"]
                 .as_u64()
                 .map(|value| value as usize)
-                .unwrap_or(30000)
+                .unwrap_or(DEFAULT_MAX_LENGTH)
         };
 
         let content = if max_length > 0 && body.len() > max_length {

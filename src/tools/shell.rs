@@ -12,6 +12,11 @@ use crate::provider::ToolDefinition;
 use super::util::require_str;
 use super::{Tool, ToolOutput};
 
+/// Default `timeout_ms` applied when the caller doesn't pass one.
+/// Single source of truth for both the parameter unwrap and the
+/// description shown to the agent.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
 pub(super) struct ExecuteCommandTool {
     pub sandbox_capability: crate::sandbox::SandboxCapability,
     pub shared_permission: crate::permission::SharedPermission,
@@ -42,7 +47,11 @@ impl Tool for ExecuteCommandTool {
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "Timeout in milliseconds. Defaults to 30000 (30 seconds)."
+                        "description": format!(
+                            "Timeout in milliseconds. Defaults to {} ({} seconds).",
+                            DEFAULT_TIMEOUT_MS,
+                            DEFAULT_TIMEOUT_MS / 1000,
+                        )
                     },
                     "scratchpad": {
                         "type": "string",
@@ -74,7 +83,7 @@ impl Tool for ExecuteCommandTool {
         cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
         let command = require_str(&input, "command", "execute_command")?;
-        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(30000);
+        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(DEFAULT_TIMEOUT_MS);
         let permission = self.shared_permission.get();
         let sandboxed = self.sandbox_enabled && permission != Permission::Write;
 

@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `Skill::user_invocable` is now consumed: `/skill <name>` rejects skills marked
-  `user_invocable: false`. The agent-side `SkillTool` ignores the gate as before.
+- `/skill <name>` rejects skills marked `user_invocable: false` (gate now consumed).
 - `/help` now lists `/skill` and `/mcp` slash commands (previously omitted).
+- `scratchpad_read` description and `<large-output>` preview advertise no hard cap on `limit`.
 
 ## [0.17.2] - 2026-04-28
 
