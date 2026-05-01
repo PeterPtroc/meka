@@ -828,7 +828,11 @@ impl Agent {
             .rev()
             .find(|e| matches!(e, crate::conversation::Event::CompactBoundary { .. }))
             .cloned()
-            .expect("just appended a CompactBoundary");
+            .ok_or_else(|| {
+                AgshError::Internal(
+                    "compact boundary missing after replace_for_compaction".to_string(),
+                )
+            })?;
         self.session_manager
             .save_event(sid, &boundary_event)
             .await?;

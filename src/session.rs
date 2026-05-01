@@ -96,6 +96,27 @@ fn default_database_path() -> Result<PathBuf> {
     Ok(base.join("agsh").join("sessions.db"))
 }
 
+/// Create a directory (and any missing parents) born at mode 0700 on Unix.
+/// Avoids the umask window that `create_dir_all` + later `set_permissions`
+/// would open: between `mkdir(2)` and `chmod(2)`, the directory would be
+/// readable by other local users on a permissive umask. `DirBuilderExt::mode`
+/// passes the mode straight to `mkdir`. Pre-existing directories keep their
+/// mode — callers that need to tighten an already-existing dir should still
+/// follow up with `restrict_permissions`.
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
 /// Restrict a path's permissions on Unix. Best-effort — if the call fails
 /// we log and continue, because on some mounts (`/tmp` under specific
 /// overlay setups, NFS without proper support, etc.) `chmod` returns
@@ -147,7 +168,8 @@ impl SessionManager {
             std::env::temp_dir().join(format!("agsh-test-locks-{}", Uuid::new_v4()))
         } else {
             if let Some(parent) = database_path.parent() {
-                std::fs::create_dir_all(parent)?;
+                create_private_dir(parent)?;
+                // Pre-existing parents inherit their old mode; tighten if so.
                 restrict_permissions(parent, 0o700);
             }
             database_path
@@ -155,18 +177,40 @@ impl SessionManager {
                 .unwrap_or_else(|| Path::new("."))
                 .join("locks")
         };
-        std::fs::create_dir_all(&lock_dir)?;
+        create_private_dir(&lock_dir)?;
         restrict_permissions(&lock_dir, 0o700);
+
+        // Pre-touch the DB file at 0600 so SQLite's `Connection::open` reuses
+        // an already-restricted file rather than creating one at umask
+        // defaults that we then chmod down — the latter leaves a window
+        // where another local user could open the file. `-wal`/`-shm`
+        // companions still inherit the umask, but the parent directory's
+        // 0700 mode keeps them inaccessible to other users.
+        #[cfg(unix)]
+        if !is_in_memory {
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .mode(0o600)
+                .open(&database_path)
+                .map_err(|error| {
+                    AgshError::Database(format!(
+                        "failed to pre-touch database '{}': {}",
+                        database_path.display(),
+                        error
+                    ))
+                })?;
+        }
 
         let connection = Connection::open(&database_path)
             .await
             .map_err(|error| AgshError::Database(format!("failed to open database: {}", error)))?;
 
-        // Tighten the DB file itself to 0600. -wal/-shm companions created
-        // later by SQLite may pick up the default umask, but the parent
-        // directory mode above (0700) is already enough to block other
-        // local users; the 0600 here is belt-and-braces for the case where
-        // the data dir is pre-created with permissive modes.
+        // Belt-and-braces: if the file pre-existed at a more permissive mode
+        // (manual setup, restored backup, etc.), tighten it now. The
+        // pre-touch above is the primary protection for newly-created files.
         if !is_in_memory {
             restrict_permissions(&database_path, 0o600);
         }

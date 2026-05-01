@@ -320,19 +320,17 @@ async fn create_agent_from_config(
 
     // Register the sub-agent tool with access to the provider
     if builtin_filter.admits("spawn_agent") {
-        tool_registry
-            .register(Arc::new(crate::tools::subagent::SpawnAgentTool {
-                provider: Arc::clone(&provider),
-                parent_permission: shared_permission.clone(),
-                tool_builder_params: crate::tools::subagent::ToolBuilderParams {
-                    web_client: config.web_client.clone(),
-                    sandbox_enabled: config.sandbox,
-                    sandbox_capability,
-                    builtin_filter: builtin_filter.clone(),
-                },
-                user_instructions: config.user_instructions.clone(),
-            }))
-            .expect("builtin subagent tool name collision");
+        tool_registry.register(Arc::new(crate::tools::subagent::SpawnAgentTool {
+            provider: Arc::clone(&provider),
+            parent_permission: shared_permission.clone(),
+            tool_builder_params: crate::tools::subagent::ToolBuilderParams {
+                web_client: config.web_client.clone(),
+                sandbox_enabled: config.sandbox,
+                sandbox_capability,
+                builtin_filter: builtin_filter.clone(),
+            },
+            user_instructions: config.user_instructions.clone(),
+        }))?;
     }
 
     crate::tools::warn_on_stale_builtin_tool_config(&builtin_filter);

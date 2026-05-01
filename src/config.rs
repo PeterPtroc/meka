@@ -493,16 +493,37 @@ pub(crate) fn write_config_atomic(path: &Path, content: &str) -> std::io::Result
     use std::io::Write as _;
 
     if let Some(parent) = path.parent() {
+        // Create newly-missing parents already at 0700 to avoid the umask
+        // window left by `create_dir_all` followed by `set_permissions`.
+        // `DirBuilderExt::mode` passes the mode straight to `mkdir(2)`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(parent)?;
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir_all(parent)?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Best-effort — a pre-existing dir with different perms stays as-is.
+            // Pre-existing dirs may have a different mode (e.g. user
+            // pre-created `~/.config` at 0755). Best-effort tighten to 0700;
+            // failure here gets a warning rather than aborting the write.
             if let Ok(metadata) = std::fs::metadata(parent) {
                 let mut perms = metadata.permissions();
                 if perms.mode() & 0o777 != 0o700 {
                     perms.set_mode(0o700);
-                    let _ = std::fs::set_permissions(parent, perms);
+                    if let Err(error) = std::fs::set_permissions(parent, perms) {
+                        tracing::warn!(
+                            "failed to tighten '{}' to 0700: {}",
+                            parent.display(),
+                            error
+                        );
+                    }
                 }
             }
         }

@@ -126,7 +126,15 @@ fn search_with_grep(
     if path.is_file() {
         search_file(&matcher, path, &mut results)?;
     } else if path.is_dir() {
-        let glob_pattern = file_glob.and_then(|g| glob::Pattern::new(g).ok());
+        let glob_pattern = match file_glob {
+            Some(g) => Some(
+                glob::Pattern::new(g).map_err(|error| AgshError::ToolExecution {
+                    tool_name: "search_contents".to_string(),
+                    message: format!("invalid glob pattern '{}': {}", g, error),
+                })?,
+            ),
+            None => None,
+        };
 
         walk_directory(path, &matcher, &glob_pattern, &mut results)?;
     } else {
@@ -265,6 +273,31 @@ mod tests {
             .expect("should succeed");
 
         assert!(text_content(&result).contains("truncated, showing first 100"));
+    }
+
+    #[tokio::test]
+    async fn test_search_contents_invalid_glob_errors() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp_dir.path().join("a.txt"), "match").expect("write");
+
+        let tool = SearchContentsTool;
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "pattern": "match",
+                    "path": temp_dir.path().to_str().expect("path"),
+                    "glob": "[unclosed",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("invalid glob must be rejected, not silently scan everything");
+        let message = format!("{}", err);
+        assert!(
+            message.contains("invalid glob pattern"),
+            "unexpected error: {}",
+            message
+        );
     }
 
     #[tokio::test]

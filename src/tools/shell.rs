@@ -260,15 +260,27 @@ async fn kill_child_tree(child: &mut tokio::process::Child) {
             let pgid = pid as libc::pid_t;
             // SAFETY: `kill(2)` is always safe to call; it just returns an
             // error if the target is gone. Sending to `-pgid` targets the
-            // whole process group.
-            unsafe {
-                libc::kill(-pgid, libc::SIGTERM);
+            // whole process group. Errors here usually mean the group
+            // already exited; log at debug so an unkillable group still
+            // leaves a trail without spamming default verbosity.
+            let term_result = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+            if term_result != 0 {
+                tracing::debug!(
+                    "libc::kill(-{}, SIGTERM) failed: {}",
+                    pgid,
+                    std::io::Error::last_os_error()
+                );
             }
             // Brief grace period so well-behaved children can shut down
             // cleanly before SIGKILL lands.
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
+            let kill_result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            if kill_result != 0 {
+                tracing::debug!(
+                    "libc::kill(-{}, SIGKILL) failed: {}",
+                    pgid,
+                    std::io::Error::last_os_error()
+                );
             }
         }
     }

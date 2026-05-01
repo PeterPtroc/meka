@@ -276,14 +276,38 @@ async fn build_mcp_adapters(
             mcp_default_permission,
         )?;
 
-        let annotations = tool
-            .annotations
-            .as_ref()
-            .and_then(|ann| serde_json::to_value(ann).ok());
+        // Annotations carry permission hints (`readOnlyHint`,
+        // `destructiveHint`); silently dropping them on a serialization
+        // failure could quietly relax permission resolution. Log so the
+        // failure shows up at default verbosity.
+        let annotations =
+            tool.annotations
+                .as_ref()
+                .and_then(|ann| match serde_json::to_value(ann) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to serialize annotations for tool '{}': {}",
+                            namespaced_name,
+                            error
+                        );
+                        None
+                    }
+                });
         let meta = tool
             .meta
             .as_ref()
-            .and_then(|m| serde_json::to_value(m).ok());
+            .and_then(|m| match serde_json::to_value(m) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to serialize meta for tool '{}': {}",
+                        namespaced_name,
+                        error
+                    );
+                    None
+                }
+            });
         let title = tool
             .title
             .as_ref()

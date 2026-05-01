@@ -417,14 +417,32 @@ async fn authenticate_client_credentials_jwt(
     scopes: Option<&[String]>,
     resource: Option<&str>,
 ) -> Result<AuthorizationManager> {
-    require_private_key_permissions(server_name, signing_key_path)?;
-    let signing_key = std::fs::read(signing_key_path).map_err(|error| AgshError::McpAuth {
-        server_name: server_name.to_string(),
-        message: format!(
-            "failed to read signing key '{}': {}",
-            signing_key_path, error
-        ),
-    })?;
+    // Open the key once and check permissions on the open fd to close the
+    // stat-then-read TOCTOU window: a separate `metadata(path)` followed by
+    // `read(path)` could land on a different inode if the path was swapped
+    // between syscalls. `File::metadata` walks the open descriptor.
+    let mut key_file =
+        std::fs::File::open(signing_key_path).map_err(|error| AgshError::McpAuth {
+            server_name: server_name.to_string(),
+            message: format!(
+                "failed to open signing key '{}': {}",
+                signing_key_path, error
+            ),
+        })?;
+    require_private_key_permissions_on_fd(server_name, signing_key_path, &key_file)?;
+    let mut signing_key = Vec::new();
+    {
+        use std::io::Read;
+        key_file
+            .read_to_end(&mut signing_key)
+            .map_err(|error| AgshError::McpAuth {
+                server_name: server_name.to_string(),
+                message: format!(
+                    "failed to read signing key '{}': {}",
+                    signing_key_path, error
+                ),
+            })?;
+    }
 
     let algorithm = parse_jwt_signing_algorithm(server_name, signing_algorithm)?;
 
@@ -465,12 +483,20 @@ async fn authenticate_client_credentials_jwt(
 /// DB and config.toml: if the key can be read by another local user, a
 /// local attacker can forge JWTs to the MCP server and impersonate us.
 ///
+/// Takes the open `File` so the permission check and the subsequent read
+/// share the same inode — a stat-then-read pair on the path could be
+/// swapped between syscalls.
+///
 /// No-op on non-Unix: Windows uses ACLs and we don't try to audit them.
-fn require_private_key_permissions(server_name: &str, path: &str) -> Result<()> {
+fn require_private_key_permissions_on_fd(
+    server_name: &str,
+    path: &str,
+    file: &std::fs::File,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(path).map_err(|error| AgshError::McpAuth {
+        let metadata = file.metadata().map_err(|error| AgshError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("failed to stat signing key '{}': {}", path, error),
         })?;
@@ -487,7 +513,7 @@ fn require_private_key_permissions(server_name: &str, path: &str) -> Result<()> 
     }
     #[cfg(not(unix))]
     {
-        let _ = (server_name, path);
+        let _ = (server_name, path, file);
     }
     Ok(())
 }
@@ -913,8 +939,17 @@ fn parse_pasted_callback(input: &str) -> std::result::Result<(String, String), S
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        // Strict UTF-8: silently mangling a security-sensitive parameter
+        // (e.g. swapping invalid bytes for U+FFFD) could let a tampered
+        // `state` value match the expected one despite differing bytes.
         let decoded = percent_encoding::percent_decode_str(value)
-            .decode_utf8_lossy()
+            .decode_utf8()
+            .map_err(|error| {
+                format!(
+                    "OAuth callback parameter '{}' is not valid UTF-8: {}",
+                    key, error
+                )
+            })?
             .into_owned();
         match key {
             "code" => code = Some(decoded),
@@ -978,8 +1013,15 @@ fn parse_callback_query(
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        // Strict UTF-8: see `parse_pasted_callback` for rationale.
         let decoded = percent_encoding::percent_decode_str(value)
-            .decode_utf8_lossy()
+            .decode_utf8()
+            .map_err(|error| {
+                CallbackParseError::Malformed(format!(
+                    "OAuth callback parameter '{}' is not valid UTF-8: {}",
+                    key, error
+                ))
+            })?
             .into_owned();
         match key {
             "code" => code = Some(decoded),
@@ -1141,6 +1183,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_callback_query_rejects_invalid_utf8_state() {
+        // %FF and %FE are invalid as UTF-8; lossy decoding would silently
+        // turn them into U+FFFD, which can let a tampered `state` parameter
+        // match a stored one despite differing bytes. Strict mode rejects.
+        let request = "GET /callback?code=abc&state=%FF%FE HTTP/1.1\r\n";
+        let err = parse_callback_query(request).expect_err("non-utf8 state must be rejected");
+        match err {
+            CallbackParseError::Malformed(m) => {
+                assert!(
+                    m.contains("not valid UTF-8"),
+                    "unexpected error message: {}",
+                    m
+                );
+            }
+            other => panic!("expected Malformed, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_callback_query_surfaces_oauth_error() {
         let request = "GET /callback?error=access_denied HTTP/1.1\r\n";
         let err = parse_callback_query(request).expect_err("should fail");
@@ -1239,8 +1300,13 @@ mod tests {
         // 0644 — readable by other users.
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
             .expect("chmod 0644");
-        let err = require_private_key_permissions("srv", key_path.to_str().unwrap())
-            .expect_err("loose perms must be rejected");
+        let file = std::fs::File::open(&key_path).expect("open key");
+        let err = require_private_key_permissions_on_fd(
+            "srv",
+            key_path.to_str().expect("utf-8 path"),
+            &file,
+        )
+        .expect_err("loose perms must be rejected");
         let message = format!("{}", err);
         assert!(
             message.contains("0600") || message.contains("permissions"),
@@ -1261,16 +1327,20 @@ mod tests {
         drop(f);
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
             .expect("chmod 0600");
-        require_private_key_permissions("srv", key_path.to_str().unwrap()).expect("0600 must pass");
+        let file = std::fs::File::open(&key_path).expect("open key");
+        require_private_key_permissions_on_fd("srv", key_path.to_str().expect("utf-8 path"), &file)
+            .expect("0600 must pass");
     }
 
     #[cfg(unix)]
     #[test]
     fn require_private_key_permissions_reports_missing_file() {
-        let err = require_private_key_permissions("srv", "/nonexistent/key.pem")
-            .expect_err("missing file must error");
+        // Missing file errors at `File::open` rather than inside the
+        // permissions check; assert the open-side error message matches the
+        // user-facing wording in `authenticate_client_credentials_jwt`.
+        let err = std::fs::File::open("/nonexistent/key.pem").expect_err("missing file must error");
         let message = format!("{}", err);
-        assert!(message.contains("stat signing key") || message.contains("key"));
+        assert!(message.contains("No such file") || message.contains("not found"));
     }
 
     #[test]

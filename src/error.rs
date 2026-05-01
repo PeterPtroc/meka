@@ -30,6 +30,12 @@ pub enum AgshError {
     #[error("agent interrupted by user")]
     Interrupted,
 
+    /// A logic invariant in agsh itself was violated. Used in place of
+    /// `.expect()` for cases where a bug in our own code (not user input or
+    /// I/O) is the only path to the error.
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error("SSE stream error: {0}")]
     StreamError(String),
 

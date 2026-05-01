@@ -149,7 +149,7 @@ impl Tool for ReadFileTool {
             })?
             .to_string();
 
-        let canonical = canonicalize_for_tool(&path).await;
+        let canonical = canonicalize_for_tool("read_file", Path::new(&path)).await?;
 
         // Detect image files and return multimodal content, converting
         // non-native formats (TIFF, ICO, etc.) to PNG along the way.
@@ -305,7 +305,7 @@ impl Tool for EditFileTool {
         // Canonicalize once. All subsequent I/O goes through this path so a
         // symlink swap between the tracker check and the actual read/write
         // can't redirect us onto a different file.
-        let canonical = canonicalize_for_tool(&path).await;
+        let canonical = canonicalize_for_tool("edit_file", Path::new(&path)).await?;
 
         if !force && !self.read_tracker.read().await.contains(&canonical) {
             return Ok(ToolOutput::text(
@@ -436,8 +436,7 @@ impl Tool for WriteFileTool {
                 message: format!("failed to create directories for '{}': {}", path, error),
             })?;
 
-        let canonical_parent =
-            canonicalize_for_tool(parent_for_create.to_str().unwrap_or(".")).await;
+        let canonical_parent = canonicalize_for_tool("write_file", parent_for_create).await?;
         let target = canonical_parent.join(file_name);
 
         write_file_bytes(&target, content.as_bytes())

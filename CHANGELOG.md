@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-05-01
+
+### Security
+
+- `canonicalize_for_tool` now errors on resolution failure; `write_file` canonicalizes the parent.
+- JWT signing-key permissions now checked on the open `File` to close the stat-then-read TOCTOU.
+- `search_contents` rejects invalid glob patterns instead of silently scanning the whole tree.
+- OAuth callback `code`/`state`/`error` parameters are decoded with strict UTF-8, not lossy.
+- Session DB pre-touched at 0600 and data/lock/config dirs born at 0700 to close umask windows.
+- `set_permissions` failures on the config directory now log a warning instead of being discarded.
+- `.expect()` panics on tool registration and compaction-boundary lookup replaced with `?`.
+- New `AgshError::Internal` variant for logic-invariant failures that previously panicked.
+- MCP tool annotation/meta serialization failures now warn-log instead of being silently dropped.
+- `libc::kill` failures during process-group teardown now logged at `debug!`.
+
 ## [0.18.1] - 2026-04-30
 
 ### Added

@@ -1,6 +1,6 @@
 //! Small shared helpers for tool-input parsing and validation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{AgshError, Result};
 
@@ -44,13 +44,19 @@ pub(super) fn compile_user_regex(pattern: &str, tool_name: &str) -> Result<regex
 /// `PathBuf` for every subsequent filesystem operation; never re-open the
 /// original raw string.
 ///
-/// When canonicalization fails (e.g. the target doesn't exist, for
-/// `write_file`), returns the raw path unchanged so the caller can attempt
-/// the operation and surface a natural `NotFound`/`PermissionDenied` error.
-pub(super) async fn canonicalize_for_tool(raw: &str) -> PathBuf {
-    tokio::fs::canonicalize(raw)
+/// Errors when the path cannot be resolved (target missing, parent not a
+/// directory, permission denied, etc.). For `write_file` where the target
+/// file may not exist yet, callers must canonicalize the *parent* directory
+/// (which they create first) and re-join the filename. Falling back to the
+/// raw path on failure would leave `..`/symlink components in parent
+/// directories unresolved, defeating the TOCTOU protection.
+pub(super) async fn canonicalize_for_tool(tool_name: &str, path: &Path) -> Result<PathBuf> {
+    tokio::fs::canonicalize(path)
         .await
-        .unwrap_or_else(|_| PathBuf::from(raw))
+        .map_err(|error| AgshError::ToolExecution {
+            tool_name: tool_name.to_string(),
+            message: format!("failed to resolve path '{}': {}", path.display(), error),
+        })
 }
 
 pub(super) fn truncate_string(string: &str, max_length: usize) -> &str {
@@ -108,7 +114,9 @@ mod tests {
         let file_path = temp_dir.path().join("a.txt");
         std::fs::write(&file_path, "x").expect("write");
 
-        let canonical = canonicalize_for_tool(file_path.to_str().expect("utf-8 path")).await;
+        let canonical = canonicalize_for_tool("test_tool", &file_path)
+            .await
+            .expect("canonicalize");
         assert_eq!(
             canonical,
             std::fs::canonicalize(&file_path).expect("canonical")
@@ -116,11 +124,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_canonicalize_for_tool_falls_back_on_missing() {
-        let canonical = canonicalize_for_tool("/this/path/definitely/does/not/exist-xyzzy").await;
-        assert_eq!(
-            canonical,
-            std::path::PathBuf::from("/this/path/definitely/does/not/exist-xyzzy")
+    async fn test_canonicalize_for_tool_errors_on_missing() {
+        let result = canonicalize_for_tool(
+            "test_tool",
+            std::path::Path::new("/this/path/definitely/does/not/exist-xyzzy"),
+        )
+        .await;
+        let err = result.expect_err("missing path should error");
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to resolve path"),
+            "unexpected error message: {}",
+            message,
         );
     }
 
