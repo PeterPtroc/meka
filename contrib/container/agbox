@@ -11,12 +11,32 @@ for dir in "$HOME/.config/agsh" "$HOME/.local/share/agsh"; do
     fi
 done
 
+# Pick a container runtime: prefer podman (rootless by default), fall back to docker.
+if command -v podman >/dev/null 2>&1; then
+    runtime="podman"
+elif command -v docker >/dev/null 2>&1; then
+    runtime="docker"
+else
+    echo "$(basename "$0"): neither podman nor docker found in PATH" >&2
+    exit 1
+fi
+
+# Probe the runtime once to determine whether sudo is needed.
+sudo_prefix=()
+if ! "$runtime" info >/dev/null 2>&1; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "$(basename "$0"): $runtime is not usable and sudo is not available" >&2
+        exit 1
+    fi
+    sudo_prefix=(sudo)
+fi
+
 # Default to `--permission write` if no arguments are provided
 if [[ $# -eq 0 ]]; then
     set -- --permission write
 fi
 
-exec sudo docker run --rm -it \
+exec "${sudo_prefix[@]}" "$runtime" run --rm -it \
     -v "$HOME/.config/agsh:/root/.config/agsh:ro" \
     -v "$HOME/.local/share/agsh:/root/.local/share/agsh:rw" \
     agsh:latest \
