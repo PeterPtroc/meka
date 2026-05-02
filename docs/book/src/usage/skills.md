@@ -6,6 +6,7 @@ Skills are user-defined knowledge packages that give the agent non-standard know
 
 - Skills live in `~/.config/agsh/skills/` (platform-specific config dir).
 - Each skill is a directory: `skills/<name>/SKILL.md`.
+- Any entry whose name begins with `.` is skipped at discovery. This covers VCS metadata (`.git`), editor/IDE state (`.vscode`, `.idea`), filesystem artifacts (`.DS_Store`, `.Trash`), and any other dotfile or dotdir that may sit alongside your skills.
 - `SKILL.md` starts with a YAML frontmatter block declaring the skill's metadata, followed by Markdown body content.
 - On every prompt, agsh discovers all valid skills and lists them in the system prompt with their `description` and `when_to_use`.
 - The agent invokes a skill by calling the `skill` tool with the skill name. The tool returns the full body, which the agent follows.

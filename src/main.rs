@@ -52,8 +52,9 @@ fn main() -> anyhow::Result<()> {
     // live prompt instead of racing reedline's redraw. Without a printer
     // installed (non-interactive subcommands, pre-REPL startup window)
     // the relay falls back to plain stderr.
+    let rust_log = std::env::var("RUST_LOG").ok();
     tracing_subscriber::fmt()
-        .with_env_filter(build_log_filter(log_level))
+        .with_env_filter(build_log_filter(rust_log.as_deref(), log_level))
         .with_writer(relay::RELAY.clone())
         .init();
 
@@ -139,9 +140,11 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
 /// (`"max retry times reached"`) is emitted at `error!` from the same
 /// module, so an `=error` floor keeps the useful signal and drops the
 /// noise. Verified against rmcp 1.5.
-fn build_log_filter(log_level: &str) -> tracing_subscriber::EnvFilter {
+fn build_log_filter(rust_log: Option<&str>, log_level: &str) -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
-    if let Ok(filter) = EnvFilter::try_from_default_env() {
+    if let Some(value) = rust_log
+        && let Ok(filter) = EnvFilter::try_new(value)
+    {
         return filter;
     }
     EnvFilter::new(log_level).add_directive(
@@ -1473,12 +1476,7 @@ mod tests {
     /// dropping the directive and letting the noisy warning back in.
     #[test]
     fn default_log_filter_downgrades_rmcp_sse_warns() {
-        // Belt-and-braces: clear RUST_LOG so the `try_from_default_env`
-        // branch doesn't short-circuit under a developer-set env var.
-        // SAFETY: tests run in a single process; we don't read this env
-        // var from other threads.
-        unsafe { std::env::remove_var("RUST_LOG") };
-        let rendered = format!("{}", build_log_filter("warn"));
+        let rendered = format!("{}", build_log_filter(None, "warn"));
         assert!(
             rendered.contains("rmcp::transport::common::client_side_sse=error"),
             "expected SSE-reconnect target to be floored at `error` in the default \
@@ -1492,11 +1490,7 @@ mod tests {
     /// `RUST_LOG=rmcp=debug` works as expected.
     #[test]
     fn explicit_rust_log_is_not_overridden() {
-        // SAFETY: tests run in a single process; we don't read RUST_LOG
-        // from other threads.
-        unsafe { std::env::set_var("RUST_LOG", "rmcp=debug") };
-        let rendered = format!("{}", build_log_filter("warn"));
-        unsafe { std::env::remove_var("RUST_LOG") };
+        let rendered = format!("{}", build_log_filter(Some("rmcp=debug"), "warn"));
         assert!(
             !rendered.contains("rmcp::transport::common::client_side_sse=error"),
             "explicit RUST_LOG must not be augmented; got: {}",

@@ -93,6 +93,13 @@ pub fn discover_skills() -> Vec<Skill> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        // Skip any dot-prefixed entry: VCS metadata (`.git`), editor/IDE
+        // state (`.vscode`, `.idea`), filesystem artifacts (`.DS_Store`),
+        // etc. None are real skills, and silently skipping them avoids
+        // spurious "missing SKILL.md" warnings.
+        if name.starts_with('.') {
+            continue;
+        }
         let name = name.to_string();
 
         let skill_file = path.join("SKILL.md");
