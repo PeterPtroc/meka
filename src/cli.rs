@@ -327,6 +327,10 @@ pub struct Cli {
     #[arg(long = "thinking-budget")]
     pub thinking_budget: Option<u64>,
 
+    /// Override `[prompt].instructions` for this run (replaces config value).
+    #[arg(long = "instructions", value_name = "STRING")]
+    pub instructions: Option<String>,
+
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbosity: u8,

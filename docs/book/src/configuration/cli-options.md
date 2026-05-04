@@ -146,6 +146,14 @@ Set the extended thinking token budget. Implies `--thinking`.
 agsh --thinking-budget 20000
 ```
 
+### `--instructions <STRING>`
+
+Override [`prompt.instructions`](./config-file.md#promptinstructions) for this run, replacing whatever is in the config file. Also reads from `AGSH_INSTRUCTIONS` if the flag is not given.
+
+```bash
+agsh --instructions "Be terse. No code fences in answers."
+```
+
 ### `-v`, `--verbose`
 
 Increase log verbosity. Can be repeated up to three times.

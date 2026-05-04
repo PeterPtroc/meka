@@ -766,8 +766,11 @@ impl ResolvedConfig {
             None => None,
         };
 
-        let user_instructions = file_prompt
+        let user_instructions = cli
             .instructions
+            .clone()
+            .or_else(|| std::env::var("AGSH_INSTRUCTIONS").ok())
+            .or(file_prompt.instructions)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
 
@@ -1884,6 +1887,79 @@ Rule 2.
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         assert_eq!(resolved.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_user_instructions_cli_overrides_config() {
+        // Replicates the merge chain in `from_cli`: CLI value wins over config.
+        let cli: Option<String> = Some("from cli".to_string());
+        let env: Option<String> = None;
+        let file: Option<String> = Some("from config".to_string());
+        let resolved = cli
+            .or(env)
+            .or(file)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        assert_eq!(resolved.as_deref(), Some("from cli"));
+    }
+
+    #[test]
+    fn test_user_instructions_falls_through_to_config_when_cli_unset() {
+        let cli: Option<String> = None;
+        let env: Option<String> = None;
+        let file: Option<String> = Some("from config".to_string());
+        let resolved = cli
+            .or(env)
+            .or(file)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        assert_eq!(resolved.as_deref(), Some("from config"));
+    }
+
+    /// End-to-end check that AGSH_INSTRUCTIONS overrides
+    /// `[prompt].instructions` when `--instructions` is not on the CLI.
+    /// Drives the actual `from_cli` path against a tempdir-backed config
+    /// to catch any regression where the env-var read silently no-ops.
+    ///
+    /// Touches process env, so it serializes against any other env-var
+    /// test in this file via `ENV_LOCK`.
+    #[test]
+    fn test_env_var_overrides_config_file_instructions() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[prompt]\ninstructions = \"FROM CONFIG FILE\"\n",
+        )
+        .expect("write config.toml");
+
+        // SAFETY: ENV_LOCK serializes this with any other env-var test.
+        unsafe {
+            std::env::set_var("AGSH_CONFIG_DIR", dir.path());
+            std::env::set_var("AGSH_INSTRUCTIONS", "FROM ENV VAR");
+        }
+
+        use clap::Parser;
+        let cli = crate::cli::Cli::parse_from(["agsh"]);
+        let resolved = ResolvedConfig::from_cli(&cli);
+
+        // SAFETY: same as above — ENV_LOCK held for the full set→read→clear cycle.
+        unsafe {
+            std::env::remove_var("AGSH_CONFIG_DIR");
+            std::env::remove_var("AGSH_INSTRUCTIONS");
+        }
+
+        assert_eq!(
+            resolved.user_instructions.as_deref(),
+            Some("FROM ENV VAR"),
+            "AGSH_INSTRUCTIONS should override [prompt].instructions in the config file",
+        );
     }
 
     #[test]

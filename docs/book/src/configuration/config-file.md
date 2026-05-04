@@ -458,6 +458,7 @@ Notes:
 - Empty or whitespace-only strings are treated as unset.
 - Instructions apply to sub-agents spawned via `spawn_agent` too.
 - Instructions are included at all permission levels (including `none`) because they are authored by you.
+- Per-run override: [`--instructions`](./cli-options.md#instructions-string) (or `AGSH_INSTRUCTIONS`) replaces this value for a single invocation.
 
 ## `[mcp]`
 

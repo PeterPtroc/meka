@@ -31,13 +31,22 @@ if ! "$runtime" info >/dev/null 2>&1; then
     sudo_prefix=(sudo)
 fi
 
-# Default to `--permission write` if no arguments are provided
-if [[ $# -eq 0 ]]; then
-    set -- --permission write
-fi
+# Override instructions for the containerized environment
+agbox_instructions='You are running inside an isolated agbox container with full root privileges.
+You may freely install system packages (pacman -S, apt install, etc.), language runtimes, and
+developer tooling as needed for the task. Container changes do not persist between invocations
+except in mounted volumes.
+
+Limit all changes to within this container; do not attempt to modify the host system or rely on
+changes persisting outside mounted volumes.
+
+Prefer Exa Search (`mcp__exa__web_search_exa` and `mcp__exa__web_fetch_exa`) over the built-in
+`web_search` tool for searches, when available.'
 
 exec "${sudo_prefix[@]}" "$runtime" run --rm -it \
     -v "$HOME/.config/agsh:/root/.config/agsh:ro" \
     -v "$HOME/.local/share/agsh:/root/.local/share/agsh:rw" \
+    -e AGSH_PERMISSION=write \
+    -e AGSH_INSTRUCTIONS="$agbox_instructions" \
     ghcr.io/k4yt3x/agsh:latest \
     "$@"
