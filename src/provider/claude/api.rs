@@ -210,7 +210,8 @@ impl Provider for ClaudeApiProvider {
         let response = request.send().await.map_err(|error| {
             AgshError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
-                body_size_mib, error
+                body_size_mib,
+                crate::error::format_reqwest_error(&error),
             ))
         })?;
 
@@ -254,7 +255,8 @@ impl Provider for ClaudeApiProvider {
         let response = request.send().await.map_err(|error| {
             AgshError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
-                body_size_mib, error
+                body_size_mib,
+                crate::error::format_reqwest_error(&error),
             ))
         })?;
 

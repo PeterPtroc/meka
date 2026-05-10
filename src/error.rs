@@ -68,3 +68,26 @@ pub enum AgshError {
 }
 
 pub type Result<T> = std::result::Result<T, AgshError>;
+
+/// Format a [`reqwest::Error`] together with its full source chain.
+///
+/// reqwest's outer Display string ("error sending request for url …")
+/// usually hides the actual cause (TCP reset, HTTP/2 GOAWAY, TLS
+/// handshake failure, connect timeout, DNS resolution failure, …).
+/// Walking [`std::error::Error::source`] surfaces the underlying reason
+/// inline, so users (and bug reports) see what actually broke instead of
+/// reqwest's generic wrapper.
+///
+/// Used at every site that wraps a `reqwest::Error` in an `AgshError`
+/// via Display formatting.
+pub(crate) fn format_reqwest_error(error: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut out = error.to_string();
+    let mut source: Option<&dyn std::error::Error> = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}

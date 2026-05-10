@@ -260,7 +260,11 @@ impl Tool for FetchUrlTool {
             .await
             .map_err(|error| AgshError::ToolExecution {
                 tool_name: "fetch_url".to_string(),
-                message: format!("failed to fetch '{}': {}", url, error),
+                message: format!(
+                    "failed to fetch '{}': {}",
+                    url,
+                    crate::error::format_reqwest_error(&error)
+                ),
             })?;
 
         let status = response.status();
@@ -434,7 +438,10 @@ impl Tool for WebSearchTool {
             .await
             .map_err(|error| AgshError::ToolExecution {
                 tool_name: "web_search".to_string(),
-                message: format!("search request failed: {}", error),
+                message: format!(
+                    "search request failed: {}",
+                    crate::error::format_reqwest_error(&error)
+                ),
             })?;
 
         let html = response

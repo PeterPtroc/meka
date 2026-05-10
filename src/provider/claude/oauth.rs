@@ -246,7 +246,10 @@ impl ClaudeOAuthProvider {
             .send()
             .await
             .map_err(|error| {
-                AgshError::Provider(format!("OAuth token refresh request failed: {}", error))
+                AgshError::Provider(format!(
+                    "OAuth token refresh request failed: {}",
+                    crate::error::format_reqwest_error(&error)
+                ))
             })?;
 
         if !response.status().is_success() {
@@ -509,7 +512,8 @@ impl Provider for ClaudeOAuthProvider {
         let response = request.body(body_json).send().await.map_err(|error| {
             AgshError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
-                body_size_mib, error
+                body_size_mib,
+                crate::error::format_reqwest_error(&error),
             ))
         })?;
 
@@ -564,7 +568,8 @@ impl Provider for ClaudeOAuthProvider {
         let response = request.body(body_json).send().await.map_err(|error| {
             AgshError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
-                body_size_mib, error
+                body_size_mib,
+                crate::error::format_reqwest_error(&error),
             ))
         })?;
 

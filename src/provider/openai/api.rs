@@ -286,7 +286,12 @@ impl Provider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|error| AgshError::Provider(format!("HTTP request failed: {}", error)))?;
+            .map_err(|error| {
+                AgshError::Provider(format!(
+                    "HTTP request failed: {}",
+                    crate::error::format_reqwest_error(&error)
+                ))
+            })?;
 
         let status = response.status();
         let response_text = response
@@ -327,7 +332,12 @@ impl Provider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|error| AgshError::Provider(format!("HTTP request failed: {}", error)))?;
+            .map_err(|error| {
+                AgshError::Provider(format!(
+                    "HTTP request failed: {}",
+                    crate::error::format_reqwest_error(&error)
+                ))
+            })?;
 
         let status = response.status();
         if !status.is_success() {

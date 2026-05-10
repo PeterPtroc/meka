@@ -223,7 +223,7 @@ impl OpenAiCodexProvider {
             .map_err(|error| {
                 AgshError::Provider(format!(
                     "Codex OAuth token refresh request failed: {}",
-                    error
+                    crate::error::format_reqwest_error(&error)
                 ))
             })?;
 
@@ -341,7 +341,10 @@ impl Provider for OpenAiCodexProvider {
             .json(&body);
 
         let response = request.send().await.map_err(|error| {
-            AgshError::Provider(format!("Codex HTTP request failed: {}", error))
+            AgshError::Provider(format!(
+                "Codex HTTP request failed: {}",
+                crate::error::format_reqwest_error(&error)
+            ))
         })?;
 
         drive_responses_sse_stream(response, event_sender, cancellation).await

@@ -126,7 +126,12 @@ pub async fn revoke_stored_token(
         .body(body)
         .send()
         .await
-        .map_err(|error| format!("revoke POST failed: {}", error))?;
+        .map_err(|error| {
+            format!(
+                "revoke POST failed: {}",
+                crate::error::format_reqwest_error(&error)
+            )
+        })?;
     // RFC 7009: successful revocation is 200 OK with an empty body;
     // unknown tokens also return 200 OK. Non-2xx is a genuine failure.
     if !response.status().is_success() {
@@ -182,7 +187,7 @@ pub async fn probe_http_auth(url: &str) -> McpAuthProbe {
         Ok(response) => response,
         Err(error) => {
             return McpAuthProbe::Unreachable {
-                message: error.to_string(),
+                message: crate::error::format_reqwest_error(&error),
             };
         }
     };
