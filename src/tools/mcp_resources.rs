@@ -808,4 +808,69 @@ mod tests {
         assert!(out[0].contains("alpha"));
         assert!(out[1].contains("beta"));
     }
+
+    /// Regression guard for the scratchpad un-defer change: the seven MCP
+    /// resource tools must STILL be deferred after registration. We only
+    /// relaxed `scratchpad_*` deferral; if a future refactor accidentally
+    /// drops `mark_deferred` calls here too, every MCP-using session would
+    /// see seven extra tool schemas in its tools array on the first turn.
+    #[tokio::test]
+    async fn test_mcp_resource_tools_remain_deferred() {
+        use crate::config::{McpServerConfig, McpTransport};
+        use crate::mcp::{McpClientContext, McpClientManager};
+        use crate::tools::ToolRegistry;
+
+        let server_config = McpServerConfig {
+            name: "fixture-srv".to_string(),
+            transport: McpTransport::Stdio,
+            command: Some("/bin/false".to_string()),
+            args: None,
+            env: None,
+            url: None,
+            auth_token: None,
+            headers: None,
+            headers_helper: None,
+            auth: None,
+            permission: None,
+            allowed_tools: None,
+            disabled_tools: None,
+            tool_permissions: None,
+            sampling: false,
+            sampling_limit: None,
+            disabled: false,
+        };
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[server_config], None, None, context)
+            .await
+            .expect("prepare with one server should succeed");
+
+        let registry = ToolRegistry::new();
+        register_all(&registry, manager);
+
+        let entries = registry.tool_catalogue();
+        let by_name: std::collections::HashMap<_, _> =
+            entries.iter().map(|(n, _, _, d)| (n.clone(), *d)).collect();
+
+        for name in [
+            "list_mcp_resources",
+            "read_mcp_resource",
+            "list_mcp_prompts",
+            "get_mcp_prompt",
+            "subscribe_mcp_resource",
+            "unsubscribe_mcp_resource",
+            "list_mcp_resource_updates",
+        ] {
+            assert!(
+                by_name.contains_key(name),
+                "MCP resource tool {} not registered",
+                name
+            );
+            assert_eq!(
+                by_name[name], true,
+                "MCP resource tool {} should still be deferred (would otherwise \
+                 bloat the tools array on every MCP-enabled session)",
+                name,
+            );
+        }
+    }
 }

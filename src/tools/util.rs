@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{AgshError, Result};
 
+use super::ToolOutput;
+
+/// Default cap for regex-search-mode hits; shared by `read_file` and
+/// `scratchpad_read`.
+pub(super) const MAX_SEARCH_MATCHES: usize = 100;
+
 pub(super) fn require_str(
     input: &serde_json::Value,
     field: &str,
@@ -57,6 +63,52 @@ pub(super) async fn canonicalize_for_tool(tool_name: &str, path: &Path) -> Resul
             tool_name: tool_name.to_string(),
             message: format!("failed to resolve path '{}': {}", path.display(), error),
         })
+}
+
+/// Run a user-supplied regex against `content` line-by-line, returning
+/// `line_number:line` rows in a `ToolOutput`. Caps results at
+/// [`MAX_SEARCH_MATCHES`] and reports the total when truncated. `tool_name`
+/// is used only for the regex-compile error path.
+pub(super) fn search_lines(content: &str, pattern: &str, tool_name: &str) -> Result<ToolOutput> {
+    let re = compile_user_regex(pattern, tool_name)?;
+
+    let mut matches = Vec::new();
+    for (line_num, line) in content.lines().enumerate() {
+        if re.is_match(line) {
+            matches.push(format!("{}:{}", line_num + 1, line));
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                break;
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(ToolOutput::text(
+            "No matches found for the given regex pattern.".to_string(),
+            false,
+        ));
+    }
+
+    let total_matches = if matches.len() >= MAX_SEARCH_MATCHES {
+        let remaining: usize = content
+            .lines()
+            .skip(matches.len())
+            .filter(|line| re.is_match(line))
+            .count();
+        matches.len() + remaining
+    } else {
+        matches.len()
+    };
+
+    let mut result = matches.join("\n");
+    if total_matches > MAX_SEARCH_MATCHES {
+        result.push_str(&format!(
+            "\n\n... (showing first {} of {} matches)",
+            MAX_SEARCH_MATCHES, total_matches,
+        ));
+    }
+
+    Ok(ToolOutput::text(result, false))
 }
 
 pub(super) fn truncate_string(string: &str, max_length: usize) -> &str {

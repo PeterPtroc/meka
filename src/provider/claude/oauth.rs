@@ -1736,12 +1736,17 @@ mod tests {
             crate::tools::BuiltinToolFilter::default(),
         )
         .expect("default web client config should build cleanly");
+        // Register a deferred fixture *after* `build_default` so it lands at
+        // the tail of the tools vector. Loading it later appends to the end
+        // of the API tools array, which is the append-only growth shape
+        // the cache prefix invariant relies on.
+        crate::tools::tests::register_deferred_fixture(&registry, "fixture_deferred");
 
         let provider = test_provider();
         let catalogue = registry.tool_catalogue();
         let system = build_system_prompt(&catalogue, true, &[], None, &[]);
 
-        // ---- Turn 1: empty history, scratchpad_read is deferred --------
+        // ---- Turn 1: empty history, fixture_deferred is deferred --------
         let u1_text = {
             let block = build_turn_context(Permission::Write, &[]);
             format!("{}\n\n{}", block, "investigate scratchpad")
@@ -1751,11 +1756,11 @@ mod tests {
         let body_t1 = provider.build_request_body(&system, &messages_t1, &tools_t1, true);
 
         assert!(
-            !tools_t1.iter().any(|t| t.name == "scratchpad_read"),
-            "scratchpad_read should be deferred in turn 1"
+            !tools_t1.iter().any(|t| t.name == "fixture_deferred"),
+            "fixture_deferred should be deferred in turn 1"
         );
 
-        // ---- Turn 2: model invoked load_tool for scratchpad_read -------
+        // ---- Turn 2: model invoked load_tool for fixture_deferred -------
         let messages_t2 = vec![
             Message::user(&u1_text),
             Message {
@@ -1763,7 +1768,7 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),
                     name: "load_tool".to_string(),
-                    input: serde_json::json!({"name": "scratchpad_read"}),
+                    input: serde_json::json!({"name": "fixture_deferred"}),
                 }],
             },
             Message {
@@ -1791,10 +1796,10 @@ mod tests {
             "system prompt diverged across load_tool invocation — cache prefix invalidated"
         );
 
-        // 2. The tools array gained scratchpad_read (append-only growth).
+        // 2. The tools array gained fixture_deferred (append-only growth).
         assert!(
-            tools_t2.iter().any(|t| t.name == "scratchpad_read"),
-            "scratchpad_read should be active in turn 2 after load_tool"
+            tools_t2.iter().any(|t| t.name == "fixture_deferred"),
+            "fixture_deferred should be active in turn 2 after load_tool"
         );
         assert_eq!(
             tools_t2.len(),
@@ -1819,9 +1824,9 @@ mod tests {
     }
 
     /// Compaction must not silently drop the deferred-tool active set.
-    /// Pre-compaction, the model loads `scratchpad_read` via `load_tool`;
+    /// Pre-compaction, the model loads a deferred fixture via `load_tool`;
     /// post-compaction, the `Event::CompactBoundary::loaded_tools_snapshot`
-    /// must keep `scratchpad_read` in the API tools array even though the
+    /// must keep the loaded tool in the API tools array even though the
     /// pre-compaction `load_tool` rows have moved below the materialized
     /// view's logical start.
     #[tokio::test]
@@ -1853,8 +1858,9 @@ mod tests {
             crate::tools::BuiltinToolFilter::default(),
         )
         .expect("default web client config should build cleanly");
+        crate::tools::tests::register_deferred_fixture(&registry, "fixture_deferred");
 
-        // ---- Pre-compaction: load scratchpad_read via load_tool. ----
+        // ---- Pre-compaction: load fixture_deferred via load_tool. ----
         let mut log = Conversation::new();
         log.append(Message::user("question 1"));
         log.append(Message {
@@ -1862,7 +1868,7 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: "u1".to_string(),
                 name: "load_tool".to_string(),
-                input: serde_json::json!({"name": "scratchpad_read"}),
+                input: serde_json::json!({"name": "fixture_deferred"}),
             }],
         });
         log.append(Message {
@@ -1877,9 +1883,9 @@ mod tests {
         });
 
         let pre_loaded = extract_loaded_tool_names_from_events(log.events());
-        assert!(pre_loaded.contains("scratchpad_read"));
+        assert!(pre_loaded.contains("fixture_deferred"));
         let pre_tools = registry.definitions_active_with_loaded(&pre_loaded);
-        assert!(pre_tools.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(pre_tools.iter().any(|t| t.name == "fixture_deferred"));
 
         // ---- Compact: the snapshot carries the loaded set forward. ----
         log.replace_for_compaction(
@@ -1891,14 +1897,14 @@ mod tests {
         // The materialized view shrank — but events are append-only.
         let post_loaded = extract_loaded_tool_names_from_events(log.events());
         assert!(
-            post_loaded.contains("scratchpad_read"),
+            post_loaded.contains("fixture_deferred"),
             "compaction must preserve the loaded-tools active set via the snapshot"
         );
 
         // The active tool set the agent sends to the API still includes
-        // scratchpad_read post-compaction.
+        // fixture_deferred post-compaction.
         let post_tools = registry.definitions_active_with_loaded(&post_loaded);
-        assert!(post_tools.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(post_tools.iter().any(|t| t.name == "fixture_deferred"));
 
         // The post-compaction event log must have grown, never shrunk.
         let boundary_count = log

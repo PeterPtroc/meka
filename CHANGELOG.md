@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `edit_file` gained `insert_before` / `insert_after` for anchor-based inserts without rewriting context.
+- `read_file` gained a `regex` parameter mirroring `scratchpad_read`'s line-grep mode.
+
+### Changed
+
+- `edit_file` success responses now include a ±3-line snippet around the first edited site.
+- `scratchpad_read`, `_edit`, `_list`, `_delete` ship default-active (no `load_tool` round-trip needed).
+
 ## [0.21.1] - 2026-05-10
 
 ### Changed

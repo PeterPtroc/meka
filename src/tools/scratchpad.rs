@@ -16,7 +16,7 @@ use crate::permission::Permission;
 use crate::provider::{ContentBlock, Message, ToolDefinition, ToolResultContent};
 use crate::session::SessionManager;
 
-use super::util::compile_user_regex;
+use super::util::{MAX_SEARCH_MATCHES, search_lines};
 use super::{Tool, ToolOutput};
 
 /// Tool result text blocks larger than this are persisted to the database and
@@ -28,9 +28,6 @@ const PREVIEW_CHARS: usize = 2_000;
 
 /// Default character limit when reading back a persisted output.
 const DEFAULT_READ_LIMIT: usize = 30_000;
-
-/// Maximum number of regex matches returned in search mode.
-const MAX_SEARCH_MATCHES: usize = 100;
 
 pub(crate) fn format_size(bytes: usize) -> String {
     if bytes >= 1_048_576 {
@@ -360,7 +357,7 @@ impl Tool for ScratchpadReadTool {
             })?;
 
         if let Some(pattern) = input.get("regex").and_then(|v| v.as_str()) {
-            return search_mode(&content, pattern);
+            return search_lines(&content, pattern, "scratchpad_read");
         }
 
         read_mode(&content, &input)
@@ -393,48 +390,6 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
         ),
         false,
     ))
-}
-
-fn search_mode(content: &str, pattern: &str) -> Result<ToolOutput> {
-    let re = compile_user_regex(pattern, "scratchpad_read")?;
-
-    let mut matches = Vec::new();
-    for (line_num, line) in content.lines().enumerate() {
-        if re.is_match(line) {
-            matches.push(format!("{}:{}", line_num + 1, line));
-            if matches.len() >= MAX_SEARCH_MATCHES {
-                break;
-            }
-        }
-    }
-
-    if matches.is_empty() {
-        return Ok(ToolOutput::text(
-            "No matches found for the given regex pattern.".to_string(),
-            false,
-        ));
-    }
-
-    let total_matches = if matches.len() >= MAX_SEARCH_MATCHES {
-        let remaining: usize = content
-            .lines()
-            .skip(matches.len())
-            .filter(|line| re.is_match(line))
-            .count();
-        matches.len() + remaining
-    } else {
-        matches.len()
-    };
-
-    let mut result = matches.join("\n");
-    if total_matches > MAX_SEARCH_MATCHES {
-        result.push_str(&format!(
-            "\n\n... (showing first {} of {} matches)",
-            MAX_SEARCH_MATCHES, total_matches,
-        ));
-    }
-
-    Ok(ToolOutput::text(result, false))
 }
 
 // ---------------------------------------------------------------------------

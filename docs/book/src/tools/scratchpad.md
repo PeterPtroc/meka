@@ -10,6 +10,8 @@ The scratchpad is a session-scoped working memory that the agent can use to stor
 
 ## Tools
 
+All five tools below ship default-active — no `load_tool` round-trip is required to use any of them.
+
 ### `scratchpad_write`
 
 Store content in the scratchpad. If the name already exists, the content is overwritten.

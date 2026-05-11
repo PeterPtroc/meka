@@ -13,12 +13,14 @@ Read the contents of a file at a given path. Supports text files and images.
 | `path` | string | yes | The file path to read |
 | `offset` | integer | no | Line number to start reading from (0-based) |
 | `limit` | integer | no | Maximum number of lines to read |
+| `regex` | string | no | Return matching lines (capped — exact value advertised in the tool's parameter schema) instead of a line range. Skipped for image files. |
 | `scratchpad` | string | no | Save output to the scratchpad under this name |
 
 ### Behavior
 
 - When `offset` and `limit` are both omitted, defaults to the first 2000 lines. If the file has more, a truncation notice is appended.
 - Use `offset`/`limit` to page through large files.
+- `regex` runs the pattern against each line and returns `line:content` rows (like `grep -n`). It bypasses `offset`/`limit` and is meaningless on image content.
 
 ### Image files
 
@@ -50,7 +52,7 @@ agsh [r] > show me lines 10 through 20 of src/main.rs
 
 ## `edit_file`
 
-Make a string replacement in a file. The file must have been read with `read_file` first (unless `force` is set).
+Modify a file. Supports two modes: **replace** (swap `old_string` for `new_string`) and **insert** (place content before or after `old_string` while preserving the anchor). The file must have been read with `read_file` first (unless `force` is set).
 
 **Permission:** Write
 
@@ -59,17 +61,22 @@ Make a string replacement in a file. The file must have been read with `read_fil
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `path` | string | yes | The file path to edit |
-| `old_string` | string | yes | The exact string to find and replace |
-| `new_string` | string | yes | The replacement string |
-| `replace_all` | boolean | no | Replace all occurrences (default: false) |
+| `old_string` | string | yes | The exact string to find (acts as anchor in insert modes) |
+| `new_string` | string | one of three | Replace mode: replacement for `old_string` |
+| `insert_before` | string | one of three | Insert mode: text inserted immediately before `old_string` (anchor preserved) |
+| `insert_after` | string | one of three | Insert mode: text inserted immediately after `old_string` (anchor preserved) |
+| `replace_all` | boolean | no | Apply to every occurrence (default: false) |
 | `force` | boolean | no | Bypass read-before-edit requirement (default: false) |
 | `scratchpad` | string | no | Save output to the scratchpad under this name |
 
+Exactly one of `new_string`, `insert_before`, or `insert_after` must be provided. Mixing modes is rejected.
+
 ### Behavior
 
-- By default, only the **first** occurrence of `old_string` is replaced. Set `replace_all` to replace every occurrence.
+- By default, only the **first** occurrence of `old_string` is affected. Set `replace_all` to apply to every occurrence.
 - The file must have been previously read with `read_file` on the same path. This prevents blind edits. Set `force` to bypass this requirement.
 - If `old_string` is not found, the tool returns an error (without modifying the file).
+- On success, the response includes a small ±3-line snippet (with line numbers, lines truncated at 200 chars) around the first edited site so you can confirm the change landed without re-reading the file.
 
 ---
 

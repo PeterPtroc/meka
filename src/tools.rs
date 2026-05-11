@@ -490,22 +490,18 @@ impl ToolRegistry {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
-        registry.mark_deferred("scratchpad_read");
         registry.register_builtin(Arc::new(scratchpad::ScratchpadEditTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
-        registry.mark_deferred("scratchpad_edit");
         registry.register_builtin(Arc::new(scratchpad::ScratchpadListTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
         }));
-        registry.mark_deferred("scratchpad_list");
         registry.register_builtin(Arc::new(scratchpad::ScratchpadDeleteTool {
             session_manager,
             session_id: shared_session_id,
         }));
-        registry.mark_deferred("scratchpad_delete");
         Ok(registry)
     }
 
@@ -535,7 +531,7 @@ impl ToolRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
     use super::*;
@@ -597,6 +593,46 @@ mod tests {
                 is_error,
             }],
         }
+    }
+
+    /// A no-op tool used as a deferred-tool fixture: registering it after
+    /// `build_default` and calling `mark_deferred` lets tests exercise the
+    /// load_tool flow against a tool that is genuinely deferred, instead of
+    /// re-deferring a production tool that ships active.
+    pub(crate) struct FixtureDeferredTool {
+        pub name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for FixtureDeferredTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                self.name.clone(),
+                format!("test fixture: deferred tool {}", self.name),
+                serde_json::json!({"type": "object", "properties": {}}),
+            )
+        }
+        fn required_permission(&self) -> Permission {
+            Permission::Read
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cancellation: CancellationToken,
+        ) -> crate::error::Result<ToolOutput> {
+            Ok(ToolOutput::text("ok".to_string(), false))
+        }
+    }
+
+    /// Register a deferred fixture tool on the registry. Returns the name
+    /// the test should use when invoking `load_tool`.
+    pub(crate) fn register_deferred_fixture(registry: &ToolRegistry, name: &str) {
+        registry
+            .register(Arc::new(FixtureDeferredTool {
+                name: name.to_string(),
+            }))
+            .expect("fixture tool name must be unique");
+        registry.mark_deferred(name);
     }
 
     #[test]
@@ -833,7 +869,12 @@ mod tests {
         assert!(active.iter().any(|t| t.name == "write_file"));
         assert!(active.iter().any(|t| t.name == "edit_file"));
         assert!(active.iter().any(|t| t.name == "execute_command"));
-        assert!(!active.iter().any(|t| t.name == "scratchpad_read"));
+        // All five scratchpad tools ship default — no `load_tool` round-trip.
+        assert!(active.iter().any(|t| t.name == "scratchpad_write"));
+        assert!(active.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(active.iter().any(|t| t.name == "scratchpad_edit"));
+        assert!(active.iter().any(|t| t.name == "scratchpad_list"));
+        assert!(active.iter().any(|t| t.name == "scratchpad_delete"));
     }
 
     #[tokio::test]
@@ -852,19 +893,23 @@ mod tests {
         // End-to-end: a successful load_tool call in the conversation
         // promotes the named tool into the active set on the next call.
         let registry = test_registry().await;
+        register_deferred_fixture(&registry, "fixture_alpha");
+        register_deferred_fixture(&registry, "fixture_beta");
+
         let baseline = registry.definitions_active(&[]);
-        assert!(!baseline.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(!baseline.iter().any(|t| t.name == "fixture_alpha"));
+        assert!(!baseline.iter().any(|t| t.name == "fixture_beta"));
 
         let messages = vec![
-            load_tool_use("u1", "scratchpad_read"),
+            load_tool_use("u1", "fixture_alpha"),
             tool_result("u1", "ok", false),
         ];
         let after_load = registry.definitions_active(&messages);
-        assert!(after_load.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(after_load.iter().any(|t| t.name == "fixture_alpha"));
         // Append-only: the tools array gains exactly one entry.
         assert_eq!(after_load.len(), baseline.len() + 1);
-        // Other deferred scratchpad tools are unaffected.
-        assert!(!after_load.iter().any(|t| t.name == "scratchpad_edit"));
+        // Sibling deferred fixtures remain hidden.
+        assert!(!after_load.iter().any(|t| t.name == "fixture_beta"));
     }
 
     #[tokio::test]
@@ -873,12 +918,14 @@ mod tests {
         // expose the deferred tool — the model's parameter shape was
         // wrong, the schema was not delivered.
         let registry = test_registry().await;
+        register_deferred_fixture(&registry, "fixture_alpha");
+
         let messages = vec![
-            load_tool_use("u1", "scratchpad_read"),
+            load_tool_use("u1", "fixture_alpha"),
             tool_result("u1", "Error", true),
         ];
         let active = registry.definitions_active(&messages);
-        assert!(!active.iter().any(|t| t.name == "scratchpad_read"));
+        assert!(!active.iter().any(|t| t.name == "fixture_alpha"));
     }
 
     #[tokio::test]
@@ -909,24 +956,60 @@ mod tests {
     #[tokio::test]
     async fn test_tool_catalogue_covers_active_and_deferred() {
         let registry = test_registry().await;
+        register_deferred_fixture(&registry, "fixture_alpha");
+
         let entries = registry.tool_catalogue();
         let names: std::collections::HashSet<_> =
             entries.iter().map(|(n, _, _, _)| n.clone()).collect();
         assert!(names.contains("write_file"));
         assert!(names.contains("scratchpad_read"));
-        assert!(names.contains("scratchpad_edit"));
+        assert!(names.contains("fixture_alpha"));
 
-        let deferred_names: Vec<_> = entries
-            .iter()
-            .filter(|(_, _, _, d)| *d)
-            .map(|(n, _, _, _)| n.clone())
-            .collect();
-        assert!(deferred_names.iter().any(|n| n == "scratchpad_read"));
+        let by_name: std::collections::HashMap<_, _> =
+            entries.iter().map(|(n, _, _, d)| (n.clone(), *d)).collect();
+        assert_eq!(
+            by_name["fixture_alpha"], true,
+            "deferred fixture must be flagged deferred"
+        );
+        assert_eq!(
+            by_name["scratchpad_read"], false,
+            "scratchpad_read ships active and must not be flagged deferred"
+        );
+        assert_eq!(
+            by_name["write_file"], false,
+            "write_file is an active builtin"
+        );
 
         let required: std::collections::HashMap<_, _> =
             entries.iter().map(|(n, _, p, _)| (n.clone(), *p)).collect();
         assert_eq!(required["read_file"], Permission::Read);
         assert_eq!(required["write_file"], Permission::Write);
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_tools_default_to_active() {
+        // Regression: feedback agents kept tripping on the asymmetry
+        // where scratchpad_write was active but _read/_edit/_list/_delete
+        // were deferred behind load_tool. All five must ship default now.
+        let registry = test_registry().await;
+        let entries = registry.tool_catalogue();
+        for name in [
+            "scratchpad_write",
+            "scratchpad_read",
+            "scratchpad_edit",
+            "scratchpad_list",
+            "scratchpad_delete",
+        ] {
+            let entry = entries
+                .iter()
+                .find(|(n, _, _, _)| n == name)
+                .unwrap_or_else(|| panic!("{} missing from catalogue", name));
+            assert!(
+                !entry.3,
+                "{} must not be deferred (would force a load_tool round-trip)",
+                name,
+            );
+        }
     }
 
     #[tokio::test]

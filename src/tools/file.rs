@@ -20,7 +20,9 @@ use crate::image::{ImageHandling, classify_extension, prepare_image_payload};
 use crate::permission::Permission;
 use crate::provider::{ImageSource, ToolDefinition, ToolResultContent};
 
-use super::util::{canonicalize_for_tool, require_str, truncate_string};
+use super::util::{
+    MAX_SEARCH_MATCHES, canonicalize_for_tool, require_str, search_lines, truncate_string,
+};
 use super::{ReadTracker, Tool, ToolOutput};
 
 /// Open a file for reading, refusing to follow a symlink on Unix. Callers
@@ -99,13 +101,17 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read the contents of a file at the given path. Supported raster \
-                          image files (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, HDR, EXR, \
-                          TGA, PNM, QOI, DDS, Farbfeld) are returned as a multimodal \
-                          content block; non-native formats are transparently converted \
-                          to PNG. Only read image files if the current model supports \
-                          vision input."
-                .to_string(),
+            description: format!(
+                "Read the contents of a file at the given path. Supported raster \
+                 image files (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, HDR, EXR, \
+                 TGA, PNM, QOI, DDS, Farbfeld) are returned as a multimodal \
+                 content block; non-native formats are transparently converted \
+                 to PNG. Only read image files if the current model supports \
+                 vision input. Provide `regex` to return matching lines (max {}) \
+                 instead of a line range; `regex` ignores `offset`/`limit` and \
+                 cannot be combined with image reads.",
+                MAX_SEARCH_MATCHES,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -120,6 +126,15 @@ impl Tool for ReadFileTool {
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of lines to read. Optional."
+                    },
+                    "regex": {
+                        "type": "string",
+                        "description": format!(
+                            "If provided, search the file with this regex pattern \
+                             and return matching lines (max {} matches) instead of \
+                             a line range. Skipped for image files.",
+                            MAX_SEARCH_MATCHES,
+                        )
                     },
                     "scratchpad": {
                         "type": "string",
@@ -208,6 +223,7 @@ impl Tool for ReadFileTool {
 
         let offset = input["offset"].as_u64().map(|value| value as usize);
         let limit = input["limit"].as_u64().map(|value| value as usize);
+        let regex = input.get("regex").and_then(|v| v.as_str());
 
         let content =
             read_file_to_string(&canonical)
@@ -216,6 +232,11 @@ impl Tool for ReadFileTool {
                     tool_name: "read_file".to_string(),
                     message: format!("failed to read '{}': {}", path, error),
                 })?;
+
+        if let Some(pattern) = regex {
+            self.read_tracker.write().await.insert(canonical);
+            return search_lines(&content, pattern, "read_file");
+        }
 
         let total_lines = content.lines().count();
         let effective_offset = offset.unwrap_or(0);
@@ -252,7 +273,18 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Make a string replacement in a file. By default replaces the first occurrence of 'old_string' with 'new_string'. Set 'replace_all' to true to replace every occurrence. The file must have been read with read_file first unless 'force' is set to true.".to_string(),
+            description: "Modify a file. Two modes: (1) Replace — provide \
+                          'new_string' to swap 'old_string' for it. (2) Insert — provide \
+                          'insert_before' or 'insert_after' to place content adjacent to \
+                          'old_string' while preserving the anchor itself; useful when you \
+                          only need to add lines without rewriting surrounding context. \
+                          Exactly one of 'new_string', 'insert_before', 'insert_after' \
+                          must be set. 'replace_all' applies the operation to every \
+                          occurrence; defaults to first only. The file must have been \
+                          read with read_file first unless 'force' is set to true. On \
+                          success the response includes a small ±3-line snippet around \
+                          the first edited site so you can confirm the change landed."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -262,15 +294,23 @@ impl Tool for EditFileTool {
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "The exact string to find and replace"
+                        "description": "The exact string to find (acts as anchor in insert modes)"
                     },
                     "new_string": {
                         "type": "string",
-                        "description": "The replacement string"
+                        "description": "Replace mode: the replacement string. Mutually exclusive with insert_before/insert_after."
+                    },
+                    "insert_before": {
+                        "type": "string",
+                        "description": "Insert mode: text inserted immediately before 'old_string' (anchor preserved). Mutually exclusive with new_string/insert_after."
+                    },
+                    "insert_after": {
+                        "type": "string",
+                        "description": "Insert mode: text inserted immediately after 'old_string' (anchor preserved). Mutually exclusive with new_string/insert_before."
                     },
                     "replace_all": {
                         "type": "boolean",
-                        "description": "If true, replace all occurrences instead of just the first. Defaults to false."
+                        "description": "If true, apply to every occurrence instead of just the first. Defaults to false."
                     },
                     "force": {
                         "type": "boolean",
@@ -281,7 +321,7 @@ impl Tool for EditFileTool {
                         "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
                     }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path", "old_string"]
             }),
             ..Default::default()
         }
@@ -298,9 +338,45 @@ impl Tool for EditFileTool {
     ) -> Result<ToolOutput> {
         let path = require_str(&input, "path", "edit_file")?;
         let old_string = require_str(&input, "old_string", "edit_file")?;
-        let new_string = require_str(&input, "new_string", "edit_file")?;
         let replace_all = input["replace_all"].as_bool().unwrap_or(false);
         let force = input["force"].as_bool().unwrap_or(false);
+
+        let new_string_opt = input.get("new_string").and_then(|v| v.as_str());
+        let insert_before_opt = input.get("insert_before").and_then(|v| v.as_str());
+        let insert_after_opt = input.get("insert_after").and_then(|v| v.as_str());
+
+        let mode_count = [
+            new_string_opt.is_some(),
+            insert_before_opt.is_some(),
+            insert_after_opt.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+
+        if mode_count == 0 {
+            return Ok(ToolOutput::text(
+                "Error: provide one of 'new_string', 'insert_before', or 'insert_after'"
+                    .to_string(),
+                true,
+            ));
+        }
+        if mode_count > 1 {
+            return Ok(ToolOutput::text(
+                "Error: 'new_string', 'insert_before', and 'insert_after' are mutually exclusive"
+                    .to_string(),
+                true,
+            ));
+        }
+
+        let effective_new_string = if let Some(new) = new_string_opt {
+            new.to_string()
+        } else if let Some(prefix) = insert_before_opt {
+            format!("{}{}", prefix, old_string)
+        } else {
+            // Safe by mode_count == 1 above.
+            format!("{}{}", old_string, insert_after_opt.unwrap_or(""))
+        };
 
         // Canonicalize once. All subsequent I/O goes through this path so a
         // symlink swap between the tracker check and the actual read/write
@@ -337,11 +413,17 @@ impl Tool for EditFileTool {
             ));
         }
 
+        // Record the byte offset of the first match in the *original* content;
+        // since `replacen` / `replace` only mutate at-or-after this point, the
+        // byte offset is stable in the new content and locates the first edit
+        // site for the response snippet.
+        let first_match_byte = content.find(&old_string).unwrap_or(0);
+
         let (new_content, count) = if replace_all {
             let count = content.matches(&old_string).count();
-            (content.replace(&old_string, &new_string), count)
+            (content.replace(&old_string, &effective_new_string), count)
         } else {
-            (content.replacen(&old_string, &new_string, 1), 1)
+            (content.replacen(&old_string, &effective_new_string, 1), 1)
         };
 
         write_file_bytes(&canonical, new_content.as_bytes())
@@ -351,14 +433,47 @@ impl Tool for EditFileTool {
                 message: format!("failed to write '{}': {}", path, error),
             })?;
 
+        let snippet = build_context_snippet(&new_content, first_match_byte, 3);
+        let trailer = if count > 1 {
+            format!(" ... (showing context for first of {} occurrences)", count)
+        } else {
+            String::new()
+        };
+
         Ok(ToolOutput::text(
             format!(
-                "Successfully edited '{}': replaced {} occurrence(s)",
-                path, count
+                "Successfully edited '{}': {} occurrence(s){}\n\n{}",
+                path, count, trailer, snippet,
             ),
             false,
         ))
     }
+}
+
+/// Render a ±`lines_around` snippet around the line containing
+/// `change_byte_offset` in `content`. Each line is prefixed with a
+/// right-aligned 1-based line number and a `|` separator, and truncated to
+/// 200 chars to keep the response compact.
+fn build_context_snippet(content: &str, change_byte_offset: usize, lines_around: usize) -> String {
+    let safe_offset = change_byte_offset.min(content.len());
+    let line_index = content[..safe_offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = line_index.saturating_sub(lines_around);
+    let end = (line_index + lines_around + 1).min(lines.len());
+
+    let mut output = String::new();
+    for (idx, line) in lines.iter().enumerate().take(end).skip(start) {
+        let display = truncate_string(line, 200);
+        output.push_str(&format!("{:>5} | {}\n", idx + 1, display));
+    }
+    output
 }
 
 pub(super) struct WriteFileTool;
@@ -821,6 +936,315 @@ mod tests {
             "value-b",
             "alternate target must be untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_file_regex_basic() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("rg.txt");
+        std::fs::write(&file_path, "alpha\nbravo 42\ncharlie\ndelta 99\necho\n").expect("write");
+
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "regex": r"\d+"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("regex search should succeed");
+
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(text.contains("2:bravo 42"));
+        assert!(text.contains("4:delta 99"));
+        assert!(!text.contains("alpha"));
+        assert!(!text.contains("charlie"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_regex_no_match() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("rg.txt");
+        std::fs::write(&file_path, "alpha\nbravo\ncharlie\n").expect("write");
+
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "regex": r"xyz\d+"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        assert!(text_content(&result).contains("No matches found"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_regex_invalid_pattern_errors() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("rg.txt");
+        std::fs::write(&file_path, "anything\n").expect("write");
+
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "regex": "[invalid"
+                }),
+                CancellationToken::new(),
+            )
+            .await;
+        let err = result.expect_err("invalid regex must surface as an error");
+        assert!(err.to_string().contains("invalid or oversized regex"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_regex_caps_at_max_matches() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("rg.txt");
+        let mut body = String::new();
+        for i in 0..150 {
+            body.push_str(&format!("match-{}\n", i));
+        }
+        std::fs::write(&file_path, &body).expect("write");
+
+        let tool = ReadFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "regex": "match-"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        let text = text_content(&result);
+        assert!(
+            text.contains("showing first 100 of 150 matches"),
+            "expected truncation trailer; got: {}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_insert_before() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "anchor line\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "anchor",
+                    "insert_before": "prefix-",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        let content = std::fs::read_to_string(&file_path).expect("read");
+        assert_eq!(content, "prefix-anchor line\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_insert_after() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "anchor line\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "anchor",
+                    "insert_after": "-suffix",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        let content = std::fs::read_to_string(&file_path).expect("read");
+        assert_eq!(content, "anchor-suffix line\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_rejects_replace_and_insert_combined() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "anchor\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "anchor",
+                    "new_string": "replaced",
+                    "insert_after": "tail",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_rejects_both_insert_directions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "anchor\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "anchor",
+                    "insert_before": "head",
+                    "insert_after": "tail",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_rejects_no_mode() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "anchor\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "anchor",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_error);
+        assert!(
+            text_content(&result).contains("provide one of"),
+            "got: {}",
+            text_content(&result)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_success_includes_context_snippet() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        let body = (1..=10)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file_path, body).expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "line 5",
+                    "new_string": "FIVE",
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(text.contains("Successfully edited"));
+        // Context snippet shows the edited line plus ±3 around it.
+        assert!(text.contains("FIVE"));
+        assert!(text.contains("line 2"));
+        assert!(text.contains("line 8"));
+        assert!(!text.contains("line 1\n"));
+        assert!(!text.contains("line 9\n"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_multi_match_trailer() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("edit.txt");
+        std::fs::write(&file_path, "x\nx\nx\n").expect("write");
+
+        let tool = EditFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().expect("path"),
+                    "old_string": "x",
+                    "new_string": "y",
+                    "replace_all": true,
+                    "force": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(text.contains("3 occurrence(s)"));
+        assert!(text.contains("first of 3 occurrences"));
     }
 
     #[tokio::test]
