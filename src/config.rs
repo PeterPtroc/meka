@@ -736,6 +736,54 @@ fn resolve_permission(
     (permission, enabled)
 }
 
+/// Merge `--eager-load-tool SERVER:TOOL` CLI values into the matching
+/// server's [`McpServerConfig::eager_load_tools`] list. Malformed entries
+/// and unknown server names warn and are skipped — same philosophy as
+/// `warn_on_stale_tool_config`. Appends to (never replaces) the
+/// configured list, and deduplicates so a CLI flag that overlaps with
+/// `config.toml` doesn't grow the list.
+fn apply_cli_eager_load_overrides(raw_pairs: &[String], servers: &mut [McpServerConfig]) {
+    for raw in raw_pairs {
+        let (server_name, tool_name) = match raw.split_once(':') {
+            Some((server, tool)) => {
+                let server = server.trim();
+                let tool = tool.trim();
+                if server.is_empty() || tool.is_empty() {
+                    tracing::warn!(
+                        "ignoring --eager-load-tool '{}' (expected SERVER:TOOL with both \
+                         parts non-empty)",
+                        raw
+                    );
+                    continue;
+                }
+                (server, tool)
+            }
+            None => {
+                tracing::warn!(
+                    "ignoring --eager-load-tool '{}' (expected SERVER:TOOL format)",
+                    raw
+                );
+                continue;
+            }
+        };
+        match servers.iter_mut().find(|s| s.name == server_name) {
+            Some(server) => {
+                let list = server.eager_load_tools.get_or_insert_with(Vec::new);
+                if !list.iter().any(|existing| existing == tool_name) {
+                    list.push(tool_name.to_string());
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "--eager-load-tool '{}': no MCP server named '{}' is configured",
+                    raw,
+                    server_name
+                );
+            }
+        }
+    }
+}
+
 impl ResolvedConfig {
     pub fn from_cli(cli: &Cli) -> Self {
         let config_file = load_config_file();
@@ -749,23 +797,29 @@ impl ResolvedConfig {
         let file_tools = config_file.tools.unwrap_or_default();
         // Destructure the [mcp] table into its two independent fields so
         // we don't have to re-open the config file later for resolution.
-        let (mcp_default_permission_str, mcp_servers, mcp_strict, mcp_grace, mcp_connect_timeout) =
-            match config_file.mcp {
-                Some(mcp) => (
-                    mcp.default_permission,
-                    mcp.servers.unwrap_or_default(),
-                    mcp.strict.unwrap_or(true),
-                    std::time::Duration::from_secs(mcp.grace_seconds.unwrap_or(3)),
-                    std::time::Duration::from_secs(mcp.connect_timeout_seconds.unwrap_or(30)),
-                ),
-                None => (
-                    None,
-                    Vec::new(),
-                    true,
-                    std::time::Duration::from_secs(3),
-                    std::time::Duration::from_secs(30),
-                ),
-            };
+        let (
+            mcp_default_permission_str,
+            mut mcp_servers,
+            mcp_strict,
+            mcp_grace,
+            mcp_connect_timeout,
+        ) = match config_file.mcp {
+            Some(mcp) => (
+                mcp.default_permission,
+                mcp.servers.unwrap_or_default(),
+                mcp.strict.unwrap_or(true),
+                std::time::Duration::from_secs(mcp.grace_seconds.unwrap_or(3)),
+                std::time::Duration::from_secs(mcp.connect_timeout_seconds.unwrap_or(30)),
+            ),
+            None => (
+                None,
+                Vec::new(),
+                true,
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(30),
+            ),
+        };
+        apply_cli_eager_load_overrides(&cli.eager_load_tool, &mut mcp_servers);
         let mcp_default_permission = match mcp_default_permission_str.as_deref() {
             Some(raw) => match raw.parse::<Permission>() {
                 Ok(permission) => Some(permission),
@@ -1146,6 +1200,103 @@ mod credential {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Http,
+            command: None,
+            args: None,
+            env: None,
+            url: Some("https://example".to_string()),
+            auth_token: None,
+            headers: None,
+            headers_helper: None,
+            auth: None,
+            permission: None,
+            allowed_tools: None,
+            disabled_tools: None,
+            eager_load_tools: None,
+            tool_permissions: None,
+            sampling: false,
+            sampling_limit: None,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn test_eager_load_override_appends_to_matching_server() {
+        let mut servers = vec![fixture_server("notion"), fixture_server("github")];
+        let raw = vec![
+            "notion:search".to_string(),
+            "github:create_issue".to_string(),
+        ];
+        apply_cli_eager_load_overrides(&raw, &mut servers);
+
+        assert_eq!(
+            servers[0].eager_load_tools.as_deref(),
+            Some(&["search".to_string()][..])
+        );
+        assert_eq!(
+            servers[1].eager_load_tools.as_deref(),
+            Some(&["create_issue".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_eager_load_override_appends_to_existing_list() {
+        let mut servers = vec![fixture_server("notion")];
+        servers[0].eager_load_tools = Some(vec!["search".to_string()]);
+        apply_cli_eager_load_overrides(&["notion:fetch".to_string()], &mut servers);
+        assert_eq!(
+            servers[0].eager_load_tools.as_deref(),
+            Some(&["search".to_string(), "fetch".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_eager_load_override_dedupes_existing_entry() {
+        let mut servers = vec![fixture_server("notion")];
+        servers[0].eager_load_tools = Some(vec!["search".to_string()]);
+        apply_cli_eager_load_overrides(&["notion:search".to_string()], &mut servers);
+        assert_eq!(
+            servers[0].eager_load_tools.as_deref(),
+            Some(&["search".to_string()][..]),
+            "duplicate tool name must not double the list"
+        );
+    }
+
+    #[test]
+    fn test_eager_load_override_skips_unknown_server() {
+        let mut servers = vec![fixture_server("notion")];
+        apply_cli_eager_load_overrides(&["nope:search".to_string()], &mut servers);
+        // The matching `notion` entry must remain untouched; the unknown
+        // `nope` entry simply produces a warn log (not captured here).
+        assert!(servers[0].eager_load_tools.is_none());
+    }
+
+    #[test]
+    fn test_eager_load_override_skips_malformed_values() {
+        let mut servers = vec![fixture_server("notion")];
+        let raw = vec![
+            "no-colon".to_string(),
+            ":missing-server".to_string(),
+            "missing-tool:".to_string(),
+            "".to_string(),
+        ];
+        apply_cli_eager_load_overrides(&raw, &mut servers);
+        assert!(servers[0].eager_load_tools.is_none());
+    }
+
+    #[test]
+    fn test_eager_load_override_trims_whitespace() {
+        let mut servers = vec![fixture_server("notion")];
+        apply_cli_eager_load_overrides(&["  notion : search  ".to_string()], &mut servers);
+        assert_eq!(
+            servers[0].eager_load_tools.as_deref(),
+            Some(&["search".to_string()][..])
+        );
+    }
 
     #[test]
     fn test_web_config_all_fields_parse() {

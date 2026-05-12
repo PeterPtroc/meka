@@ -176,6 +176,17 @@ agsh --oneshot "summarize the last commit"
 agsh --oneshot --skill deploy "to staging"
 ```
 
+### `--eager-load-tool <SERVER:TOOL>`
+
+Eager-load a specific MCP tool for this session, bypassing the `load_tool` round-trip. The tool's schema ships in the cacheable tools-array prefix from turn 1 instead of being deferred. Mirrors the per-server [`eager_load_tools`](./config-file.md#mcp-servers) config field — repeatable, raw tool names (the server-advertised form, not `mcp__<server>__<tool>`).
+
+Particularly useful for scripted runs that know up front which tools they'll need. The flag *appends to* whatever `eager_load_tools` lists in `config.toml` for that server — it doesn't replace existing entries. Unknown server names log a warning and are skipped.
+
+```bash
+agsh --eager-load-tool notion:search --eager-load-tool github:create_issue \
+     --oneshot "search Notion for the deploy runbook and open a GitHub issue"
+```
+
 ### `-v`, `--verbose`
 
 Increase log verbosity. Can be repeated up to three times.

@@ -76,6 +76,10 @@ The streaming markdown renderer (`render::StreamingRenderer`) writes to stdout b
 
 **Opt-in visibility.** When a config flag like `show_session_id_on_create` explicitly requests visible output, honour it via `println!` / `eprintln!` — don't silently demote it to `info!` and force `-v`.
 
+## CLI help text
+
+Clap `///` doc-comments must render within 80 columns when shown via `-h`. Verify by running the actual binary for every changed subcommand — source-line length doesn't account for clap's indent, value-name length, or auto-appended hints like `[possible values: ...]`. Put `Examples:` and other long-form prose after a blank `///` line so they only show in `--help`, not `-h`. When that long-form prose has multiple lines or indented blocks (e.g. an `Examples:` list), add `#[command(verbatim_doc_comment)]` to the struct/variant so clap preserves the line breaks instead of re-wrapping them into one paragraph.
+
 ## Build & Formatting Commands
 
 - Always run `cargo fmt` and `cargo sort -w` after editing code
@@ -86,7 +90,7 @@ The streaming markdown renderer (`render::StreamingRenderer`) writes to stdout b
 - Update `CHANGELOG.md` after every meaningful change (new features, bug fixes, breaking changes, deprecations, removals)
 - Follow the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) format
 - Add entries under the `[Unreleased]` section
-- Keep each changelog entry to around 100 characters (soft limit)
+- Keep each changelog entry to around 100 characters
 
 ## Documentation
 

@@ -20,7 +20,7 @@ pub enum Command {
     Export {
         /// Session UUID to export
         session_id: uuid::Uuid,
-        /// Output file path (default: `session-<id>.md`). Use "-" for stdout.
+        /// Output file (default: `session-<id>.md`; `-` = stdout)
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -77,6 +77,7 @@ pub enum SkillAction {
     /// Examples:
     ///   agsh skill add demo --description "X" --when-to-use "Y"
     ///   agsh skill add custom --from-file ./template.md
+    #[command(verbatim_doc_comment)]
     Add {
         /// Unique skill name (alphanumerics, `-`, `_` only)
         name: String,
@@ -97,7 +98,7 @@ pub enum SkillAction {
         #[arg(long)]
         version: Option<String>,
 
-        /// Allow user invocation via `/skill <name>` (default true)
+        /// User-invocable via `/skill <name>` (default true)
         #[arg(long = "user-invocable")]
         user_invocable: Option<bool>,
 
@@ -129,7 +130,7 @@ pub enum McpAction {
     Get { name: String },
     /// Connect once and print `ok` if the handshake succeeds
     Reconnect { name: String },
-    /// List tools advertised by a server, with resolved permission per tool.
+    /// List a server's advertised tools with their resolved permissions
     Tools { name: String },
     /// Authenticate a server interactively (OAuth assumed for HTTP)
     Login { name: String },
@@ -147,11 +148,13 @@ pub enum McpAction {
     // `agsh mcp add --help`. Angle-brackets would leak into the CLI
     // help. Allow bare URLs just on this variant.
     #[allow(rustdoc::bare_urls)]
+    // Preserve line breaks in the `Examples:` block; clap's default
+    // joins consecutive `///` lines into one re-wrapped paragraph.
+    #[command(verbatim_doc_comment)]
     Add {
         /// Unique server name (alphanumerics, `-`, `_` only)
         name: String,
-        /// URL (for HTTP) or executable path (for stdio). Transport is
-        /// auto-detected from this value unless `--transport` is given.
+        /// URL (HTTP) or executable path (stdio); transport auto-detected
         location: Option<String>,
         /// Arguments to pass to the stdio command.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -213,34 +216,27 @@ pub enum McpAction {
         #[arg(long)]
         sampling_limit: Option<u32>,
 
-        /// Raw tool name to allow (repeatable). When set, only listed
-        /// tools from this server are registered.
+        /// Raw tool name to allow (repeatable; restricts which register)
         #[arg(long = "allow-tool", value_name = "TOOL")]
         allow_tool: Vec<String>,
 
-        /// Raw tool name to block (repeatable). Applied after --allow-tool.
+        /// Raw tool name to block (repeatable; applied after --allow-tool)
         #[arg(long = "disable-tool", value_name = "TOOL")]
         disable_tool: Vec<String>,
 
-        /// Raw tool name to eager-load (repeatable). Tools listed here
-        /// skip the `load_tool` round-trip and ship in the cacheable
-        /// tools-array prefix from turn 1.
+        /// Raw tool name to eager-load (repeatable; skips load_tool)
         #[arg(long = "eager-load-tool", value_name = "TOOL")]
         eager_load_tool: Vec<String>,
 
-        /// Per-tool permission override (repeatable).
-        /// Format: `TOOL=LEVEL`, where LEVEL is none/read/ask/write.
+        /// Per-tool permission override (TOOL=LEVEL, repeatable)
         #[arg(long = "tool-permission", value_name = "TOOL=LEVEL")]
         tool_permission: Vec<String>,
 
-        /// Skip the post-add auto-login even if the server requires auth.
-        /// The server is still persisted; run `agsh mcp login <name>`
-        /// later to authorise.
+        /// Skip post-add auto-login; run `agsh mcp login <name>` later
         #[arg(long = "no-login")]
         no_login: bool,
 
-        /// Add the server entry with `disabled = true` so it's skipped
-        /// at startup until `agsh mcp enable <name>` runs.
+        /// Persist with disabled=true; re-enable via `agsh mcp enable`
         #[arg(long = "disabled")]
         disabled: bool,
     },
@@ -296,8 +292,7 @@ pub struct Cli {
     /// Run a one-shot prompt and exit
     pub prompt: Option<String>,
 
-    /// Continue a session. Use -c to resume the last session,
-    /// or -c SESSION_ID to resume a specific session.
+    /// Resume a session (`-c` for last, `-c <UUID-PREFIX>` for specific)
     #[arg(short = 'c', long = "continue", num_args = 0..=1, default_missing_value = "last")]
     pub continue_session: Option<String>,
 
@@ -305,7 +300,7 @@ pub struct Cli {
     #[arg(long = "permission", value_parser = parse_permission)]
     pub permission: Option<Permission>,
 
-    /// LLM provider to use (openai-api, openai-codex, claude-api, claude-oauth)
+    /// LLM provider: openai-api, openai-codex, claude-api, claude-oauth
     #[arg(long = "provider")]
     pub provider: Option<String>,
 
@@ -321,7 +316,7 @@ pub struct Cli {
     #[arg(long = "no-stream")]
     pub no_stream: bool,
 
-    /// Output render mode: 'rich' (default) or 'raw' (markdown with ANSI highlighting)
+    /// Markdown render mode: bat (default), rich, or raw
     #[arg(long = "render-mode", value_parser = parse_render_mode)]
     pub render_mode: Option<crate::render::RenderMode>,
 
@@ -344,6 +339,10 @@ pub struct Cli {
     /// Exit after the first turn finishes (requires a prompt or `--skill`).
     #[arg(long = "oneshot")]
     pub oneshot: bool,
+
+    /// Eager-load an MCP tool this session (raw SERVER:TOOL, repeatable)
+    #[arg(long = "eager-load-tool", value_name = "SERVER:TOOL")]
+    pub eager_load_tool: Vec<String>,
 
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
@@ -376,7 +375,26 @@ mod tests {
         assert!(cli.render_mode.is_none());
         assert!(cli.skill.is_none());
         assert!(!cli.oneshot);
+        assert!(cli.eager_load_tool.is_empty());
         assert_eq!(cli.verbosity, 0);
+    }
+
+    #[test]
+    fn test_cli_eager_load_tool_repeatable() {
+        let cli = Cli::parse_from([
+            "agsh",
+            "--eager-load-tool",
+            "notion:search",
+            "--eager-load-tool",
+            "github:create_issue",
+        ]);
+        assert_eq!(
+            cli.eager_load_tool,
+            vec![
+                "notion:search".to_string(),
+                "github:create_issue".to_string()
+            ]
+        );
     }
 
     #[test]
