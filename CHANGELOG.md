@@ -16,9 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Sub-agents inherit the parent's MCP tools.
-- Deleting a parent session cascades to its sub-agent sessions.
-- Sub-agents now run on `Agent::run_turn`; bespoke loop removed (~130 lines).
+- Sub-agents now run on `Agent::run_turn`; bespoke loop removed.
 - Sub-agent token usage now rolls into the parent's `/status` totals.
+- Added `idx_sessions_updated_at` so `list`, `resume`, and prune skip the temp sort.
+- Session deletion / pruning / storage-limit eviction now rely on `ON DELETE CASCADE`.
+
+### Removed
+
+- Unused `sessions.metadata` column.
+
+### Fixed
+
+- Enable `PRAGMA foreign_keys = ON` so `messages` / `tool_outputs` FK clauses are enforced.
 
 ## [0.23.1] - 2026-05-17
 

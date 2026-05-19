@@ -214,6 +214,21 @@ impl SessionManager {
             restrict_permissions(&database_path, 0o600);
         }
 
+        // SQLite defaults foreign-key enforcement to OFF per-connection — the
+        // `FOREIGN KEY` clauses in `CREATE TABLE` are decorative without this.
+        // Set before `initialize_schema` so the migration's DELETE/ALTER
+        // statements run with enforcement active. Must run outside any
+        // transaction to take effect.
+        connection
+            .call(|connection| -> rusqlite::Result<_> {
+                connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to enable foreign keys: {}", error))
+            })?;
+
         let manager = Self {
             connection: Arc::new(connection),
             lock_dir,
@@ -230,16 +245,21 @@ impl SessionManager {
                         id TEXT PRIMARY KEY,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        metadata TEXT
+                        parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE
                     );
+
+                    CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                        ON sessions(updated_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_sessions_parent
+                        ON sessions(parent_session_id);
 
                     CREATE TABLE IF NOT EXISTS messages (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id)
+                        created_at TEXT NOT NULL
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_messages_session_id
@@ -309,12 +329,11 @@ impl SessionManager {
 
                 connection.execute_batch(
                     "CREATE TABLE IF NOT EXISTS tool_outputs (
-                        session_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         name TEXT NOT NULL,
                         content TEXT NOT NULL,
                         created_at TEXT NOT NULL,
-                        PRIMARY KEY (session_id, name),
-                        FOREIGN KEY (session_id) REFERENCES sessions(id)
+                        PRIMARY KEY (session_id, name)
                     );
 
                     CREATE TABLE IF NOT EXISTS mcp_auth_cache (
@@ -343,6 +362,96 @@ impl SessionManager {
                          CREATE INDEX IF NOT EXISTS idx_sessions_parent
                              ON sessions(parent_session_id);",
                     )?;
+                }
+
+                // Migration: drop the legacy `sessions.metadata` column. It
+                // was reserved for future use but never populated by any
+                // codepath, so it's pure schema noise.
+                let has_metadata: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'metadata'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
+                if has_metadata {
+                    connection.execute_batch("ALTER TABLE sessions DROP COLUMN metadata")?;
+                }
+
+                // Migration: rebuild sessions / messages / tool_outputs so
+                // their session-referencing FKs carry `ON DELETE CASCADE`,
+                // and so `parent_session_id` has a FK at all (it was added
+                // as a plain TEXT column). SQLite can't ALTER a column's
+                // constraints, so we follow the documented redefinition
+                // procedure: disable FK enforcement, recreate each table
+                // with the final schema, copy rows, drop old, rename, then
+                // re-enable enforcement. Wrapped in a transaction so a
+                // crash mid-migration leaves the original tables intact.
+                //
+                // Detection key: the `messages` table SQL contains the
+                // literal `ON DELETE CASCADE` after the migration runs.
+                let has_cascade: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master \
+                         WHERE type = 'table' AND name = 'messages' \
+                           AND sql LIKE '%ON DELETE CASCADE%'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
+                if !has_cascade {
+                    // PRAGMA foreign_keys only takes effect outside any
+                    // transaction. Toggle, run rebuild, restore — even on
+                    // failure — so the connection isn't left in a state
+                    // where FKs are silently off for subsequent queries.
+                    connection.execute_batch("PRAGMA foreign_keys = OFF")?;
+                    let migration_result = (|| -> rusqlite::Result<()> {
+                        let txn = connection.transaction()?;
+                        txn.execute_batch(
+                            "CREATE TABLE sessions_new (
+                                 id TEXT PRIMARY KEY,
+                                 created_at TEXT NOT NULL,
+                                 updated_at TEXT NOT NULL,
+                                 parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE
+                             );
+                             INSERT INTO sessions_new(id, created_at, updated_at, parent_session_id)
+                                 SELECT id, created_at, updated_at, parent_session_id FROM sessions;
+                             DROP TABLE sessions;
+                             ALTER TABLE sessions_new RENAME TO sessions;
+                             CREATE INDEX idx_sessions_updated_at ON sessions(updated_at);
+                             CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+
+                             CREATE TABLE messages_new (
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                                 role TEXT NOT NULL,
+                                 content TEXT NOT NULL,
+                                 created_at TEXT NOT NULL
+                             );
+                             INSERT INTO messages_new(id, session_id, role, content, created_at)
+                                 SELECT id, session_id, role, content, created_at FROM messages;
+                             DROP TABLE messages;
+                             ALTER TABLE messages_new RENAME TO messages;
+                             CREATE INDEX idx_messages_session_id ON messages(session_id);
+
+                             CREATE TABLE tool_outputs_new (
+                                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                                 name TEXT NOT NULL,
+                                 content TEXT NOT NULL,
+                                 created_at TEXT NOT NULL,
+                                 PRIMARY KEY (session_id, name)
+                             );
+                             INSERT INTO tool_outputs_new(session_id, name, content, created_at)
+                                 SELECT session_id, name, content, created_at FROM tool_outputs;
+                             DROP TABLE tool_outputs;
+                             ALTER TABLE tool_outputs_new RENAME TO tool_outputs;",
+                        )?;
+                        txn.commit()
+                    })();
+                    connection.execute_batch("PRAGMA foreign_keys = ON")?;
+                    migration_result?;
                 }
 
                 Ok(())
@@ -696,25 +805,12 @@ impl SessionManager {
 
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
-                connection.execute(
-                    "DELETE FROM tool_outputs WHERE session_id IN (
-                        SELECT id FROM sessions WHERE updated_at < ?1
-                    )",
-                    rusqlite::params![cutoff_str],
-                )?;
-
-                connection.execute(
-                    "DELETE FROM messages WHERE session_id IN (
-                        SELECT id FROM sessions WHERE updated_at < ?1
-                    )",
-                    rusqlite::params![cutoff_str],
-                )?;
-
+                // FK CASCADE sweeps messages, tool_outputs, and any
+                // sub-agent child sessions of the expired parents.
                 let deleted = connection.execute(
                     "DELETE FROM sessions WHERE updated_at < ?1",
                     rusqlite::params![cutoff_str],
                 )?;
-
                 Ok(deleted as u64)
             })
             .await
@@ -750,40 +846,14 @@ impl SessionManager {
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool> {
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
-                // Single-level cascade: drop any sub-agent (child) sessions'
-                // tool_outputs / messages / sessions rows before deleting
-                // the target. Sub-agents cannot spawn further sub-agents,
-                // so one level is sufficient.
-                connection.execute(
-                    "DELETE FROM tool_outputs WHERE session_id IN
-                         (SELECT id FROM sessions WHERE parent_session_id = ?1)",
-                    rusqlite::params![session_id.to_string()],
-                )?;
-                connection.execute(
-                    "DELETE FROM messages WHERE session_id IN
-                         (SELECT id FROM sessions WHERE parent_session_id = ?1)",
-                    rusqlite::params![session_id.to_string()],
-                )?;
-                connection.execute(
-                    "DELETE FROM sessions WHERE parent_session_id = ?1",
-                    rusqlite::params![session_id.to_string()],
-                )?;
-
-                connection.execute(
-                    "DELETE FROM tool_outputs WHERE session_id = ?1",
-                    rusqlite::params![session_id.to_string()],
-                )?;
-
-                connection.execute(
-                    "DELETE FROM messages WHERE session_id = ?1",
-                    rusqlite::params![session_id.to_string()],
-                )?;
-
+                // ON DELETE CASCADE on `messages.session_id`,
+                // `tool_outputs.session_id`, and `sessions.parent_session_id`
+                // sweeps own-session rows + any sub-agent children + their
+                // messages/tool_outputs in a single statement.
                 let deleted = connection.execute(
                     "DELETE FROM sessions WHERE id = ?1",
                     rusqlite::params![session_id.to_string()],
                 )?;
-
                 Ok(deleted > 0)
             })
             .await
@@ -793,8 +863,7 @@ impl SessionManager {
     pub async fn delete_all_sessions(&self) -> Result<u64> {
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
-                connection.execute("DELETE FROM tool_outputs", [])?;
-                connection.execute("DELETE FROM messages", [])?;
+                // FK CASCADE clears messages and tool_outputs.
                 let deleted = connection.execute("DELETE FROM sessions", [])?;
                 Ok(deleted as u64)
             })
@@ -958,14 +1027,8 @@ impl SessionManager {
 
                     match oldest_id {
                         Ok(session_id) => {
-                            connection.execute(
-                                "DELETE FROM tool_outputs WHERE session_id = ?1",
-                                rusqlite::params![session_id],
-                            )?;
-                            connection.execute(
-                                "DELETE FROM messages WHERE session_id = ?1",
-                                rusqlite::params![session_id],
-                            )?;
+                            // FK CASCADE sweeps the session's messages and
+                            // tool_outputs along with the session row.
                             connection.execute(
                                 "DELETE FROM sessions WHERE id = ?1",
                                 rusqlite::params![session_id],
