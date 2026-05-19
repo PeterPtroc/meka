@@ -324,6 +324,27 @@ impl SessionManager {
                     );",
                 )?;
 
+                // Migration: add `sessions.parent_session_id` so sub-agent
+                // sessions can be linked back to the parent that spawned
+                // them. Primary sessions store NULL. The index covers both
+                // the `agsh list` parent-only filter and the cascade lookup
+                // in `delete_session`.
+                let has_parent_col: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'parent_session_id'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
+                if !has_parent_col {
+                    connection.execute_batch(
+                        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;
+                         CREATE INDEX IF NOT EXISTS idx_sessions_parent
+                             ON sessions(parent_session_id);",
+                    )?;
+                }
+
                 Ok(())
             })
             .await
@@ -344,6 +365,31 @@ impl SessionManager {
             })
             .await
             .map_err(|error| AgshError::Database(format!("failed to create session: {}", error)))?;
+
+        Ok(session_id)
+    }
+
+    /// Create a session whose `parent_session_id` references an existing
+    /// session — used by `spawn_agent` so sub-agent conversations persist
+    /// as children of the parent for auditing. Cascades on parent delete
+    /// (see [`Self::delete_session`]).
+    pub async fn create_child_session(&self, parent: Uuid) -> Result<Uuid> {
+        let session_id = Uuid::new_v4();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.connection
+            .call(move |connection| -> rusqlite::Result<_> {
+                connection.execute(
+                    "INSERT INTO sessions (id, created_at, updated_at, parent_session_id)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![session_id.to_string(), now, now, parent.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to create child session: {}", error))
+            })?;
 
         Ok(session_id)
     }
@@ -583,10 +629,24 @@ impl SessionManager {
             })
     }
 
-    pub async fn list_sessions(&self, limit: u32) -> Result<Vec<SessionSummary>> {
+    /// List sessions, most-recent first. When `include_children` is `false`,
+    /// sub-agent sessions (rows with non-NULL `parent_session_id`) are hidden
+    /// — they're persisted for audit/debug but shouldn't clutter the user's
+    /// view of their own conversations. Set to `true` to surface them, e.g.
+    /// via `agsh list --include-children`.
+    pub async fn list_sessions(
+        &self,
+        limit: u32,
+        include_children: bool,
+    ) -> Result<Vec<SessionSummary>> {
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
-                let mut statement = connection.prepare(
+                let parent_filter = if include_children {
+                    ""
+                } else {
+                    "WHERE s.parent_session_id IS NULL"
+                };
+                let query = format!(
                     "SELECT s.id, s.updated_at,
                             COALESCE(
                               (SELECT content FROM messages
@@ -595,9 +655,12 @@ impl SessionManager {
                               ''
                             ) AS preview
                      FROM sessions s
+                     {}
                      ORDER BY s.updated_at DESC
                      LIMIT ?1",
-                )?;
+                    parent_filter,
+                );
+                let mut statement = connection.prepare(&query)?;
 
                 let rows = statement.query_map(rusqlite::params![limit], |row| {
                     let id_str: String = row.get(0)?;
@@ -687,6 +750,25 @@ impl SessionManager {
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool> {
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
+                // Single-level cascade: drop any sub-agent (child) sessions'
+                // tool_outputs / messages / sessions rows before deleting
+                // the target. Sub-agents cannot spawn further sub-agents,
+                // so one level is sufficient.
+                connection.execute(
+                    "DELETE FROM tool_outputs WHERE session_id IN
+                         (SELECT id FROM sessions WHERE parent_session_id = ?1)",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+                connection.execute(
+                    "DELETE FROM messages WHERE session_id IN
+                         (SELECT id FROM sessions WHERE parent_session_id = ?1)",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+                connection.execute(
+                    "DELETE FROM sessions WHERE parent_session_id = ?1",
+                    rusqlite::params![session_id.to_string()],
+                )?;
+
                 connection.execute(
                     "DELETE FROM tool_outputs WHERE session_id = ?1",
                     rusqlite::params![session_id.to_string()],
@@ -1875,7 +1957,10 @@ mod tests {
             .await
             .expect("save_message");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries
             .iter()
             .find(|s| s.id == session_id)
@@ -1918,7 +2003,10 @@ mod tests {
                 .await
                 .expect("save_message");
 
-            let summaries = manager.list_sessions(100).await.expect("list_sessions");
+            let summaries = manager
+                .list_sessions(100, false)
+                .await
+                .expect("list_sessions");
             let summary = summaries
                 .iter()
                 .find(|s| s.id == session_id)
@@ -1945,7 +2033,10 @@ mod tests {
             .await
             .expect("save_message");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
 
         assert!(
@@ -1985,7 +2076,10 @@ mod tests {
                 .expect("save_message");
         }
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
         assert_eq!(summary.preview, "first prompt");
     }
@@ -2006,7 +2100,10 @@ mod tests {
             .await
             .expect("save_message");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
         assert_eq!(summary.preview, "line one is the preview");
     }
@@ -2028,7 +2125,10 @@ mod tests {
                 .expect("save_message");
         }
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let preview_of = |id: uuid::Uuid| {
             summaries
                 .iter()
@@ -2049,7 +2149,10 @@ mod tests {
         let manager = test_manager().await;
         let session_id = manager.create_session().await.expect("create_session");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
         assert_eq!(summary.preview, "");
     }
@@ -2071,7 +2174,10 @@ mod tests {
             .await
             .expect("save_message");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
         assert_eq!(
             summary.preview, "[Conversation summary from session compaction]",
@@ -2092,7 +2198,10 @@ mod tests {
             .await
             .expect("save_message");
 
-        let summaries = manager.list_sessions(10).await.expect("list_sessions");
+        let summaries = manager
+            .list_sessions(10, false)
+            .await
+            .expect("list_sessions");
         let summary = summaries.iter().find(|s| s.id == session_id).unwrap();
         assert_eq!(summary.preview, "legacy prompt without any wrapper");
     }
@@ -2112,6 +2221,87 @@ mod tests {
             .expect("failed to enforce");
         assert_eq!(deleted, 0);
         assert!(manager.session_exists(session_id).await.expect("failed"));
+    }
+
+    // Child-session tests: parent→sub-agent linkage, cascade-on-delete,
+    // and `agsh list` filter behavior.
+
+    #[tokio::test]
+    async fn test_create_child_session_writes_parent_id() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("create parent");
+        let child = manager
+            .create_child_session(parent)
+            .await
+            .expect("create child");
+
+        // Cross-check the column via list_sessions(include_children=true).
+        let summaries = manager
+            .list_sessions(100, true)
+            .await
+            .expect("list_sessions");
+        let ids: Vec<_> = summaries.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&parent), "parent missing from listing");
+        assert!(ids.contains(&child), "child missing from listing");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_default_hides_children() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("create parent");
+        let _child = manager
+            .create_child_session(parent)
+            .await
+            .expect("create child");
+
+        let default_view = manager.list_sessions(10, false).await.expect("list");
+        let ids: Vec<_> = default_view.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&parent), "parent should still be visible");
+
+        let full_view = manager.list_sessions(10, true).await.expect("list");
+        assert_eq!(full_view.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_session_cascades_to_children() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("create parent");
+        let child = manager
+            .create_child_session(parent)
+            .await
+            .expect("create child");
+
+        // Populate the child with a message and a tool_output so the cascade
+        // has something to clean up — proves the descendant deletions run,
+        // not just the parent row.
+        manager
+            .save_message(child, "user", "hello from sub-agent")
+            .await
+            .expect("save_message");
+        manager
+            .save_tool_output(child, "fixture", "tool body")
+            .await
+            .expect("save_tool_output");
+
+        let deleted = manager.delete_session(parent).await.expect("delete parent");
+        assert!(deleted);
+        assert!(
+            !manager.session_exists(parent).await.expect("exists check"),
+            "parent should be gone"
+        );
+        assert!(
+            !manager.session_exists(child).await.expect("exists check"),
+            "child should be cascaded"
+        );
+        assert!(
+            manager
+                .load_tool_output(child, "fixture")
+                .await
+                .expect("load")
+                .is_none(),
+            "child's tool_output should be gone"
+        );
     }
 
     // MCP TokenStore tests.

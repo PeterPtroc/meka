@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Sub-agent sessions persist as DB children for auditing; `agsh list --include-children` to view.
+- Sub-agents now get `load_tool`, `render_image`, and all scratchpad tools (scoped to their own session).
+- `RenderMode::Silent` suppresses all agent output; used by sub-agents.
+
+### Changed
+
+- Sub-agents inherit the parent's MCP tools.
+- Deleting a parent session cascades to its sub-agent sessions.
+- Sub-agents now run on `Agent::run_turn`; bespoke loop removed (~130 lines).
+- Sub-agent token usage now rolls into the parent's `/status` totals.
+
 ## [0.23.1] - 2026-05-17
 
 ### Changed

@@ -5,13 +5,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+use crate::agent::{Agent, AgentOptions};
 use crate::context::build_environment_context;
 use crate::conversation::Conversation;
 use crate::error::{AgshError, Result};
 use crate::permission::{Permission, SharedPermission};
-use crate::provider::{ContentBlock, Message, Provider, StopReason, ToolDefinition};
+use crate::provider::{Provider, ToolDefinition};
+use crate::session::SessionManager;
 
 use super::{BuiltinToolFilter, Tool, ToolOutput, ToolRegistry};
 
@@ -29,6 +33,29 @@ pub struct ToolBuilderParams {
     /// parent so their system prompts stay consistent and pick up the
     /// same auto-reloads.
     pub skills: Arc<crate::skills::SkillCache>,
+    /// Parent's MCP client manager, if any servers are configured. When
+    /// `Some`, every `spawn_agent` invocation calls
+    /// [`crate::mcp::McpClientManager::install_tools_on`] on the
+    /// freshly-built sub-agent registry so sub-agents see the same MCP
+    /// resource meta-tools and per-server adapters as the parent.
+    /// `None` is the no-MCP-configured case.
+    pub mcp_manager: Option<Arc<crate::mcp::McpClientManager>>,
+    /// Shared `SessionManager` so sub-agents can create their own DB
+    /// session at spawn time and persist their conversation under it.
+    pub session_manager: SessionManager,
+    /// Parent agent's session ID. Read at spawn time so the new sub-agent
+    /// session's `parent_session_id` column points back here; cascade-on-
+    /// delete in `SessionManager::delete_session` then sweeps sub-agent
+    /// rows when the parent is deleted.
+    pub parent_shared_session_id: Arc<RwLock<Option<Uuid>>>,
+    /// Parent's session-level counters. Shared so sub-agent token usage
+    /// rolls up into the same `/status` totals — operators see the full
+    /// cost of a session including everything its sub-agents consumed.
+    pub session_stats: Arc<crate::stats::SessionStats>,
+    /// Parent's options, used to derive the sub-agent's inherited fields
+    /// (`sandboxed_shell`, `context_messages`, `user_instructions`) inside
+    /// [`Agent::new_subagent`].
+    pub parent_options: AgentOptions,
 }
 
 pub struct SpawnAgentTool {
@@ -83,23 +110,71 @@ impl Tool for SpawnAgentTool {
             })?
             .to_string();
 
-        let sub_perm = self.parent_permission.get();
+        // Snapshot the parent's permission. Demote `Ask` to `Read`: the
+        // sub-agent runs with `approval_sender: None`, so every Ask-mode
+        // tool dispatch would otherwise fail with the
+        // "Ask mode requires interactive shell for tool approval" error
+        // (see `Agent::execute_with_approval`). Read keeps the sub-agent
+        // useful for the common research/exploration case; forwarding
+        // approvals through the parent's REPL is future work.
+        let sub_perm = match self.parent_permission.get() {
+            Permission::Ask => Permission::Read,
+            other => other,
+        };
 
-        // Build a sub-agent tool registry: no spawn_agent (no recursive spawning)
-        // and a fresh, private todo list so the sub-agent's todo_write /
-        // todo_read calls don't touch the parent's task tracking.
+        // Resolve parent session ID. By the time a tool runs,
+        // `Agent::run_turn` has already written `shared_session_id` before
+        // dispatching tools. A missing value here means an agent ran a
+        // tool without first creating its session — an internal invariant
+        // break worth surfacing rather than silently producing an orphan.
+        let parent_sid = self
+            .tool_builder_params
+            .parent_shared_session_id
+            .read()
+            .await
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "spawn_agent".to_string(),
+                message: "parent session ID not yet assigned (run_turn invariant)".to_string(),
+            })?;
+
+        // Create the sub-agent's own DB session, linked back to the parent
+        // via `parent_session_id`. Cascade-on-delete in `delete_session`
+        // sweeps it when the parent is removed.
+        let sub_session_id = self
+            .tool_builder_params
+            .session_manager
+            .create_child_session(parent_sid)
+            .await
+            .map_err(|error| AgshError::ToolExecution {
+                tool_name: "spawn_agent".to_string(),
+                message: format!("failed to create sub-agent session: {}", error),
+            })?;
+        let sub_shared_session_id: Arc<RwLock<Option<Uuid>>> =
+            Arc::new(RwLock::new(Some(sub_session_id)));
+        tracing::info!(
+            "spawning sub-agent: parent={} child={}",
+            parent_sid,
+            sub_session_id
+        );
+
+        // Build a sub-agent tool registry: no `spawn_agent` (no recursive
+        // spawning) and a fresh, private todo list so the sub-agent's
+        // todo_write / todo_read calls don't touch the parent's task
+        // tracking. Scratchpad and render_image use the new sub-session ID.
         let sub_shared_perm = SharedPermission::new(sub_perm, self.parent_permission.enabled());
         let sub_todo_list: super::todo::SharedTodoList =
             Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let sub_registry = ToolRegistry::build_for_subagent(
             self.tool_builder_params.web_client.clone(),
-            sub_shared_perm,
+            sub_shared_perm.clone(),
             self.tool_builder_params.sandbox_enabled,
             self.tool_builder_params.sandbox_capability.clone(),
             self.tool_builder_params.sandbox_backend,
             self.tool_builder_params.backend_probe.clone(),
             self.tool_builder_params.builtin_filter.clone(),
-            sub_todo_list,
+            sub_todo_list.clone(),
+            self.tool_builder_params.session_manager.clone(),
+            sub_shared_session_id.clone(),
             self.tool_builder_params.skills.clone(),
         )
         .map_err(|error| AgshError::ToolExecution {
@@ -107,30 +182,58 @@ impl Tool for SpawnAgentTool {
             message: format!("failed to build sub-agent tool registry: {}", error),
         })?;
 
+        // Inherit the parent's MCP toolset. Skipped silently when no MCP
+        // manager is attached (no servers configured) or when the parent's
+        // servers are still Pending / Failed at spawn time. `install_tools_on`
+        // is non-spawning and idempotent — see `src/mcp.rs:install_tools_on`.
+        if let Some(manager) = self.tool_builder_params.mcp_manager.as_ref() {
+            manager.install_tools_on(&sub_registry).await;
+        }
+
+        // Build the sub-agent's system prompt against the fully-loaded
+        // registry (registry now includes MCP adapters). The override on
+        // `AgentOptions` is static, so this single build captures the
+        // full tool catalogue visible to the sub-agent.
         let tools = sub_registry.definitions_for_permission(sub_perm);
-        let system_prompt =
+        let sub_system_prompt =
             build_subagent_system_prompt(sub_perm, &tools, self.user_instructions.as_deref());
 
         let environment_context = build_environment_context(sub_perm);
         let augmented_prompt = format!("{}\n{}", environment_context, prompt);
+
+        let sub_agent = Agent::new_subagent(
+            Arc::clone(&self.provider),
+            sub_registry,
+            self.tool_builder_params.session_manager.clone(),
+            sub_shared_perm,
+            &self.tool_builder_params.parent_options,
+            sub_system_prompt,
+            sub_todo_list,
+            sub_shared_session_id,
+            self.tool_builder_params.skills.clone(),
+            self.tool_builder_params.session_stats.clone(),
+        );
+
+        // Run the sub-agent's single turn via the shared `Agent::run_turn`
+        // path. Conversation persistence (user message, assistant
+        // messages, tool results) happens inside `run_turn` against the
+        // sub-session, so the audit trail is identical to a primary
+        // agent's. Iteration cap, silent rendering, and the omitted MCP
+        // gate are baked into the options via `new_subagent`.
         let mut messages = Conversation::new();
-        messages.append(Message::user(&augmented_prompt));
+        let mut session_id_opt = Some(sub_session_id);
+        sub_agent
+            .run_turn(
+                &mut session_id_opt,
+                &mut messages,
+                augmented_prompt,
+                cancellation,
+            )
+            .await?;
 
-        // No report-length truncation here: the agent layer's
-        // `persist_oversized_results` auto-persists any oversized report to
-        // the scratchpad losslessly, and `save_explicit_scratchpad_results`
-        // handles explicit redirections.
-        let report = run_subagent_loop(
-            &*self.provider,
-            &sub_registry,
-            &system_prompt,
-            &mut messages,
-            sub_perm,
-            &tools,
-            cancellation,
-        )
-        .await?;
-
+        let report = messages
+            .last_assistant_text()
+            .unwrap_or_else(|| "(sub-agent produced no final text)".to_string());
         Ok(ToolOutput::text(report, false))
     }
 }
@@ -175,128 +278,6 @@ fn build_subagent_system_prompt(
     prompt
 }
 
-/// Resolve a single sub-agent tool call. Returns `Ok(ToolOutput)` on success
-/// (including model-visible errors like "Unknown tool" or "Permission denied"
-/// surfaced as `is_error: true`). Propagates `AgshError::Interrupted` so the
-/// caller can abort the sub-agent turn; other tool errors are folded into
-/// the `ToolOutput` so the sub-agent can recover.
-async fn run_subagent_tool(
-    tool_registry: &ToolRegistry,
-    name: &str,
-    input: &serde_json::Value,
-    permission: Permission,
-    cancellation: CancellationToken,
-) -> Result<ToolOutput> {
-    let Some(tool) = tool_registry.get(name) else {
-        return Ok(ToolOutput::text(format!("Unknown tool: '{}'", name), true));
-    };
-    let required = tool_registry
-        .required_permission_for(name)
-        .unwrap_or_else(|| tool.required_permission());
-    if !permission.allows(required) {
-        return Ok(ToolOutput::text(
-            format!("Permission denied: '{}' requires {}", name, required),
-            true,
-        ));
-    }
-    match tool.execute(input.clone(), cancellation).await {
-        Ok(output) => Ok(output),
-        Err(AgshError::Interrupted) => Err(AgshError::Interrupted),
-        Err(error) => Ok(ToolOutput::text(format!("Tool error: {}", error), true)),
-    }
-}
-
-async fn run_subagent_loop(
-    provider: &dyn Provider,
-    tool_registry: &ToolRegistry,
-    system_prompt: &str,
-    messages: &mut Conversation,
-    permission: Permission,
-    tools: &[ToolDefinition],
-    cancellation: CancellationToken,
-) -> Result<String> {
-    let max_iterations = 20;
-
-    for _ in 0..max_iterations {
-        if cancellation.is_cancelled() {
-            return Err(AgshError::Interrupted);
-        }
-
-        let (assistant_message, stop_reason, _usage) = provider
-            .complete(system_prompt, messages.as_slice(), tools)
-            .await?;
-
-        // Strip thinking blocks
-        let cleaned = Message {
-            role: crate::provider::Role::Assistant,
-            content: assistant_message
-                .content
-                .iter()
-                .filter(|block| !matches!(block, ContentBlock::Thinking { .. }))
-                .cloned()
-                .collect(),
-        };
-        messages.append(cleaned.clone());
-
-        match stop_reason {
-            StopReason::ToolUse => {
-                // Collect the plan in source order, then dispatch every tool
-                // in parallel via `join_all`. Sub-agents are silent, so no
-                // indicator render in this pass.
-                let planned: Vec<(String, String, serde_json::Value)> = cleaned
-                    .content
-                    .iter()
-                    .filter_map(|block| {
-                        if let ContentBlock::ToolUse { id, name, input } = block {
-                            Some((id.clone(), name.clone(), input.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                let futures = planned.iter().map(|(_, name, input)| {
-                    run_subagent_tool(
-                        tool_registry,
-                        name.as_str(),
-                        input,
-                        permission,
-                        cancellation.clone(),
-                    )
-                });
-                let outputs = futures::future::join_all(futures).await;
-
-                let mut results = Vec::with_capacity(planned.len());
-                for ((id, _, _), output) in planned.into_iter().zip(outputs) {
-                    // If any tool reported a true cancellation, abort the
-                    // sub-agent turn rather than feeding partial results back
-                    // to the model.
-                    let output = output?;
-                    results.push(ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: output.content,
-                        is_error: output.is_error,
-                    });
-                }
-
-                messages.append(Message {
-                    role: crate::provider::Role::User,
-                    content: results,
-                });
-            }
-            StopReason::EndTurn | StopReason::MaxTokens | StopReason::Unknown(_) => {
-                return Ok(cleaned.text_content());
-            }
-        }
-    }
-
-    // If we hit the iteration limit, return what we have
-    messages
-        .last()
-        .map(|msg| msg.text_content())
-        .ok_or_else(|| AgshError::Provider("sub-agent produced no output".to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,48 +305,26 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_run_subagent_tool_unknown_returns_error_output() {
-        use crate::sandbox::{BackendProbe, SandboxCapability};
-        use crate::tools::BuiltinToolFilter;
-        use tokio::sync::RwLock;
-
-        let todo_list: super::super::todo::SharedTodoList = Arc::new(RwLock::new(Vec::new()));
-        let registry = ToolRegistry::build_for_subagent(
-            crate::config::WebClientConfig::default(),
-            SharedPermission::new(Permission::Read, crate::permission::EnabledPermissions::ALL),
-            true,
-            SandboxCapability::Unavailable,
-            crate::config::SandboxBackend::Landlock,
-            BackendProbe::Missing {
-                reason: "test fixture".to_string(),
-            },
-            BuiltinToolFilter::default(),
-            todo_list,
-            crate::skills::SkillCache::for_root(None),
-        )
-        .expect("subagent registry should build");
-
-        let output = run_subagent_tool(
-            &registry,
-            "no_such_tool",
-            &serde_json::json!({}),
-            Permission::Read,
-            CancellationToken::new(),
-        )
-        .await
-        .expect("unknown tool should fold into ToolOutput, not propagate as Err");
-        assert!(output.is_error);
+    async fn test_session_manager() -> SessionManager {
+        SessionManager::open(Some(std::path::Path::new(":memory:")))
+            .await
+            .expect("in-memory session manager")
     }
+
+    // (Permission gating and "Unknown tool" fold-into-ToolOutput
+    // semantics that used to live in `run_subagent_tool` are now
+    // exercised by the shared `Agent::run_turn` path's tool-dispatch
+    // logic — covered by `src/agent.rs` and `src/tools.rs` test suites.)
 
     #[tokio::test]
     async fn test_subagent_registry_has_independent_todo_list() {
         use crate::sandbox::{BackendProbe, SandboxCapability};
         use crate::tools::BuiltinToolFilter;
-        use tokio::sync::RwLock;
 
-        let parent_list: super::super::todo::SharedTodoList = Arc::new(RwLock::new(Vec::new()));
-        let sub_list: super::super::todo::SharedTodoList = Arc::new(RwLock::new(Vec::new()));
+        let parent_list: super::super::todo::SharedTodoList =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let sub_list: super::super::todo::SharedTodoList =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
         let sub_registry = ToolRegistry::build_for_subagent(
             crate::config::WebClientConfig::default(),
@@ -378,6 +337,8 @@ mod tests {
             },
             BuiltinToolFilter::default(),
             sub_list.clone(),
+            test_session_manager().await,
+            Arc::new(tokio::sync::RwLock::new(None)),
             crate::skills::SkillCache::for_root(None),
         )
         .expect("subagent registry should build");

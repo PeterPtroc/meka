@@ -636,6 +636,62 @@ impl McpClientManager {
         Ok(adapters)
     }
 
+    /// Install MCP tools onto a freshly-built sub-agent registry. Mirrors
+    /// the startup wiring at `main.rs:create_agent_from_config` minus the
+    /// `start_connector` spawn — only already-`Connected` servers
+    /// contribute adapters; Pending / Failed servers are skipped silently
+    /// and their tools simply don't appear in the sub-agent's catalogue.
+    /// The resource / prompt meta-tools are registered unconditionally —
+    /// they delegate through [`ServerEntry::require_connected`]
+    /// themselves and tolerate non-connected servers until invoked.
+    ///
+    /// Mirrors the connector's deferred-mark step so a sub-agent sees the
+    /// same eager-vs-deferred tool classification as the parent.
+    ///
+    /// Idempotent and safe to call concurrently from separate
+    /// `spawn_agent` invocations operating on distinct sub-agent
+    /// registries.
+    pub async fn install_tools_on(self: &Arc<Self>, registry: &crate::tools::ToolRegistry) {
+        use crate::tools::Tool as _;
+
+        crate::tools::mcp_resources::register_all(registry, Arc::clone(self));
+        for name in self.server_names() {
+            let adapters = match self.discover_tools_for_server(&name).await {
+                Ok(adapters) => adapters,
+                Err(error) => {
+                    // Pending / Failed servers fall through `require_connected`
+                    // as Err — that's normal, not worth a warn. The sub-agent
+                    // just won't see this server's tools until it next runs
+                    // (and the parent's connector finishes the handshake).
+                    tracing::debug!(
+                        "mcp: sub-agent registry skipped server '{}': {}",
+                        name,
+                        error
+                    );
+                    continue;
+                }
+            };
+            if adapters.is_empty() {
+                continue;
+            }
+            let deferred_names: Vec<String> = adapters
+                .iter()
+                .filter(|adapter| {
+                    !crate::mcp::tool_should_eager_load(adapter.server_config(), adapter.raw_name())
+                })
+                .map(|adapter| adapter.definition().name.clone())
+                .collect();
+            let arc_adapters: Vec<Arc<dyn crate::tools::Tool>> = adapters
+                .into_iter()
+                .map(|adapter| Arc::new(adapter) as Arc<dyn crate::tools::Tool>)
+                .collect();
+            registry.replace_server_tools(&name, arc_adapters);
+            for deferred in &deferred_names {
+                registry.mark_deferred(deferred);
+            }
+        }
+    }
+
     /// Connect to the named server and list EVERY advertised tool —
     /// including ones currently filtered out by `allowed_tools` /
     /// `disabled_tools` so users editing those lists can see what
@@ -1734,6 +1790,62 @@ mod tests {
             matches!(state, ServerState::Failed { .. }),
             "expected Failed, got: {}",
             state.label()
+        );
+    }
+
+    /// Sub-agent registry inherits the parent's MCP resource / prompt
+    /// meta-tools, even when no server is connected yet. The per-server
+    /// adapters only show up for `Connected` servers — covered separately
+    /// by manual verification since spinning up a real stdio MCP server
+    /// here is heavy.
+    #[tokio::test]
+    async fn install_tools_on_registers_resource_meta_tools() {
+        let mut config = bare_server_config("subagent-fixture");
+        // Disable so `prepare` skips entirely without spawning a connector.
+        // `server_names()` still includes it, which is all `register_all`
+        // needs to gate on.
+        config.disabled = true;
+
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[config], None, None, context)
+            .await
+            .expect("prepare should succeed for a disabled server");
+
+        let registry = crate::tools::ToolRegistry::new();
+        manager.install_tools_on(&registry).await;
+
+        for name in [
+            "list_mcp_resources",
+            "read_mcp_resource",
+            "list_mcp_prompts",
+            "get_mcp_prompt",
+            "subscribe_mcp_resource",
+            "unsubscribe_mcp_resource",
+            "list_mcp_resource_updates",
+        ] {
+            assert!(
+                registry.get(name).is_some(),
+                "expected '{}' on sub-agent registry after install_tools_on",
+                name
+            );
+        }
+    }
+
+    /// With zero servers configured, `register_all`'s `server_names().is_empty()`
+    /// guard kicks in and nothing is registered.
+    #[tokio::test]
+    async fn install_tools_on_noop_without_servers() {
+        let context = McpClientContext::new();
+        let manager = McpClientManager::prepare(&[], None, None, context)
+            .await
+            .expect("prepare with no servers should succeed");
+
+        let registry = crate::tools::ToolRegistry::new();
+        manager.install_tools_on(&registry).await;
+
+        assert!(
+            registry.get("list_mcp_resources").is_none(),
+            "no MCP meta-tools should land on the registry when no servers configured"
         );
     }
 }

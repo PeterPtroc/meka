@@ -80,6 +80,12 @@ pub enum RenderMode {
     Bat,
     Termimad,
     Raw,
+    /// Emits no output to stdout/stderr. Used by sub-agents and any
+    /// other in-process [`crate::agent::Agent`] that shouldn't leak to
+    /// the user's terminal. The [`StreamingRenderer`] no-ops for this
+    /// mode; agent-side `render::*` calls are gated by
+    /// [`crate::agent::Agent::is_silent`].
+    Silent,
 }
 
 impl std::fmt::Display for RenderMode {
@@ -88,6 +94,7 @@ impl std::fmt::Display for RenderMode {
             RenderMode::Bat => write!(formatter, "bat"),
             RenderMode::Termimad => write!(formatter, "termimad"),
             RenderMode::Raw => write!(formatter, "raw"),
+            RenderMode::Silent => write!(formatter, "silent"),
         }
     }
 }
@@ -100,8 +107,9 @@ impl std::str::FromStr for RenderMode {
             "bat" => Ok(RenderMode::Bat),
             "rich" | "termimad" => Ok(RenderMode::Termimad),
             "raw" => Ok(RenderMode::Raw),
+            "silent" => Ok(RenderMode::Silent),
             other => Err(format!(
-                "unknown render mode '{}' (expected 'bat', 'termimad', or 'raw')",
+                "unknown render mode '{}' (expected 'bat', 'termimad', 'raw', or 'silent')",
                 other
             )),
         }
@@ -130,6 +138,12 @@ impl StreamingRenderer {
     }
 
     pub fn push_delta(&mut self, delta: &str) -> io::Result<()> {
+        // Short-circuit before any buffering — Silent shouldn't even
+        // accumulate state since `finish` will discard it anyway.
+        if matches!(self.mode, RenderMode::Silent) {
+            return Ok(());
+        }
+
         let delta = if self.started {
             delta
         } else {
@@ -147,10 +161,14 @@ impl StreamingRenderer {
             RenderMode::Bat => self.flush_bat(),
             RenderMode::Termimad => self.flush_termimad(),
             RenderMode::Raw => self.flush_raw(),
+            RenderMode::Silent => Ok(()),
         }
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
+        if matches!(self.mode, RenderMode::Silent) {
+            return Ok(());
+        }
         match self.mode {
             RenderMode::Bat => {
                 if !self.buffer.is_empty() {
@@ -214,6 +232,8 @@ impl StreamingRenderer {
                     self.flush_raw_table()?;
                 }
             }
+            // Already short-circuited above; included for exhaustiveness.
+            RenderMode::Silent => {}
         }
         io::stdout().flush()
     }

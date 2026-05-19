@@ -470,6 +470,59 @@ impl ToolRegistry {
         self.register(tool).expect("builtin tool name collision");
     }
 
+    /// Register the session-scoped tools (load_tool, skill, render_image,
+    /// todo_*, scratchpad_*) on the registry. Shared between
+    /// [`Self::build_default`] and [`Self::build_for_subagent`] so adding
+    /// a new such tool to the parent automatically gives it to sub-agents
+    /// too. `render_visible_todos` distinguishes the two paths: the parent
+    /// renders todo updates to the user's stderr, sub-agents stay silent.
+    fn register_session_scoped_tools(
+        &self,
+        session_manager: SessionManager,
+        shared_session_id: Arc<RwLock<Option<Uuid>>>,
+        todo_list: todo::SharedTodoList,
+        skills: Arc<crate::skills::SkillCache>,
+        render_visible_todos: bool,
+    ) {
+        self.register_builtin(Arc::new(load_tool::LoadToolTool {
+            tools: Arc::downgrade(&self.tools),
+            deferred: Arc::downgrade(&self.deferred),
+        }));
+        self.register_builtin(Arc::new(skill::SkillTool {
+            session_id: shared_session_id.clone(),
+            skills,
+        }));
+        self.register_builtin(Arc::new(render_image::RenderImageTool {
+            session_id: shared_session_id.clone(),
+            session_manager: session_manager.clone(),
+        }));
+        self.register_builtin(Arc::new(todo::TodoWriteTool {
+            todo_list: todo_list.clone(),
+            render_visible: render_visible_todos,
+        }));
+        self.register_builtin(Arc::new(todo::TodoReadTool { todo_list }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadWriteTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadReadTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadEditTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadListTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadDeleteTool {
+            session_manager,
+            session_id: shared_session_id,
+        }));
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn build_default(
         web_client_config: crate::config::WebClientConfig,
@@ -493,50 +546,21 @@ impl ToolRegistry {
             sandbox_backend,
             backend_probe,
         )?;
-        registry.register_builtin(Arc::new(load_tool::LoadToolTool {
-            tools: Arc::downgrade(&registry.tools),
-            deferred: Arc::downgrade(&registry.deferred),
-        }));
-        registry.register_builtin(Arc::new(skill::SkillTool {
-            session_id: shared_session_id.clone(),
-            skills,
-        }));
-        registry.register_builtin(Arc::new(render_image::RenderImageTool {
-            session_id: shared_session_id.clone(),
-            session_manager: session_manager.clone(),
-        }));
-        registry.register_builtin(Arc::new(todo::TodoWriteTool {
-            todo_list: todo_list.clone(),
-            render_visible: true,
-        }));
-        registry.register_builtin(Arc::new(todo::TodoReadTool { todo_list }));
-        registry.register_builtin(Arc::new(scratchpad::ScratchpadWriteTool {
-            session_manager: session_manager.clone(),
-            session_id: shared_session_id.clone(),
-        }));
-        registry.register_builtin(Arc::new(scratchpad::ScratchpadReadTool {
-            session_manager: session_manager.clone(),
-            session_id: shared_session_id.clone(),
-        }));
-        registry.register_builtin(Arc::new(scratchpad::ScratchpadEditTool {
-            session_manager: session_manager.clone(),
-            session_id: shared_session_id.clone(),
-        }));
-        registry.register_builtin(Arc::new(scratchpad::ScratchpadListTool {
-            session_manager: session_manager.clone(),
-            session_id: shared_session_id.clone(),
-        }));
-        registry.register_builtin(Arc::new(scratchpad::ScratchpadDeleteTool {
+        registry.register_session_scoped_tools(
             session_manager,
-            session_id: shared_session_id,
-        }));
+            shared_session_id,
+            todo_list,
+            skills,
+            true,
+        );
         Ok(registry)
     }
 
-    /// Build a tool registry for sub-agents. Each sub-agent gets its own
-    /// private `SharedTodoList` so `todo_write` and `todo_read` operate on
-    /// per-agent state. `spawn_agent` remains absent — sub-agents cannot
-    /// recursively spawn further sub-agents.
+    /// Build a tool registry for sub-agents. Sub-agents get the same
+    /// session-scoped tools as the parent (load_tool, skill, render_image,
+    /// todo_*, scratchpad_*) scoped to their own ephemeral child session.
+    /// `spawn_agent` remains absent — sub-agents cannot recursively spawn
+    /// further sub-agents.
     #[allow(clippy::too_many_arguments)]
     pub fn build_for_subagent(
         web_client_config: crate::config::WebClientConfig,
@@ -547,6 +571,8 @@ impl ToolRegistry {
         backend_probe: crate::sandbox::BackendProbe,
         builtin_filter: BuiltinToolFilter,
         todo_list: todo::SharedTodoList,
+        session_manager: SessionManager,
+        shared_session_id: Arc<RwLock<Option<Uuid>>>,
         skills: Arc<crate::skills::SkillCache>,
     ) -> Result<Self> {
         let registry = Self::new_with_filter(builtin_filter);
@@ -558,17 +584,13 @@ impl ToolRegistry {
             sandbox_backend,
             backend_probe,
         )?;
-        // Sub-agents don't have a session of their own — skills still load but
-        // ${AGSH_SESSION_ID} stays unresolved for their invocations.
-        registry.register_builtin(Arc::new(skill::SkillTool {
-            session_id: Arc::new(RwLock::new(None)),
+        registry.register_session_scoped_tools(
+            session_manager,
+            shared_session_id,
+            todo_list,
             skills,
-        }));
-        registry.register_builtin(Arc::new(todo::TodoWriteTool {
-            todo_list: todo_list.clone(),
-            render_visible: false,
-        }));
-        registry.register_builtin(Arc::new(todo::TodoReadTool { todo_list }));
+            false,
+        );
         Ok(registry)
     }
 }
@@ -1247,6 +1269,10 @@ pub(crate) mod tests {
             BuiltinToolFilter::from_config(None, vec!["web_search".to_string()], HashMap::new());
         let sandbox_capability = crate::sandbox::detect();
         let backend_probe = crate::sandbox::BackendProbe::Ok(sandbox_capability.clone());
+        let session_manager = SessionManager::open(Some(Path::new(":memory:")))
+            .await
+            .expect("failed to open in-memory database");
+        let shared_session_id = Arc::new(RwLock::new(None));
         let registry = ToolRegistry::build_for_subagent(
             crate::config::WebClientConfig::default(),
             crate::permission::SharedPermission::new(
@@ -1259,6 +1285,8 @@ pub(crate) mod tests {
             backend_probe,
             filter,
             test_todo_list(),
+            session_manager,
+            shared_session_id,
             crate::skills::SkillCache::for_root(None),
         )
         .expect("default web client config should build cleanly");

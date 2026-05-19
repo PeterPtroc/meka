@@ -37,6 +37,11 @@ pub enum Command {
         /// Maximum number of sessions to show
         #[arg(short = 'n', long, default_value = "20")]
         limit: u32,
+        /// Include sub-agent sessions (children of a parent session) in the
+        /// listing. Hidden by default to keep the view focused on
+        /// user-initiated conversations.
+        #[arg(long)]
+        include_children: bool,
     },
     /// Manage MCP servers (list, add, remove, reconnect, login, logout)
     Mcp {

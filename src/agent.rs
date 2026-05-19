@@ -25,11 +25,19 @@ use crate::tools::todo::SharedTodoList;
 /// the configured context window.
 const AUTO_COMPACT_THRESHOLD_PERCENT: u64 = 80;
 
+/// Maximum number of tool-using rounds inside a sub-agent's turn before
+/// the loop is force-broken via the [`AgentOptions::max_iterations`] cap.
+/// Bounds runaway sub-agents that the model can't terminate on its own
+/// (e.g. tool-call loop stuck on a flaky external service). Matches the
+/// pre-unification cap from the bespoke `run_subagent_loop`.
+pub(crate) const SUBAGENT_MAX_ITERATIONS: usize = 20;
+
 /// Per-turn configuration knobs for [`Agent`]. Constructed once by `main` from
 /// the [`crate::config::ResolvedConfig`] and held immutably for the agent's
 /// lifetime; mid-session permission cycling and tool loading are handled by
 /// shared state (see [`SharedPermission`] and [`ToolRegistry`]) rather than
 /// by mutating fields here.
+#[derive(Clone)]
 pub struct AgentOptions {
     /// When true, assistant responses stream token-by-token via
     /// `Provider::stream`; otherwise the agent uses the blocking
@@ -64,6 +72,21 @@ pub struct AgentOptions {
     /// Max time to wait for still-`Pending` MCP servers to reach
     /// `Connected` before applying the strict check.
     pub mcp_grace: std::time::Duration,
+    /// Cap on tool-using rounds inside a single turn. `None` = unbounded
+    /// (current behaviour for the parent agent). Sub-agents set
+    /// `Some(SUBAGENT_MAX_ITERATIONS)` to bound runaway tool loops.
+    /// When the cap fires, the loop breaks cleanly and `run_turn` returns
+    /// `Ok(())` — the assistant's last message before the cap stays
+    /// readable via [`crate::conversation::Conversation::last_assistant_text`].
+    pub max_iterations: Option<usize>,
+    /// When `Some`, `run_turn` uses this string verbatim instead of
+    /// invoking [`crate::context::build_system_prompt`]. Sub-agents set
+    /// this to their stripped-down prompt from
+    /// `build_subagent_system_prompt`. The override is static — it does
+    /// not see per-turn todo updates or permission changes, which is
+    /// fine for one-shot sub-agents whose tool list and permission level
+    /// are fixed at spawn time.
+    pub system_prompt_override: Option<String>,
 }
 
 /// Driver for a single conversation. One [`Agent`] handles one or more
@@ -135,10 +158,82 @@ impl Agent {
         }
     }
 
+    /// Build an `Agent` configured for sub-agent use: silent rendering,
+    /// no compaction, no approval round-trip, no MCP readiness gate, and
+    /// the iteration cap set to [`SUBAGENT_MAX_ITERATIONS`]. Inherits
+    /// `sandboxed_shell`, `context_messages`, and `user_instructions`
+    /// from the parent's options so the sub-agent sees the same shell
+    /// sandbox decision, message-cap policy, and user-authored
+    /// instructions.
+    ///
+    /// `sub_system_prompt` is the pre-built sub-agent system prompt
+    /// (typically from `build_subagent_system_prompt`); `run_turn` uses
+    /// it verbatim instead of building one dynamically.
+    ///
+    /// Doesn't call `set_mcp_manager`. MCP tool dispatch from the
+    /// sub-agent's registry works without an attached manager because
+    /// the adapters delegate through `Arc<ServerEntry>` directly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_subagent(
+        provider: Arc<dyn Provider>,
+        tool_registry: ToolRegistry,
+        session_manager: SessionManager,
+        shared_permission: SharedPermission,
+        parent_options: &AgentOptions,
+        sub_system_prompt: String,
+        todo_list: SharedTodoList,
+        shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
+        skills: Arc<SkillCache>,
+        session_stats: Arc<crate::stats::SessionStats>,
+    ) -> Self {
+        let options = AgentOptions {
+            // Inherited from parent: same sandbox decision, message
+            // truncation cap, and user instructions.
+            sandboxed_shell: parent_options.sandboxed_shell,
+            context_messages: parent_options.context_messages,
+            user_instructions: parent_options.user_instructions.clone(),
+            // Sub-agent overrides: silent, one-shot, capped iterations.
+            streaming: false,
+            newline_before_prompt: false,
+            newline_after_prompt: false,
+            show_session_id_on_create: false,
+            show_token_usage: false,
+            render_mode: crate::render::RenderMode::Silent,
+            auto_compact: false,
+            context_window: 0,
+            thinking_show_content: false,
+            mcp_strict: false,
+            mcp_grace: std::time::Duration::ZERO,
+            max_iterations: Some(SUBAGENT_MAX_ITERATIONS),
+            system_prompt_override: Some(sub_system_prompt),
+        };
+        Self::new(
+            provider,
+            tool_registry,
+            session_manager,
+            shared_permission,
+            options,
+            todo_list,
+            shared_session_id,
+            skills,
+            None,
+            session_stats,
+        )
+    }
+
     /// Snapshot of the per-session counters used by `/status`. Called
     /// from the REPL on demand.
     pub fn session_stats_snapshot(&self) -> crate::stats::SessionStatsSnapshot {
         self.session_stats.snapshot()
+    }
+
+    /// True when this agent's render mode is [`crate::render::RenderMode::Silent`]
+    /// — sub-agents and any other in-process agent that shouldn't leak
+    /// to the user's terminal. `run_turn` gates every direct `render::*`
+    /// / `eprintln!` callsite on `!self.is_silent()` so a silent agent
+    /// produces zero output.
+    fn is_silent(&self) -> bool {
+        matches!(self.options.render_mode, crate::render::RenderMode::Silent)
     }
 
     /// Shared handle to the auto-refreshing skill cache. The REPL's
@@ -221,14 +316,14 @@ impl Agent {
         if session_id.is_none() {
             let id = self.session_manager.create_session().await?;
             *session_id = Some(id);
-            if self.options.show_session_id_on_create {
+            if self.options.show_session_id_on_create && !self.is_silent() {
                 crate::render::render_session_id("Creating new session", &id.to_string());
             }
         }
 
         let mut spacing = render::OutputSpacing::new();
 
-        if self.options.newline_after_prompt {
+        if self.options.newline_after_prompt && !self.is_silent() {
             eprintln!();
             spacing.after_prompt();
         }
@@ -278,13 +373,16 @@ impl Agent {
             .as_ref()
             .map(|manager| manager.server_instructions())
             .unwrap_or_default();
-        let system_prompt = context::build_system_prompt(
-            &catalogue,
-            self.options.sandboxed_shell,
-            skills.as_slice(),
-            self.options.user_instructions.as_deref(),
-            &mcp_instructions,
-        );
+        let system_prompt = match &self.options.system_prompt_override {
+            Some(prompt) => prompt.clone(),
+            None => context::build_system_prompt(
+                &catalogue,
+                self.options.sandboxed_shell,
+                skills.as_slice(),
+                self.options.user_instructions.as_deref(),
+                &mcp_instructions,
+            ),
+        };
 
         let base_messages =
             truncate_messages_for_context(messages.as_slice(), self.options.context_messages);
@@ -296,11 +394,25 @@ impl Agent {
         // tool-execution loops), not just the final round-trip.
         let mut turn_usage = crate::provider::TokenUsage::default();
 
+        // Tool-using rounds within this turn. Capped by
+        // `AgentOptions::max_iterations` (sub-agents set this; the parent
+        // leaves it `None` for unbounded behaviour). Incremented *after*
+        // each `provider.complete` so the first round counts as 1.
+        let mut iteration: usize = 0;
+
         let result: Result<()> = 'turn: {
             loop {
                 if cancellation.is_cancelled() {
                     break 'turn Err(AgshError::Interrupted);
                 }
+
+                if let Some(cap) = self.options.max_iterations
+                    && iteration >= cap
+                {
+                    tracing::warn!("agent: max_iterations ({}) reached; ending turn", cap);
+                    break 'turn Ok(());
+                }
+                iteration += 1;
 
                 let api_messages = if messages.len() > turn_start_len {
                     let mut combined = base_messages.clone();
@@ -448,12 +560,12 @@ impl Agent {
             // `/status`. Done here (not inside the inner loop) so a single
             // `/status` reading reflects whole turns, not partial state.
             self.session_stats.record_turn(&turn_usage);
-            if self.options.show_token_usage {
+            if self.options.show_token_usage && !self.is_silent() {
                 crate::render::render_token_usage(&turn_usage);
             }
         }
 
-        if result.is_ok() && self.options.newline_before_prompt {
+        if result.is_ok() && self.options.newline_before_prompt && !self.is_silent() {
             eprintln!();
         }
 
@@ -520,10 +632,12 @@ impl Agent {
                 }
                 StreamEvent::ThinkingComplete { signature } => {
                     if !current_thinking.is_empty() {
-                        if spacing.before_thinking() {
+                        if spacing.before_thinking() && !self.is_silent() {
                             eprintln!();
                         }
-                        render::render_thinking_block(&current_thinking, show_thinking);
+                        if !self.is_silent() {
+                            render::render_thinking_block(&current_thinking, show_thinking);
+                        }
                         content_blocks.push(ContentBlock::Thinking {
                             thinking: std::mem::take(&mut current_thinking),
                             signature,
@@ -531,7 +645,7 @@ impl Agent {
                     }
                 }
                 StreamEvent::TextDelta(text) => {
-                    if !renderer.started && spacing.before_text() {
+                    if !renderer.started && spacing.before_text() && !self.is_silent() {
                         eprintln!();
                     }
                     current_text.push_str(&text);
@@ -553,14 +667,16 @@ impl Agent {
                 }
                 StreamEvent::ToolUseEnd { input } => {
                     renderer.finish()?;
-                    if spacing.before_tool_indicator() {
+                    if spacing.before_tool_indicator() && !self.is_silent() {
                         eprintln!();
                     }
                     let schema = self
                         .tool_registry
                         .get(&current_tool_name)
                         .map(|t| t.definition().parameters);
-                    render::render_tool_indicator(&current_tool_name, &input, schema.as_ref());
+                    if !self.is_silent() {
+                        render::render_tool_indicator(&current_tool_name, &input, schema.as_ref());
+                    }
 
                     content_blocks.push(ContentBlock::ToolUse {
                         id: std::mem::take(&mut current_tool_id),
@@ -578,7 +694,7 @@ impl Agent {
                     // rather than running the tool on a silently-empty
                     // argument object.
                     renderer.finish()?;
-                    if spacing.before_tool_indicator() {
+                    if spacing.before_tool_indicator() && !self.is_silent() {
                         eprintln!();
                     }
                     let marker_input = serde_json::json!({
@@ -588,7 +704,9 @@ impl Agent {
                         .tool_registry
                         .get(&name)
                         .map(|t| t.definition().parameters);
-                    render::render_tool_indicator(&name, &marker_input, schema.as_ref());
+                    if !self.is_silent() {
+                        render::render_tool_indicator(&name, &marker_input, schema.as_ref());
+                    }
                     content_blocks.push(ContentBlock::ToolUse {
                         id,
                         name,
@@ -654,7 +772,7 @@ impl Agent {
         let mut planned: Vec<(String, String, serde_json::Value)> = Vec::new();
         for block in &assistant_message.content {
             if let ContentBlock::ToolUse { id, name, input } = block {
-                if !self.options.streaming {
+                if !self.options.streaming && !self.is_silent() {
                     if spacing.before_tool_indicator() {
                         eprintln!();
                     }

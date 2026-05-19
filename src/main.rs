@@ -102,7 +102,10 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
                 cli::Command::Delete { session_ids, all } => {
                     delete_sessions(&session_manager, session_ids, *all).await
                 }
-                cli::Command::List { limit } => list_sessions(&session_manager, *limit).await,
+                cli::Command::List {
+                    limit,
+                    include_children,
+                } => list_sessions(&session_manager, *limit, *include_children).await,
                 cli::Command::Mcp { action } => {
                     run_mcp_subcommand(&session_manager, action, cli_ref).await
                 }
@@ -403,6 +406,39 @@ async fn create_agent_from_config(
         builtin_filter.clone(),
     )?;
 
+    // Build the parent's `AgentOptions` up-front so it can be cloned into
+    // `ToolBuilderParams` for sub-agents to inherit `sandboxed_shell` /
+    // `context_messages` / `user_instructions` via `Agent::new_subagent`.
+    let agent_options = AgentOptions {
+        streaming: config.streaming,
+        newline_before_prompt: config.newline_before_prompt,
+        newline_after_prompt: config.newline_after_prompt,
+        show_session_id_on_create: config.show_session_id_on_create,
+        show_token_usage: config.show_token_usage,
+        sandboxed_shell,
+        render_mode: config.render_mode,
+        context_messages: config.context_messages,
+        auto_compact: config.auto_compact,
+        context_window: config.context_window.unwrap_or_else(|| {
+            config
+                .model
+                .as_deref()
+                .map(crate::config::context_window_for_model)
+                .unwrap_or(128_000)
+        }),
+        thinking_show_content: config.thinking_show_content,
+        user_instructions: config.user_instructions.clone(),
+        mcp_strict: config.mcp_strict,
+        mcp_grace: config.mcp_grace,
+        // Parent agent: unbounded iteration (today's behaviour).
+        // Sub-agents set Some(SUBAGENT_MAX_ITERATIONS) in
+        // Agent::new_subagent.
+        max_iterations: None,
+        // Parent builds its system prompt dynamically per-turn via
+        // context::build_system_prompt. Sub-agents override.
+        system_prompt_override: None,
+    };
+
     // Register the sub-agent tool with access to the provider
     if builtin_filter.admits("spawn_agent") {
         tool_registry.register(Arc::new(crate::tools::subagent::SpawnAgentTool {
@@ -416,6 +452,11 @@ async fn create_agent_from_config(
                 backend_probe: config.backend_probe.clone(),
                 builtin_filter: builtin_filter.clone(),
                 skills: skills.clone(),
+                mcp_manager: mcp_manager.cloned(),
+                session_manager: session_manager.clone(),
+                parent_shared_session_id: shared_session_id.clone(),
+                session_stats: Arc::clone(&session_stats),
+                parent_options: agent_options.clone(),
             },
             user_instructions: config.user_instructions.clone(),
         }))?;
@@ -451,28 +492,7 @@ async fn create_agent_from_config(
         tool_registry,
         session_manager,
         shared_permission,
-        AgentOptions {
-            streaming: config.streaming,
-            newline_before_prompt: config.newline_before_prompt,
-            newline_after_prompt: config.newline_after_prompt,
-            show_session_id_on_create: config.show_session_id_on_create,
-            show_token_usage: config.show_token_usage,
-            sandboxed_shell,
-            render_mode: config.render_mode,
-            context_messages: config.context_messages,
-            auto_compact: config.auto_compact,
-            context_window: config.context_window.unwrap_or_else(|| {
-                config
-                    .model
-                    .as_deref()
-                    .map(crate::config::context_window_for_model)
-                    .unwrap_or(128_000)
-            }),
-            thinking_show_content: config.thinking_show_content,
-            user_instructions: config.user_instructions.clone(),
-            mcp_strict: config.mcp_strict,
-            mcp_grace: config.mcp_grace,
-        },
+        agent_options,
         todo_list,
         shared_session_id,
         skills,
@@ -1261,8 +1281,14 @@ async fn run_skill_subcommand(action: &cli::SkillAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn list_sessions(session_manager: &SessionManager, limit: u32) -> anyhow::Result<()> {
-    let sessions = session_manager.list_sessions(limit).await?;
+async fn list_sessions(
+    session_manager: &SessionManager,
+    limit: u32,
+    include_children: bool,
+) -> anyhow::Result<()> {
+    let sessions = session_manager
+        .list_sessions(limit, include_children)
+        .await?;
 
     if sessions.is_empty() {
         println!("No sessions found.");

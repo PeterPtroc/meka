@@ -109,6 +109,19 @@ impl Conversation {
         self.materialized.iter()
     }
 
+    /// Text content of the most recent `Role::Assistant` message, or `None`
+    /// when no assistant message exists. Walks backward — necessary because
+    /// a turn that ended via tool-use leaves a `Role::User` tool-result
+    /// trailer in the conversation, hiding the assistant's final text from
+    /// the plain [`Self::last`].
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.materialized
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::provider::Role::Assistant))
+            .map(|message| message.text_content())
+    }
+
     /// Roll back an [`Conversation::append`] that did not reach the
     /// persistence layer. Used by `Agent::run_turn`'s error path when
     /// `save_message(user)` fails before any consumer could observe the
@@ -413,6 +426,36 @@ mod tests {
         assert_eq!(log.last().unwrap().text_content(), "third");
         let collected: Vec<&Message> = log.iter().collect();
         assert_eq!(collected.len(), 3);
+    }
+
+    #[test]
+    fn test_last_assistant_text_walks_past_tool_results() {
+        // Sub-agent turn shape after a tool-use round: assistant emits a
+        // tool_use, then the loop appends the matching tool_result as a
+        // Role::User trailer. `last()` would return that trailer, not the
+        // assistant's text — the helper has to walk backward.
+        let mut log = Conversation::new();
+        log.append(Message::user("kick off"));
+        log.append(Message::assistant_text("final assistant answer"));
+        log.append(user_with_tool_result("call_id"));
+
+        assert_eq!(
+            log.last_assistant_text().as_deref(),
+            Some("final assistant answer")
+        );
+    }
+
+    #[test]
+    fn test_last_assistant_text_none_on_empty() {
+        let log = Conversation::new();
+        assert_eq!(log.last_assistant_text(), None);
+    }
+
+    #[test]
+    fn test_last_assistant_text_none_when_no_assistant_message() {
+        let mut log = Conversation::new();
+        log.append(Message::user("only user message"));
+        assert_eq!(log.last_assistant_text(), None);
     }
 
     #[test]
