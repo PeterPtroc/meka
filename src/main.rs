@@ -430,10 +430,6 @@ async fn create_agent_from_config(
         user_instructions: config.user_instructions.clone(),
         mcp_strict: config.mcp_strict,
         mcp_grace: config.mcp_grace,
-        // Parent agent: unbounded iteration (today's behaviour).
-        // Sub-agents set Some(SUBAGENT_MAX_ITERATIONS) in
-        // Agent::new_subagent.
-        max_iterations: None,
         // Parent builds its system prompt dynamically per-turn via
         // context::build_system_prompt. Sub-agents override.
         system_prompt_override: None,

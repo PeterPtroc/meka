@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-05-19
+
+### Added
+
+- `spawn_agent` gains `inherit_scratchpad`: grant the sub-agent read-only access to parent entries.
+- `scratchpad_load_file` streams a file into the scratchpad without routing bytes through context.
+- `scratchpad_save_file` writes a scratchpad entry to disk without routing bytes through context.
+- `scratchpad_rename` renames an entry in place without round-tripping content through the model.
+
+### Changed
+
+- Sub-agents now run unbounded; the prior 20-round cap is removed, no replacement knob.
+- `scratchpad_list` renders own and inherited entries in one table with an `Origin` column.
+- Scratchpad tool output reports sizes in bytes (was mislabeled "characters" — always byte counts).
+
+### Fixed
+
+- Sub-agent writes to inherited scratchpad names now error instead of silently shadowing the parent.
+
 ## [0.24.1] - 2026-05-19
 
 ### Fixed

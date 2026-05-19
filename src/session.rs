@@ -47,6 +47,14 @@ pub struct ToolOutputSummary {
     pub created_at: String,
 }
 
+/// Result of [`SessionManager::rename_tool_output`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    Renamed,
+    NotFound,
+    TargetExists,
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
     connection: Arc<Connection>,
@@ -935,6 +943,46 @@ impl SessionManager {
             .await
             .map_err(|error| {
                 AgshError::Database(format!("failed to delete tool output: {}", error))
+            })
+    }
+
+    pub async fn rename_tool_output(
+        &self,
+        session_id: Uuid,
+        old: &str,
+        new: &str,
+    ) -> Result<RenameOutcome> {
+        let old = old.to_string();
+        let new = new.to_string();
+
+        self.connection
+            .call(move |connection| -> rusqlite::Result<_> {
+                // Pre-check: target must not exist. `tokio_rusqlite`
+                // serializes connection access so this and the UPDATE
+                // share a consistent view; the `PRIMARY KEY (session_id,
+                // name)` constraint at the schema layer is the final
+                // backstop.
+                let target_exists: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM tool_outputs WHERE session_id = ?1 AND name = ?2",
+                    rusqlite::params![session_id.to_string(), new],
+                    |row| row.get(0),
+                )?;
+                if target_exists > 0 {
+                    return Ok(RenameOutcome::TargetExists);
+                }
+                let renamed = connection.execute(
+                    "UPDATE tool_outputs SET name = ?1 WHERE session_id = ?2 AND name = ?3",
+                    rusqlite::params![new, session_id.to_string(), old],
+                )?;
+                Ok(if renamed > 0 {
+                    RenameOutcome::Renamed
+                } else {
+                    RenameOutcome::NotFound
+                })
+            })
+            .await
+            .map_err(|error| {
+                AgshError::Database(format!("failed to rename tool output: {}", error))
             })
     }
 

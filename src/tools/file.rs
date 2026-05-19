@@ -71,7 +71,7 @@ async fn open_write_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
     }
 }
 
-async fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(super) async fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut file = open_read_nofollow(path).await?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).await?;
@@ -85,7 +85,7 @@ async fn read_file_to_string(path: &Path) -> std::io::Result<String> {
     Ok(buffer)
 }
 
-async fn write_file_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) async fn write_file_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut file = open_write_nofollow(path).await?;
     file.write_all(bytes).await?;

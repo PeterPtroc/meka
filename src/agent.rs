@@ -25,13 +25,6 @@ use crate::tools::todo::SharedTodoList;
 /// the configured context window.
 const AUTO_COMPACT_THRESHOLD_PERCENT: u64 = 80;
 
-/// Maximum number of tool-using rounds inside a sub-agent's turn before
-/// the loop is force-broken via the [`AgentOptions::max_iterations`] cap.
-/// Bounds runaway sub-agents that the model can't terminate on its own
-/// (e.g. tool-call loop stuck on a flaky external service). Matches the
-/// pre-unification cap from the bespoke `run_subagent_loop`.
-pub(crate) const SUBAGENT_MAX_ITERATIONS: usize = 20;
-
 /// Per-turn configuration knobs for [`Agent`]. Constructed once by `main` from
 /// the [`crate::config::ResolvedConfig`] and held immutably for the agent's
 /// lifetime; mid-session permission cycling and tool loading are handled by
@@ -72,13 +65,6 @@ pub struct AgentOptions {
     /// Max time to wait for still-`Pending` MCP servers to reach
     /// `Connected` before applying the strict check.
     pub mcp_grace: std::time::Duration,
-    /// Cap on tool-using rounds inside a single turn. `None` = unbounded
-    /// (current behaviour for the parent agent). Sub-agents set
-    /// `Some(SUBAGENT_MAX_ITERATIONS)` to bound runaway tool loops.
-    /// When the cap fires, the loop breaks cleanly and `run_turn` returns
-    /// `Ok(())` — the assistant's last message before the cap stays
-    /// readable via [`crate::conversation::Conversation::last_assistant_text`].
-    pub max_iterations: Option<usize>,
     /// When `Some`, `run_turn` uses this string verbatim instead of
     /// invoking [`crate::context::build_system_prompt`]. Sub-agents set
     /// this to their stripped-down prompt from
@@ -159,12 +145,11 @@ impl Agent {
     }
 
     /// Build an `Agent` configured for sub-agent use: silent rendering,
-    /// no compaction, no approval round-trip, no MCP readiness gate, and
-    /// the iteration cap set to [`SUBAGENT_MAX_ITERATIONS`]. Inherits
-    /// `sandboxed_shell`, `context_messages`, and `user_instructions`
-    /// from the parent's options so the sub-agent sees the same shell
-    /// sandbox decision, message-cap policy, and user-authored
-    /// instructions.
+    /// no compaction, no approval round-trip, no MCP readiness gate.
+    /// Inherits `sandboxed_shell`, `context_messages`, and
+    /// `user_instructions` from the parent's options so the sub-agent
+    /// sees the same shell sandbox decision, message-cap policy, and
+    /// user-authored instructions.
     ///
     /// `sub_system_prompt` is the pre-built sub-agent system prompt
     /// (typically from `build_subagent_system_prompt`); `run_turn` uses
@@ -192,7 +177,7 @@ impl Agent {
             sandboxed_shell: parent_options.sandboxed_shell,
             context_messages: parent_options.context_messages,
             user_instructions: parent_options.user_instructions.clone(),
-            // Sub-agent overrides: silent, one-shot, capped iterations.
+            // Sub-agent overrides: silent, one-shot.
             streaming: false,
             newline_before_prompt: false,
             newline_after_prompt: false,
@@ -204,7 +189,6 @@ impl Agent {
             thinking_show_content: false,
             mcp_strict: false,
             mcp_grace: std::time::Duration::ZERO,
-            max_iterations: Some(SUBAGENT_MAX_ITERATIONS),
             system_prompt_override: Some(sub_system_prompt),
         };
         Self::new(
@@ -394,25 +378,11 @@ impl Agent {
         // tool-execution loops), not just the final round-trip.
         let mut turn_usage = crate::provider::TokenUsage::default();
 
-        // Tool-using rounds within this turn. Capped by
-        // `AgentOptions::max_iterations` (sub-agents set this; the parent
-        // leaves it `None` for unbounded behaviour). Incremented *after*
-        // each `provider.complete` so the first round counts as 1.
-        let mut iteration: usize = 0;
-
         let result: Result<()> = 'turn: {
             loop {
                 if cancellation.is_cancelled() {
                     break 'turn Err(AgshError::Interrupted);
                 }
-
-                if let Some(cap) = self.options.max_iterations
-                    && iteration >= cap
-                {
-                    tracing::warn!("agent: max_iterations ({}) reached; ending turn", cap);
-                    break 'turn Ok(());
-                }
-                iteration += 1;
 
                 let api_messages = if messages.len() > turn_start_len {
                     let mut combined = base_messages.clone();

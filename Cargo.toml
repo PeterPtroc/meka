@@ -1,6 +1,6 @@
 [package]
 name = "agsh"
-version = "0.24.1"
+version = "0.25.0"
 edition = "2024"
 license = "MIT"
 description = "A general-purpose AI agent runtime"
@@ -23,6 +23,7 @@ grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 image = { version = "0.25", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+infer = { version = "0.19", default-features = false }
 nu-ansi-term = "0.50"
 open = "5"
 percent-encoding = "2"

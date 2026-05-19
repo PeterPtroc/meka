@@ -72,8 +72,16 @@ impl Tool for SpawnAgentTool {
             name: "spawn_agent".to_string(),
             description: "Spawn a sub-agent to perform a research, analysis, or delegated task. \
                           The sub-agent inherits the parent's permission level, has its own \
-                          private todo list, and returns a single text report. Multiple \
-                          spawn_agent calls in one turn run in parallel."
+                          private todo list and scratchpad, and returns a single text report. \
+                          Multiple spawn_agent calls in one turn run in parallel. Use \
+                          `inherit_scratchpad` to grant read-only access to specific parent \
+                          scratchpad entries by name so the sub-agent can consume large captured \
+                          output via `scratchpad_read` without you re-inlining it in the prompt. \
+                          Tip: when you expect to hand output to a sub-agent later, set the \
+                          `scratchpad` parameter on the originating tool call (e.g. \
+                          `execute_command({command: \"...\", scratchpad: \"build_log\"})`) so \
+                          the entry has a semantic name you can pass through \
+                          `inherit_scratchpad`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -84,7 +92,21 @@ impl Tool for SpawnAgentTool {
                     },
                     "scratchpad": {
                         "type": "string",
-                        "description": "If provided, save the output to the scratchpad under this name instead of returning it inline."
+                        "description": "If provided, save the sub-agent's final report to the \
+                                        parent's scratchpad under this name instead of returning \
+                                        it inline."
+                    },
+                    "inherit_scratchpad": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Names of the parent's scratchpad entries the sub-agent \
+                                        is allowed to read. The sub-agent's `scratchpad_read` \
+                                        falls back to the parent for these names; \
+                                        `scratchpad_list` shows them with origin `inherited`. \
+                                        Read-only: `scratchpad_write` / `_edit` / `_delete` \
+                                        targeting an inherited name return an error so the \
+                                        sub-agent can't silently shadow your copy. Names that \
+                                        don't exist in the parent are silently skipped."
                     }
                 },
                 "required": ["prompt"]
@@ -109,6 +131,20 @@ impl Tool for SpawnAgentTool {
                 message: "missing 'prompt' parameter".to_string(),
             })?
             .to_string();
+
+        // `inherit_scratchpad`: optional array of parent-scratchpad
+        // names. Non-string entries are silently skipped so a partially-
+        // malformed array doesn't tank the whole spawn.
+        let inherited_scratchpad: Vec<String> = input
+            .get("inherit_scratchpad")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Snapshot the parent's permission. Demote `Ask` to `Read`: the
         // sub-agent runs with `approval_sender: None`, so every Ask-mode
@@ -176,6 +212,12 @@ impl Tool for SpawnAgentTool {
             self.tool_builder_params.session_manager.clone(),
             sub_shared_session_id.clone(),
             self.tool_builder_params.skills.clone(),
+            if inherited_scratchpad.is_empty() {
+                None
+            } else {
+                Some(parent_sid)
+            },
+            inherited_scratchpad.clone(),
         )
         .map_err(|error| AgshError::ToolExecution {
             tool_name: "spawn_agent".to_string(),
@@ -195,8 +237,12 @@ impl Tool for SpawnAgentTool {
         // `AgentOptions` is static, so this single build captures the
         // full tool catalogue visible to the sub-agent.
         let tools = sub_registry.definitions_for_permission(sub_perm);
-        let sub_system_prompt =
-            build_subagent_system_prompt(sub_perm, &tools, self.user_instructions.as_deref());
+        let sub_system_prompt = build_subagent_system_prompt(
+            sub_perm,
+            &tools,
+            self.user_instructions.as_deref(),
+            &inherited_scratchpad,
+        );
 
         let environment_context = build_environment_context(sub_perm);
         let augmented_prompt = format!("{}\n{}", environment_context, prompt);
@@ -218,8 +264,8 @@ impl Tool for SpawnAgentTool {
         // path. Conversation persistence (user message, assistant
         // messages, tool results) happens inside `run_turn` against the
         // sub-session, so the audit trail is identical to a primary
-        // agent's. Iteration cap, silent rendering, and the omitted MCP
-        // gate are baked into the options via `new_subagent`.
+        // agent's. Silent rendering and the omitted MCP gate are baked
+        // into the options via `new_subagent`.
         let mut messages = Conversation::new();
         let mut session_id_opt = Some(sub_session_id);
         sub_agent
@@ -242,6 +288,7 @@ fn build_subagent_system_prompt(
     permission: Permission,
     tools: &[ToolDefinition],
     user_instructions: Option<&str>,
+    inherited_scratchpad: &[String],
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str(
@@ -267,6 +314,22 @@ fn build_subagent_system_prompt(
         prompt.push_str("\n\n");
     }
 
+    if !inherited_scratchpad.is_empty() {
+        prompt.push_str("## Inherited Scratchpad Entries\n\n");
+        prompt.push_str(
+            "Your parent agent has granted you read-only access to the following \
+             scratchpad entries from its own session. Use `scratchpad_read` with \
+             the exact names below to load them on demand — do not assume their \
+             contents without reading. `scratchpad_write`, `_edit`, and `_delete` \
+             against these names will return an error; if you need to derive new \
+             state, save it under a different name (e.g. `<name>_local`).\n\n",
+        );
+        for name in inherited_scratchpad {
+            prompt.push_str(&format!("- {}\n", name));
+        }
+        prompt.push('\n');
+    }
+
     if !tools.is_empty() {
         prompt.push_str("## Available Tools\n\n");
         for tool in tools {
@@ -284,24 +347,60 @@ mod tests {
 
     #[test]
     fn test_subagent_system_prompt_reflects_inherited_permission() {
-        let prompt = build_subagent_system_prompt(Permission::Write, &[], None);
+        let prompt = build_subagent_system_prompt(Permission::Write, &[], None, &[]);
         assert!(
             prompt.contains(&format!("## Permission Level: {}", Permission::Write)),
             "expected Write level in prompt, got: {}",
             prompt
         );
 
-        let read_prompt = build_subagent_system_prompt(Permission::Read, &[], None);
+        let read_prompt = build_subagent_system_prompt(Permission::Read, &[], None, &[]);
         assert!(read_prompt.contains(&format!("## Permission Level: {}", Permission::Read)));
     }
 
     #[test]
     fn test_subagent_system_prompt_mentions_todo_tools() {
-        let prompt = build_subagent_system_prompt(Permission::Read, &[], None);
+        let prompt = build_subagent_system_prompt(Permission::Read, &[], None, &[]);
         assert!(
             prompt.contains("todo_write") && prompt.contains("todo_read"),
             "expected todo_write/todo_read mention in prompt, got: {}",
             prompt
+        );
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_omits_inheritance_section_when_empty() {
+        let prompt = build_subagent_system_prompt(Permission::Read, &[], None, &[]);
+        assert!(
+            !prompt.contains("Inherited Scratchpad"),
+            "no inherited section expected for empty allowlist, got: {}",
+            prompt
+        );
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_lists_inherited_names() {
+        let names = vec!["captured_output".to_string(), "research_notes".to_string()];
+        let prompt = build_subagent_system_prompt(Permission::Read, &[], None, &names);
+        assert!(prompt.contains("## Inherited Scratchpad Entries"));
+        assert!(prompt.contains("- captured_output"));
+        assert!(prompt.contains("- research_notes"));
+        assert!(prompt.contains("scratchpad_read"));
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_warns_inherited_writes_will_error() {
+        let names = vec!["build_log".to_string()];
+        let prompt = build_subagent_system_prompt(Permission::Read, &[], None, &names);
+        assert!(
+            prompt.contains("will return an error"),
+            "expected write-rejection wording, got: {}",
+            prompt,
+        );
+        assert!(
+            prompt.contains("_local"),
+            "expected naming suggestion, got: {}",
+            prompt,
         );
     }
 
@@ -340,6 +439,8 @@ mod tests {
             test_session_manager().await,
             Arc::new(tokio::sync::RwLock::new(None)),
             crate::skills::SkillCache::for_root(None),
+            None,
+            Vec::new(),
         )
         .expect("subagent registry should build");
 

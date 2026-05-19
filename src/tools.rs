@@ -130,7 +130,10 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "scratchpad_delete",
     "scratchpad_edit",
     "scratchpad_list",
+    "scratchpad_load_file",
     "scratchpad_read",
+    "scratchpad_rename",
+    "scratchpad_save_file",
     "scratchpad_write",
     "search_contents",
     "skill",
@@ -476,6 +479,12 @@ impl ToolRegistry {
     /// a new such tool to the parent automatically gives it to sub-agents
     /// too. `render_visible_todos` distinguishes the two paths: the parent
     /// renders todo updates to the user's stderr, sub-agents stay silent.
+    ///
+    /// `parent_session_id` + `inherited_scratchpad_names` configure
+    /// read-only scratchpad inheritance for sub-agents. Both are
+    /// `None`/empty on the primary agent's registry, so no fallback path
+    /// is taken there.
+    #[allow(clippy::too_many_arguments)]
     fn register_session_scoped_tools(
         &self,
         session_manager: SessionManager,
@@ -483,6 +492,8 @@ impl ToolRegistry {
         todo_list: todo::SharedTodoList,
         skills: Arc<crate::skills::SkillCache>,
         render_visible_todos: bool,
+        parent_session_id: Option<Uuid>,
+        inherited_scratchpad_names: Vec<String>,
     ) {
         self.register_builtin(Arc::new(load_tool::LoadToolTool {
             tools: Arc::downgrade(&self.tools),
@@ -504,22 +515,45 @@ impl ToolRegistry {
         self.register_builtin(Arc::new(scratchpad::ScratchpadWriteTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
+            inherited_names: inherited_scratchpad_names.clone(),
         }));
         self.register_builtin(Arc::new(scratchpad::ScratchpadReadTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
+            parent_session_id,
+            inherited_names: inherited_scratchpad_names.clone(),
         }));
         self.register_builtin(Arc::new(scratchpad::ScratchpadEditTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
+            inherited_names: inherited_scratchpad_names.clone(),
         }));
         self.register_builtin(Arc::new(scratchpad::ScratchpadListTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
+            parent_session_id,
+            inherited_names: inherited_scratchpad_names.clone(),
         }));
         self.register_builtin(Arc::new(scratchpad::ScratchpadDeleteTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+            inherited_names: inherited_scratchpad_names.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadRenameTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+            inherited_names: inherited_scratchpad_names.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadLoadFileTool {
+            session_manager: session_manager.clone(),
+            session_id: shared_session_id.clone(),
+            inherited_names: inherited_scratchpad_names.clone(),
+        }));
+        self.register_builtin(Arc::new(scratchpad::ScratchpadSaveFileTool {
             session_manager,
             session_id: shared_session_id,
+            parent_session_id,
+            inherited_names: inherited_scratchpad_names,
         }));
     }
 
@@ -552,6 +586,8 @@ impl ToolRegistry {
             todo_list,
             skills,
             true,
+            None,
+            Vec::new(),
         );
         Ok(registry)
     }
@@ -561,6 +597,11 @@ impl ToolRegistry {
     /// todo_*, scratchpad_*) scoped to their own ephemeral child session.
     /// `spawn_agent` remains absent — sub-agents cannot recursively spawn
     /// further sub-agents.
+    ///
+    /// `parent_session_id` + `inherited_scratchpad_names` enable read-only
+    /// scratchpad inheritance: `scratchpad_read` falls back to the parent
+    /// for allowlisted names, and `scratchpad_list` enumerates them in an
+    /// `(inherited)` section. Pass `None`/`Vec::new()` to opt out.
     #[allow(clippy::too_many_arguments)]
     pub fn build_for_subagent(
         web_client_config: crate::config::WebClientConfig,
@@ -574,6 +615,8 @@ impl ToolRegistry {
         session_manager: SessionManager,
         shared_session_id: Arc<RwLock<Option<Uuid>>>,
         skills: Arc<crate::skills::SkillCache>,
+        parent_session_id: Option<Uuid>,
+        inherited_scratchpad_names: Vec<String>,
     ) -> Result<Self> {
         let registry = Self::new_with_filter(builtin_filter);
         registry.register_core_tools(
@@ -590,6 +633,8 @@ impl ToolRegistry {
             todo_list,
             skills,
             false,
+            parent_session_id,
+            inherited_scratchpad_names,
         );
         Ok(registry)
     }
@@ -1072,6 +1117,9 @@ pub(crate) mod tests {
             "scratchpad_edit",
             "scratchpad_list",
             "scratchpad_delete",
+            "scratchpad_rename",
+            "scratchpad_load_file",
+            "scratchpad_save_file",
         ] {
             let entry = entries
                 .iter()
@@ -1288,6 +1336,8 @@ pub(crate) mod tests {
             session_manager,
             shared_session_id,
             crate::skills::SkillCache::for_root(None),
+            None,
+            Vec::new(),
         )
         .expect("default web client config should build cleanly");
         assert!(registry.get("read_file").is_some());

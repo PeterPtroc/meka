@@ -14,19 +14,19 @@ use uuid::Uuid;
 use crate::error::{AgshError, Result};
 use crate::permission::Permission;
 use crate::provider::{ContentBlock, Message, ToolDefinition, ToolResultContent};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, ToolOutputSummary};
 
 use super::util::{MAX_SEARCH_MATCHES, search_lines};
 use super::{Tool, ToolOutput};
 
-/// Tool result text blocks larger than this are persisted to the database and
-/// replaced with a preview + handle in the conversation context.
-pub const MAX_INLINE_RESULT_CHARS: usize = 30_000;
+/// Tool result text blocks larger than this (in bytes) are persisted to the
+/// database and replaced with a preview + handle in the conversation context.
+pub const MAX_INLINE_RESULT_BYTES: usize = 30_000;
 
-/// Number of characters included in the inline preview.
-const PREVIEW_CHARS: usize = 2_000;
+/// Number of bytes included in the inline preview.
+const PREVIEW_BYTES: usize = 2_000;
 
-/// Default character limit when reading back a persisted output.
+/// Default byte limit when reading back a persisted output.
 const DEFAULT_READ_LIMIT: usize = 30_000;
 
 pub(crate) fn format_size(bytes: usize) -> String {
@@ -66,7 +66,7 @@ fn build_tool_use_map(assistant_message: &Message) -> HashMap<String, (String, s
 
 fn build_scratchpad_reference(name: &str, size: usize) -> String {
     format!(
-        "Output saved to scratchpad \"{}\" ({} characters). \
+        "Output saved to scratchpad \"{}\" ({} bytes). \
          Use scratchpad_read to access it.",
         name, size,
     )
@@ -74,7 +74,7 @@ fn build_scratchpad_reference(name: &str, size: usize) -> String {
 
 fn build_large_output_preview(name: &str, text: &str) -> String {
     let size = text.len();
-    let preview_end = text.floor_char_boundary(PREVIEW_CHARS.min(size));
+    let preview_end = text.floor_char_boundary(PREVIEW_BYTES.min(size));
     let preview = &text[..preview_end];
     let has_more = preview_end < size;
 
@@ -83,7 +83,7 @@ fn build_large_output_preview(name: &str, text: &str) -> String {
          Output too large ({}). Read with `scratchpad_read` — use \
          `limit: {}` to load the full content in one call, or page \
          with `offset`/`limit` if a partial read is enough.\n\n\
-         Preview (first {} characters):\n\
+         Preview (first {} bytes):\n\
          {}",
         name,
         size,
@@ -175,7 +175,7 @@ pub async fn persist_oversized_results(
 
             for item in content.iter_mut() {
                 if let ToolResultContent::Text { text } = item {
-                    if text.len() <= MAX_INLINE_RESULT_CHARS {
+                    if text.len() <= MAX_INLINE_RESULT_BYTES {
                         continue;
                     }
 
@@ -197,6 +197,25 @@ pub async fn persist_oversized_results(
 pub(super) struct ScratchpadWriteTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// Names the parent has lent this sub-agent read-only. Writing to
+    /// any of these is rejected so the child can't silently shadow the
+    /// parent's copy. Empty on the primary agent's registry.
+    pub inherited_names: Vec<String>,
+}
+
+fn inherited_write_error(name: &str) -> Result<ToolOutput> {
+    Ok(ToolOutput::text(
+        format!(
+            "Scratchpad entry \"{}\" is inherited read-only from the parent. \
+             Pick a different name (e.g. \"{}_local\") for your own scratchpad state.",
+            name, name,
+        ),
+        true,
+    ))
+}
+
+fn is_inherited(inherited_names: &[String], name: &str) -> bool {
+    inherited_names.iter().any(|candidate| candidate == name)
 }
 
 #[async_trait]
@@ -209,7 +228,9 @@ impl Tool for ScratchpadWriteTool {
                 conversation context. If the name already exists, the content is overwritten. \
                 Use this to save intermediate results, extracted text, accumulated data, or \
                 research notes. You can also save tool output directly by adding a 'scratchpad' \
-                parameter to any tool call."
+                parameter to any tool call. When you are a sub-agent, names inherited \
+                read-only from the parent are rejected here — use a different name (e.g. \
+                'name_local') for your own state."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -251,6 +272,10 @@ impl Tool for ScratchpadWriteTool {
                 message: "missing 'content' parameter".to_string(),
             })?;
 
+        if is_inherited(&self.inherited_names, name) {
+            return inherited_write_error(name);
+        }
+
         let session_id = resolve_session_id(&self.session_id, "scratchpad_write").await?;
 
         self.session_manager
@@ -259,7 +284,7 @@ impl Tool for ScratchpadWriteTool {
 
         Ok(ToolOutput::text(
             format!(
-                "Stored {} characters as scratchpad entry \"{}\"",
+                "Stored {} bytes as scratchpad entry \"{}\"",
                 content.len(),
                 name,
             ),
@@ -271,6 +296,14 @@ impl Tool for ScratchpadWriteTool {
 pub(super) struct ScratchpadReadTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// Sub-agent fallback: when the read misses the active (child)
+    /// session, retry against this parent session for names listed in
+    /// [`Self::inherited_names`]. `None` on the primary agent's
+    /// registry — no fallback path is taken.
+    pub parent_session_id: Option<Uuid>,
+    /// Allowlist of parent-scoped scratchpad names the sub-agent is
+    /// permitted to read. Empty on the primary agent.
+    pub inherited_names: Vec<String>,
 }
 
 #[async_trait]
@@ -280,11 +313,13 @@ impl Tool for ScratchpadReadTool {
             name: "scratchpad_read".to_string(),
             description: format!(
                 "Read or search a scratchpad entry by name. Default returns {} \
-                 characters from offset; pass a larger `limit` (no hard cap) to load the full \
+                 bytes from offset; pass a larger `limit` (no hard cap) to load the full \
                  entry in one call, or page with `offset`/`limit` for partial reads. Provide \
-                 `regex` to return matching lines (max {}) instead of a character range. Also \
+                 `regex` to return matching lines (max {}) instead of a byte range. Also \
                  used to access content referenced by <large-output> tags — pass the `size` \
-                 value from the tag as `limit` when you intend to read everything.",
+                 value from the tag as `limit` when you intend to read everything. When this \
+                 is a sub-agent and the name is not found locally, looks up names from the \
+                 parent's inherited allowlist (see the system-prompt section if any).",
                 DEFAULT_READ_LIMIT, MAX_SEARCH_MATCHES,
             ),
             parameters: serde_json::json!({
@@ -300,7 +335,7 @@ impl Tool for ScratchpadReadTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": format!("Maximum characters to return. Default: {}.", DEFAULT_READ_LIMIT)
+                        "description": format!("Maximum bytes to return. Default: {}.", DEFAULT_READ_LIMIT)
                     },
                     "regex": {
                         "type": "string",
@@ -335,14 +370,29 @@ impl Tool for ScratchpadReadTool {
 
         let session_id = resolve_session_id(&self.session_id, "scratchpad_read").await?;
 
-        let content = self
+        let mut content = self
             .session_manager
             .load_tool_output(session_id, name)
-            .await?
-            .ok_or_else(|| AgshError::ToolExecution {
-                tool_name: "scratchpad_read".to_string(),
-                message: format!("scratchpad entry \"{}\" not found", name),
-            })?;
+            .await?;
+
+        // Sub-agent inheritance: fall back to the parent's scratchpad if
+        // the child miss matches an allowlisted name. Read-only — writes
+        // still target the child session, so the parent's audit trail is
+        // untouched.
+        if content.is_none()
+            && let Some(parent_sid) = self.parent_session_id
+            && self.inherited_names.iter().any(|n| n == name)
+        {
+            content = self
+                .session_manager
+                .load_tool_output(parent_sid, name)
+                .await?;
+        }
+
+        let content = content.ok_or_else(|| AgshError::ToolExecution {
+            tool_name: "scratchpad_read".to_string(),
+            message: format!("scratchpad entry \"{}\" not found", name),
+        })?;
 
         if let Some(pattern) = input.get("regex").and_then(|v| v.as_str()) {
             return search_lines(&content, pattern, "scratchpad_read");
@@ -359,10 +409,7 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
 
     if offset >= total {
         return Ok(ToolOutput::text(
-            format!(
-                "Offset {} exceeds content length ({} characters)",
-                offset, total
-            ),
+            format!("Offset {} exceeds content length ({} bytes)", offset, total),
             true,
         ));
     }
@@ -373,7 +420,7 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
 
     Ok(ToolOutput::text(
         format!(
-            "{}\n\n(showing characters {}..{} of {})",
+            "{}\n\n(showing bytes {}..{} of {})",
             slice, start, end, total
         ),
         false,
@@ -383,6 +430,8 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
 pub(super) struct ScratchpadEditTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// See [`ScratchpadWriteTool::inherited_names`].
+    pub inherited_names: Vec<String>,
 }
 
 #[async_trait]
@@ -392,7 +441,9 @@ impl Tool for ScratchpadEditTool {
             name: "scratchpad_edit".to_string(),
             description: "Edit a scratchpad entry in place. Provide 'content' to fully \
                 overwrite, or 'old_string'/'new_string' for targeted string replacement \
-                (like edit_file)."
+                (like edit_file). When you are a sub-agent, names inherited read-only \
+                from the parent are rejected — copy the content into your own entry first \
+                if you need to mutate it."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -440,6 +491,10 @@ impl Tool for ScratchpadEditTool {
                 message: "missing 'name' parameter".to_string(),
             })?;
 
+        if is_inherited(&self.inherited_names, name) {
+            return inherited_write_error(name);
+        }
+
         let session_id = resolve_session_id(&self.session_id, "scratchpad_edit").await?;
 
         // Full overwrite mode
@@ -452,7 +507,7 @@ impl Tool for ScratchpadEditTool {
             return if updated {
                 Ok(ToolOutput::text(
                     format!(
-                        "Scratchpad entry \"{}\" overwritten ({} characters)",
+                        "Scratchpad entry \"{}\" overwritten ({} bytes)",
                         name,
                         new_content.len()
                     ),
@@ -518,7 +573,7 @@ impl Tool for ScratchpadEditTool {
 
         Ok(ToolOutput::text(
             format!(
-                "Scratchpad entry \"{}\": replaced {} occurrence(s) ({} characters)",
+                "Scratchpad entry \"{}\": replaced {} occurrence(s) ({} bytes)",
                 name,
                 count,
                 updated_content.len(),
@@ -531,6 +586,13 @@ impl Tool for ScratchpadEditTool {
 pub(super) struct ScratchpadListTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// Sub-agent fallback: list also enumerates parent entries filtered
+    /// by [`Self::inherited_names`], rendered in a trailing `(inherited)`
+    /// section. `None` on the primary agent.
+    pub parent_session_id: Option<Uuid>,
+    /// Allowlist of parent-scoped scratchpad names visible to this
+    /// sub-agent. Empty on the primary agent.
+    pub inherited_names: Vec<String>,
 }
 
 #[async_trait]
@@ -538,8 +600,9 @@ impl Tool for ScratchpadListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "scratchpad_list".to_string(),
-            description: "List all scratchpad entries in the current session with their name, \
-                size, and creation time."
+            description: "List scratchpad entries in the current session with their name, size, \
+                creation time, and origin. Sub-agent entries inherited read-only from the \
+                parent session appear in the same table with origin `inherited`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -560,22 +623,42 @@ impl Tool for ScratchpadListTool {
     ) -> Result<ToolOutput> {
         let session_id = resolve_session_id(&self.session_id, "scratchpad_list").await?;
 
-        let entries = self.session_manager.list_tool_outputs(session_id).await?;
+        let own = self.session_manager.list_tool_outputs(session_id).await?;
 
-        if entries.is_empty() {
+        // Inherited (parent) entries — filtered to the allowlist so the
+        // sub-agent never sees parent state it wasn't explicitly granted.
+        let mut rows: Vec<(ToolOutputSummary, &'static str)> =
+            own.into_iter().map(|entry| (entry, "own")).collect();
+        if let Some(parent_sid) = self.parent_session_id
+            && !self.inherited_names.is_empty()
+        {
+            let parent_entries = self.session_manager.list_tool_outputs(parent_sid).await?;
+            rows.extend(
+                parent_entries
+                    .into_iter()
+                    .filter(|entry| self.inherited_names.iter().any(|n| n == &entry.name))
+                    .map(|entry| (entry, "inherited")),
+            );
+        }
+
+        if rows.is_empty() {
             return Ok(ToolOutput::text("Scratchpad is empty.".to_string(), false));
         }
 
-        let mut output = format!("{:<24} {:<10} {}\n", "Name", "Size", "Created");
-        for entry in &entries {
+        let mut output = format!(
+            "{:<24} {:<10} {:<20} {}\n",
+            "Name", "Size", "Created", "Origin",
+        );
+        for (entry, origin) in &rows {
             output.push_str(&format!(
-                "{:<24} {:<10} {}\n",
+                "{:<24} {:<10} {:<20} {}\n",
                 entry.name,
                 format_size(entry.size),
                 &entry.created_at[..19.min(entry.created_at.len())],
+                origin,
             ));
         }
-        output.push_str(&format!("\n{} entries total", entries.len()));
+        output.push_str(&format!("\n{} entries total", rows.len()));
 
         Ok(ToolOutput::text(output, false))
     }
@@ -584,6 +667,8 @@ impl Tool for ScratchpadListTool {
 pub(super) struct ScratchpadDeleteTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// See [`ScratchpadWriteTool::inherited_names`].
+    pub inherited_names: Vec<String>,
 }
 
 #[async_trait]
@@ -591,7 +676,9 @@ impl Tool for ScratchpadDeleteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "scratchpad_delete".to_string(),
-            description: "Delete a scratchpad entry by name to free up space.".to_string(),
+            description: "Delete a scratchpad entry by name to free up space. When you are \
+                a sub-agent, names inherited read-only from the parent cannot be deleted."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -622,6 +709,10 @@ impl Tool for ScratchpadDeleteTool {
                 message: "missing 'name' parameter".to_string(),
             })?;
 
+        if is_inherited(&self.inherited_names, name) {
+            return inherited_write_error(name);
+        }
+
         let session_id = resolve_session_id(&self.session_id, "scratchpad_delete").await?;
 
         let deleted = self
@@ -640,6 +731,362 @@ impl Tool for ScratchpadDeleteTool {
                 true,
             ))
         }
+    }
+}
+
+pub(super) struct ScratchpadRenameTool {
+    pub session_manager: SessionManager,
+    pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// See [`ScratchpadWriteTool::inherited_names`].
+    pub inherited_names: Vec<String>,
+}
+
+#[async_trait]
+impl Tool for ScratchpadRenameTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "scratchpad_rename".to_string(),
+            description: "Rename a scratchpad entry from `old` to `new` without round-tripping \
+                the content through the conversation. Errors if `old` doesn't exist, if `new` \
+                already exists, or (for sub-agents) if either name is inherited read-only from \
+                the parent."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "old": {
+                        "type": "string",
+                        "description": "Current scratchpad entry name"
+                    },
+                    "new": {
+                        "type": "string",
+                        "description": "Replacement scratchpad entry name"
+                    }
+                },
+                "required": ["old", "new"]
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn required_permission(&self) -> Permission {
+        Permission::Read
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _cancellation: CancellationToken,
+    ) -> Result<ToolOutput> {
+        let old = input["old"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_rename".to_string(),
+                message: "missing 'old' parameter".to_string(),
+            })?;
+        let new = input["new"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_rename".to_string(),
+                message: "missing 'new' parameter".to_string(),
+            })?;
+
+        // Block both ends. Renaming away from an inherited source would
+        // be a no-op against the parent's row but implies the sub-agent
+        // owns the name; renaming to an inherited target would create a
+        // child shadow. Either way: reject early with the same error
+        // text the other mutators use, naming the offending entry.
+        if is_inherited(&self.inherited_names, old) {
+            return inherited_write_error(old);
+        }
+        if is_inherited(&self.inherited_names, new) {
+            return inherited_write_error(new);
+        }
+
+        if old == new {
+            return Ok(ToolOutput::text(
+                format!("Scratchpad entry \"{}\" is already named that", old),
+                true,
+            ));
+        }
+
+        let session_id = resolve_session_id(&self.session_id, "scratchpad_rename").await?;
+
+        let outcome = self
+            .session_manager
+            .rename_tool_output(session_id, old, new)
+            .await?;
+
+        match outcome {
+            crate::session::RenameOutcome::Renamed => Ok(ToolOutput::text(
+                format!("Renamed scratchpad entry \"{}\" to \"{}\"", old, new),
+                false,
+            )),
+            crate::session::RenameOutcome::NotFound => Ok(ToolOutput::text(
+                format!("Scratchpad entry \"{}\" not found", old),
+                true,
+            )),
+            crate::session::RenameOutcome::TargetExists => Ok(ToolOutput::text(
+                format!(
+                    "Scratchpad entry \"{}\" already exists; delete it first or pick a \
+                     different name",
+                    new,
+                ),
+                true,
+            )),
+        }
+    }
+}
+
+pub(super) struct ScratchpadLoadFileTool {
+    pub session_manager: SessionManager,
+    pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// See [`ScratchpadWriteTool::inherited_names`].
+    pub inherited_names: Vec<String>,
+}
+
+#[async_trait]
+impl Tool for ScratchpadLoadFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "scratchpad_load_file".to_string(),
+            description: "Read a file's contents directly into the scratchpad without routing \
+                the bytes through the conversation. Useful for staging a large captured log or \
+                document that you want to hand to sub-agents via `inherit_scratchpad` on \
+                `spawn_agent` \u{2014} the model never sees the payload. UTF-8 text only; binary \
+                files are rejected with the detected MIME type. For binary content, pass the \
+                file path directly to whatever tool will consume it; sub-agents inherit the \
+                parent's filesystem access. Overwrites an existing entry of the same name. \
+                Sub-agents cannot load into a name inherited read-only from the parent."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to read"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Name to store the contents under in the scratchpad"
+                    }
+                },
+                "required": ["path", "name"]
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn required_permission(&self) -> Permission {
+        Permission::Read
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _cancellation: CancellationToken,
+    ) -> Result<ToolOutput> {
+        let path = input["path"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_load_file".to_string(),
+                message: "missing 'path' parameter".to_string(),
+            })?
+            .to_string();
+        let name = input["name"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_load_file".to_string(),
+                message: "missing 'name' parameter".to_string(),
+            })?;
+
+        if is_inherited(&self.inherited_names, name) {
+            return inherited_write_error(name);
+        }
+
+        let session_id = resolve_session_id(&self.session_id, "scratchpad_load_file").await?;
+
+        let canonical =
+            super::util::canonicalize_for_tool("scratchpad_load_file", std::path::Path::new(&path))
+                .await?;
+
+        // We read the file as raw bytes (rather than directly as a String)
+        // so that on a UTF-8 failure we can run a single content sniff and
+        // tell the model what kind of binary it just tried to load. The
+        // happy path then incurs one extra allocation; for the sizes this
+        // tool is meant for (tens of MB), that's negligible.
+        let bytes = super::file::read_file_bytes(&canonical)
+            .await
+            .map_err(|error| AgshError::ToolExecution {
+                tool_name: "scratchpad_load_file".to_string(),
+                message: format!("failed to read '{}': {}", path, error),
+            })?;
+
+        let content = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(utf8_error) => {
+                let bytes = utf8_error.as_bytes();
+                let detected = infer::get(bytes)
+                    .map(|kind| format!(" Detected MIME type: {}.", kind.mime_type()))
+                    .unwrap_or_default();
+                return Ok(ToolOutput::text(
+                    format!(
+                        "'{}' is not valid UTF-8: {}.{}",
+                        path,
+                        utf8_error.utf8_error(),
+                        detected,
+                    ),
+                    true,
+                ));
+            }
+        };
+
+        let byte_count = content.len();
+        self.session_manager
+            .save_tool_output(session_id, name, &content)
+            .await?;
+
+        Ok(ToolOutput::text(
+            format!(
+                "Loaded {} bytes from '{}' into scratchpad entry \"{}\"",
+                byte_count, path, name,
+            ),
+            false,
+        ))
+    }
+}
+
+pub(super) struct ScratchpadSaveFileTool {
+    pub session_manager: SessionManager,
+    pub session_id: Arc<RwLock<Option<Uuid>>>,
+    /// See [`ScratchpadReadTool::parent_session_id`].
+    pub parent_session_id: Option<Uuid>,
+    /// See [`ScratchpadReadTool::inherited_names`].
+    pub inherited_names: Vec<String>,
+}
+
+#[async_trait]
+impl Tool for ScratchpadSaveFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "scratchpad_save_file".to_string(),
+            description: "Write the contents of a scratchpad entry to a file on disk without \
+                routing the bytes through the conversation. Useful for persisting a sub-agent's \
+                report or a large extracted result. Mirrors `write_file`: creates parent \
+                directories, overwrites by default, UTF-8 only. Sub-agents can save inherited \
+                entries (read from parent, write to disk) without copying through the model."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The scratchpad entry to read from"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to write to"
+                    }
+                },
+                "required": ["name", "path"]
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn required_permission(&self) -> Permission {
+        Permission::Write
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _cancellation: CancellationToken,
+    ) -> Result<ToolOutput> {
+        let name = input["name"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_save_file".to_string(),
+                message: "missing 'name' parameter".to_string(),
+            })?;
+        let path = input["path"]
+            .as_str()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_save_file".to_string(),
+                message: "missing 'path' parameter".to_string(),
+            })?
+            .to_string();
+
+        let session_id = resolve_session_id(&self.session_id, "scratchpad_save_file").await?;
+
+        // Inherited-fallback read: mirror ScratchpadReadTool. Lets a sub-
+        // agent flush a parent's allowlisted entry to disk without having
+        // to first copy it into its own scratchpad.
+        let mut content = self
+            .session_manager
+            .load_tool_output(session_id, name)
+            .await?;
+        if content.is_none()
+            && let Some(parent_sid) = self.parent_session_id
+            && self.inherited_names.iter().any(|n| n == name)
+        {
+            content = self
+                .session_manager
+                .load_tool_output(parent_sid, name)
+                .await?;
+        }
+        let content = content.ok_or_else(|| AgshError::ToolExecution {
+            tool_name: "scratchpad_save_file".to_string(),
+            message: format!("scratchpad entry \"{}\" not found", name),
+        })?;
+
+        // Path resolution mirrors `write_file`: canonicalize the parent
+        // dir (creating it if necessary) and re-join the filename so the
+        // O_NOFOLLOW open at the leaf closes the canonicalize→open TOCTOU
+        // window for symlink-swap attacks. See src/tools/file.rs for the
+        // original rationale.
+        let file_path = std::path::PathBuf::from(&path);
+        let file_name = file_path
+            .file_name()
+            .ok_or_else(|| AgshError::ToolExecution {
+                tool_name: "scratchpad_save_file".to_string(),
+                message: format!("invalid path (no file name): '{}'", path),
+            })?;
+        let parent = file_path.parent().ok_or_else(|| AgshError::ToolExecution {
+            tool_name: "scratchpad_save_file".to_string(),
+            message: format!("invalid path (no parent): '{}'", path),
+        })?;
+        let parent_for_create: &std::path::Path = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        tokio::fs::create_dir_all(parent_for_create)
+            .await
+            .map_err(|error| AgshError::ToolExecution {
+                tool_name: "scratchpad_save_file".to_string(),
+                message: format!("failed to create directories for '{}': {}", path, error),
+            })?;
+
+        let canonical_parent =
+            super::util::canonicalize_for_tool("scratchpad_save_file", parent_for_create).await?;
+        let target = canonical_parent.join(file_name);
+
+        let byte_count = content.len();
+        super::file::write_file_bytes(&target, content.as_bytes())
+            .await
+            .map_err(|error| AgshError::ToolExecution {
+                tool_name: "scratchpad_save_file".to_string(),
+                message: format!("failed to write '{}': {}", path, error),
+            })?;
+
+        Ok(ToolOutput::text(
+            format!(
+                "Saved {} bytes from scratchpad entry \"{}\" to '{}'",
+                byte_count, name, path,
+            ),
+            false,
+        ))
     }
 }
 
@@ -682,7 +1129,7 @@ mod tests {
         let manager = test_manager().await;
         let session_id = manager.create_session().await.expect("create");
 
-        let large_text = "x".repeat(MAX_INLINE_RESULT_CHARS + 1000);
+        let large_text = "x".repeat(MAX_INLINE_RESULT_BYTES + 1000);
         let assistant_msg =
             make_assistant_message(vec![("call-1", "execute_command", serde_json::json!({}))]);
         let mut results = vec![ContentBlock::ToolResult {
@@ -879,6 +1326,7 @@ mod tests {
         let tool = ScratchpadWriteTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -912,6 +1360,7 @@ mod tests {
         let tool = ScratchpadWriteTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         tool.execute(
@@ -943,6 +1392,8 @@ mod tests {
         let tool = ScratchpadReadTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -972,6 +1423,8 @@ mod tests {
         let tool = ScratchpadReadTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -984,7 +1437,7 @@ mod tests {
 
         let text = text_content(&result);
         assert!(text.contains("defg"));
-        assert!(text.contains("showing characters 3..7 of 10"));
+        assert!(text.contains("showing bytes 3..7 of 10"));
     }
 
     #[tokio::test]
@@ -1004,6 +1457,8 @@ mod tests {
         let tool = ScratchpadReadTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1029,6 +1484,8 @@ mod tests {
         let tool = ScratchpadReadTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool.execute(
@@ -1053,6 +1510,7 @@ mod tests {
         let tool = ScratchpadEditTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1086,6 +1544,7 @@ mod tests {
         let tool = ScratchpadEditTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1118,6 +1577,7 @@ mod tests {
         let tool = ScratchpadEditTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1152,6 +1612,8 @@ mod tests {
         let tool = ScratchpadListTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1179,6 +1641,8 @@ mod tests {
         let tool = ScratchpadListTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1207,6 +1671,7 @@ mod tests {
         let tool = ScratchpadDeleteTool {
             session_manager: manager.clone(),
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1235,6 +1700,7 @@ mod tests {
         let tool = ScratchpadDeleteTool {
             session_manager: manager,
             session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
         };
 
         let result = tool
@@ -1246,6 +1712,371 @@ mod tests {
             .expect("execute");
 
         assert!(result.is_error);
+    }
+
+    // -- sub-agent inheritance --
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_read_falls_back_to_parent() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "captured", "parent payload")
+            .await
+            .expect("seed parent");
+
+        let tool = ScratchpadReadTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["captured".to_string()],
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "captured"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read inherited");
+
+        assert!(!result.is_error);
+        assert!(text_content(&result).contains("parent payload"));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_prefers_child_when_both_present() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "shared", "parent value")
+            .await
+            .expect("seed parent");
+        manager
+            .save_tool_output(child, "shared", "child value")
+            .await
+            .expect("seed child");
+
+        let tool = ScratchpadReadTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["shared".to_string()],
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "shared"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read shadowed");
+
+        assert!(text_content(&result).contains("child value"));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_read_blocks_names_not_in_allowlist() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "secret", "do not leak")
+            .await
+            .expect("seed parent");
+
+        // allowlist only mentions a different name; the parent's "secret"
+        // entry must stay invisible.
+        let tool = ScratchpadReadTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["unrelated".to_string()],
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "secret"}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err(), "secret name must not be readable");
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_list_respects_allowlist() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "shared_research", "p1")
+            .await
+            .expect("seed parent");
+        manager
+            .save_tool_output(parent, "private_note", "p2")
+            .await
+            .expect("seed parent");
+        manager
+            .save_tool_output(child, "own_note", "c1")
+            .await
+            .expect("seed child");
+
+        let tool = ScratchpadListTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["shared_research".to_string()],
+        };
+
+        let result = tool
+            .execute(serde_json::json!({}), CancellationToken::new())
+            .await
+            .expect("list");
+
+        let text = text_content(&result);
+        assert!(text.contains("own_note"));
+        assert!(text.contains("shared_research"));
+        assert!(
+            !text.contains("private_note"),
+            "non-allowlisted parent entry must not appear, got: {}",
+            text
+        );
+        // Unified-table contract: one Origin header, one totals line, no
+        // separate "inherited from parent" section.
+        assert_eq!(text.matches("Origin").count(), 1);
+        assert!(text.contains("2 entries total"));
+        assert!(!text.contains("inherited from parent"));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_list_handles_child_only_when_empty_allowlist() {
+        // When no inheritance is configured, the list behaves exactly as
+        // before: no extra section, no parent enumeration.
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "private", "do not leak")
+            .await
+            .expect("seed parent");
+
+        let tool = ScratchpadListTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
+        };
+
+        let result = tool
+            .execute(serde_json::json!({}), CancellationToken::new())
+            .await
+            .expect("list");
+
+        let text = text_content(&result);
+        assert!(!text.contains("private"));
+        assert!(!text.contains("(inherited"));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_list_unified_table_has_origin_column() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "build_log", "p")
+            .await
+            .expect("seed parent");
+        manager
+            .save_tool_output(child, "analysis", "c")
+            .await
+            .expect("seed child");
+
+        let tool = ScratchpadListTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["build_log".to_string()],
+        };
+
+        let text = text_content(
+            &tool
+                .execute(serde_json::json!({}), CancellationToken::new())
+                .await
+                .expect("list"),
+        );
+
+        // Single header (not two sections) with the new `Origin` column.
+        assert_eq!(
+            text.matches("Origin").count(),
+            1,
+            "expected one Origin header, got: {}",
+            text,
+        );
+        assert!(text.contains("analysis"));
+        assert!(text.contains("own"));
+        assert!(text.contains("build_log"));
+        assert!(text.contains("inherited"));
+        // Old multi-section markers must be gone.
+        assert!(!text.contains("inherited from parent"));
+        assert!(!text.contains("inherited entries"));
+        assert!(text.contains("2 entries total"));
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_write_is_rejected() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "captured", "parent data")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadWriteTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "captured", "content": "child override"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error, "write to inherited name must error");
+        assert!(text_content(&result).contains("inherited read-only"));
+        // Parent untouched.
+        assert_eq!(
+            manager.load_tool_output(parent, "captured").await.unwrap(),
+            Some("parent data".to_string())
+        );
+        // No child shadow row created.
+        assert_eq!(
+            manager.load_tool_output(child, "captured").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_edit_is_rejected() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "captured", "parent data")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadEditTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "captured", "content": "child override"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("inherited read-only"));
+        assert_eq!(
+            manager.load_tool_output(parent, "captured").await.unwrap(),
+            Some("parent data".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherited_scratchpad_delete_is_rejected() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "captured", "parent data")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadDeleteTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "captured"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("inherited read-only"));
+        assert_eq!(
+            manager.load_tool_output(parent, "captured").await.unwrap(),
+            Some("parent data".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_to_unlisted_name_succeeds_without_touching_parent() {
+        // Even when the parent has a same-named entry, if it isn't on the
+        // sub-agent's inherit allowlist the child still writes its own
+        // independent row. (The block fires only on names the parent
+        // actually granted; otherwise child sessions stay free to use any
+        // name.) Parent's row is untouched.
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+
+        manager
+            .save_tool_output(parent, "shared", "parent original")
+            .await
+            .expect("seed");
+
+        let write_tool = ScratchpadWriteTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: Vec::new(),
+        };
+        write_tool
+            .execute(
+                serde_json::json!({"name": "shared", "content": "child override"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write");
+
+        // Parent copy untouched.
+        assert_eq!(
+            manager
+                .load_tool_output(parent, "shared")
+                .await
+                .expect("load parent"),
+            Some("parent original".to_string())
+        );
+        // Child copy now holds its own version.
+        assert_eq!(
+            manager
+                .load_tool_output(child, "shared")
+                .await
+                .expect("load child"),
+            Some("child override".to_string())
+        );
     }
 
     // -- session isolation --
@@ -1330,6 +2161,7 @@ mod tests {
         let write_tool = ScratchpadWriteTool {
             session_manager: manager.clone(),
             session_id: sid.clone(),
+            inherited_names: Vec::new(),
         };
         write_tool
             .execute(
@@ -1342,6 +2174,7 @@ mod tests {
         let edit_tool = ScratchpadEditTool {
             session_manager: manager.clone(),
             session_id: sid.clone(),
+            inherited_names: Vec::new(),
         };
         edit_tool
             .execute(
@@ -1354,6 +2187,8 @@ mod tests {
         let read_tool = ScratchpadReadTool {
             session_manager: manager.clone(),
             session_id: sid.clone(),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
         let result = read_tool
             .execute(
@@ -1367,6 +2202,8 @@ mod tests {
         let list_tool = ScratchpadListTool {
             session_manager: manager.clone(),
             session_id: sid.clone(),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
         };
         let result = list_tool
             .execute(serde_json::json!({}), CancellationToken::new())
@@ -1377,6 +2214,7 @@ mod tests {
         let delete_tool = ScratchpadDeleteTool {
             session_manager: manager.clone(),
             session_id: sid.clone(),
+            inherited_names: Vec::new(),
         };
         delete_tool
             .execute(
@@ -1391,5 +2229,409 @@ mod tests {
             .await
             .expect("list");
         assert!(text_content(&result).contains("empty"));
+    }
+
+    // -- scratchpad_load_file / scratchpad_save_file --
+
+    #[tokio::test]
+    async fn test_scratchpad_load_file_happy_path() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input.txt");
+        tokio::fs::write(&path, "hello scratchpad")
+            .await
+            .expect("write input");
+
+        let tool = ScratchpadLoadFileTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap(), "name": "loaded"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("load");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        assert!(text_content(&result).contains("Loaded 16 bytes"));
+        let stored = manager
+            .load_tool_output(session_id, "loaded")
+            .await
+            .expect("load_tool_output");
+        assert_eq!(stored.as_deref(), Some("hello scratchpad"));
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_load_file_rejects_inherited_name() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input.txt");
+        tokio::fs::write(&path, "irrelevant")
+            .await
+            .expect("write input");
+
+        let tool = ScratchpadLoadFileTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap(), "name": "captured"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("inherited read-only"));
+        assert_eq!(
+            manager
+                .load_tool_output(child, "captured")
+                .await
+                .expect("load"),
+            None,
+            "no child shadow row should be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_load_file_rejects_image_with_mime() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pic.png");
+        // Minimal PNG signature + IHDR chunk bytes — enough for `infer`
+        // to fingerprint without needing a syntactically valid image.
+        let png_bytes: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk header
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 dimensions
+            0x08, 0x00, 0x00, 0x00, 0x00, // depth, type, etc.
+            0xFF, 0xFE, 0xFD, 0xFC, // CRC placeholder + body — non-UTF-8
+        ];
+        tokio::fs::write(&path, png_bytes).await.expect("write png");
+
+        let tool = ScratchpadLoadFileTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap(), "name": "img"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        let text = text_content(&result);
+        assert!(result.is_error, "got: {}", text);
+        assert!(text.contains("not valid UTF-8"), "msg: {}", text);
+        assert!(text.contains("image/png"), "msg: {}", text);
+        assert_eq!(
+            manager.load_tool_output(session_id, "img").await.unwrap(),
+            None,
+            "binary file must not produce a scratchpad row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_load_file_unknown_binary_has_no_mime_line() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("blob.bin");
+        // A short run of 0xFF bytes won't match any `infer` signature.
+        tokio::fs::write(&path, &[0xFF_u8; 8])
+            .await
+            .expect("write blob");
+
+        let tool = ScratchpadLoadFileTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap(), "name": "blob"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        let text = text_content(&result);
+        assert!(result.is_error);
+        assert!(text.contains("not valid UTF-8"));
+        assert!(
+            !text.contains("Detected MIME"),
+            "no MIME line expected for unknown binary, msg: {}",
+            text,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_save_file_happy_path() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        manager
+            .save_tool_output(session_id, "report", "final analysis")
+            .await
+            .expect("seed");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("subdir").join("out.txt");
+
+        let tool = ScratchpadSaveFileTool {
+            session_manager: manager,
+            session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "report", "path": path.to_str().unwrap()}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("save");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        let written = tokio::fs::read_to_string(&path).await.expect("read back");
+        assert_eq!(written, "final analysis");
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_save_file_reads_inherited_from_parent() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+        manager
+            .save_tool_output(parent, "build_log", "parent-only payload")
+            .await
+            .expect("seed");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("log.txt");
+
+        let tool = ScratchpadSaveFileTool {
+            session_manager: manager,
+            session_id: test_session_id(child),
+            parent_session_id: Some(parent),
+            inherited_names: vec!["build_log".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "build_log", "path": path.to_str().unwrap()}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("save");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        let written = tokio::fs::read_to_string(&path).await.expect("read back");
+        assert_eq!(written, "parent-only payload");
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_save_file_missing_entry_errors() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.txt");
+
+        let tool = ScratchpadSaveFileTool {
+            session_manager: manager,
+            session_id: test_session_id(session_id),
+            parent_session_id: None,
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "missing", "path": path.to_str().unwrap()}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err(), "missing entry should propagate an error");
+    }
+
+    // -- scratchpad_rename --
+
+    #[tokio::test]
+    async fn test_scratchpad_rename_happy_path() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        manager
+            .save_tool_output(session_id, "draft", "payload")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadRenameTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"old": "draft", "new": "final"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("rename");
+
+        assert!(!result.is_error, "got: {}", text_content(&result));
+        assert_eq!(
+            manager.load_tool_output(session_id, "draft").await.unwrap(),
+            None,
+            "old name must be gone after rename"
+        );
+        assert_eq!(
+            manager.load_tool_output(session_id, "final").await.unwrap(),
+            Some("payload".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_rename_source_not_found() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+
+        let tool = ScratchpadRenameTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"old": "absent", "new": "whatever"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("not found"));
+        // No row should appear under the target name.
+        assert_eq!(
+            manager
+                .load_tool_output(session_id, "whatever")
+                .await
+                .unwrap(),
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_rename_target_already_exists() {
+        let manager = test_manager().await;
+        let session_id = manager.create_session().await.expect("create");
+        manager
+            .save_tool_output(session_id, "src", "src-content")
+            .await
+            .expect("seed src");
+        manager
+            .save_tool_output(session_id, "dst", "dst-content")
+            .await
+            .expect("seed dst");
+
+        let tool = ScratchpadRenameTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(session_id),
+            inherited_names: Vec::new(),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"old": "src", "new": "dst"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("already exists"));
+        // Both rows must be untouched.
+        assert_eq!(
+            manager.load_tool_output(session_id, "src").await.unwrap(),
+            Some("src-content".to_string()),
+        );
+        assert_eq!(
+            manager.load_tool_output(session_id, "dst").await.unwrap(),
+            Some("dst-content".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_rename_blocks_inherited_source() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+        manager
+            .save_tool_output(parent, "captured", "parent-data")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadRenameTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"old": "captured", "new": "mine"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("inherited read-only"));
+        // Parent's row stays intact, child has no shadow under either name.
+        assert_eq!(
+            manager.load_tool_output(parent, "captured").await.unwrap(),
+            Some("parent-data".to_string()),
+        );
+        assert_eq!(manager.load_tool_output(child, "mine").await.unwrap(), None,);
+    }
+
+    #[tokio::test]
+    async fn test_scratchpad_rename_blocks_inherited_target() {
+        let manager = test_manager().await;
+        let parent = manager.create_session().await.expect("parent");
+        let child = manager.create_child_session(parent).await.expect("child");
+        manager
+            .save_tool_output(child, "mine", "child-data")
+            .await
+            .expect("seed");
+
+        let tool = ScratchpadRenameTool {
+            session_manager: manager.clone(),
+            session_id: test_session_id(child),
+            inherited_names: vec!["captured".to_string()],
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"old": "mine", "new": "captured"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("inherited read-only"));
+        // Child's source row must stay intact, no shadow under inherited name.
+        assert_eq!(
+            manager.load_tool_output(child, "mine").await.unwrap(),
+            Some("child-data".to_string()),
+        );
+        assert_eq!(
+            manager.load_tool_output(child, "captured").await.unwrap(),
+            None,
+        );
     }
 }
