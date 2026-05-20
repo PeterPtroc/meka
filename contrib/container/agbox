@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# A wrapper script that runs agsh inside a container.
+# Run agsh in an archlinux:latest container with the host's agsh binary
+# bind-mounted in. Requires agsh installed and configured on the host.
 
 set -euo pipefail
 
@@ -10,6 +11,13 @@ for dir in "$HOME/.config/agsh" "$HOME/.local/share/agsh"; do
         exit 1
     fi
 done
+
+# Resolve the host agsh binary from PATH (cargo, distro package, etc.).
+agsh_bin="$(command -v agsh || true)"
+if [[ -z "$agsh_bin" || ! -x "$agsh_bin" ]]; then
+    echo "$(basename "$0"): agsh not found in PATH; install agsh on the host first" >&2
+    exit 1
+fi
 
 # Pick a container runtime: prefer podman (rootless by default), fall back to docker.
 if command -v podman >/dev/null 2>&1; then
@@ -43,10 +51,13 @@ changes persisting outside mounted volumes.
 Prefer Exa Search (`mcp__exa__web_search_exa` and `mcp__exa__web_fetch_exa`) over the built-in
 `web_search` tool for searches, when available.'
 
+# `--entrypoint` must precede the image; archlinux:latest has none.
 exec "${sudo_prefix[@]}" "$runtime" run --rm -it \
+    --entrypoint /usr/local/bin/agsh \
+    -v "$agsh_bin:/usr/local/bin/agsh:ro" \
     -v "$HOME/.config/agsh:/root/.config/agsh:ro" \
     -v "$HOME/.local/share/agsh:/root/.local/share/agsh:rw" \
     -e AGSH_PERMISSION=write \
     -e AGSH_INSTRUCTIONS="$agbox_instructions" \
-    ghcr.io/k4yt3x/agsh:latest \
+    archlinux:latest \
     "$@"
