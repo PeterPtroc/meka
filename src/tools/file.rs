@@ -45,10 +45,11 @@ async fn open_read_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
     }
 }
 
-/// Open a file for writing (create-or-truncate) with symlink-follow
-/// disabled on Unix. Errors if the target is a symlink — a safer default
-/// than `tokio::fs::write` for paths that may race against a hostile
-/// rename.
+/// Open a file for writing (create-or-truncate) refusing to follow a
+/// symlink. A safer default than `tokio::fs::write` for paths that may race
+/// against a hostile rename. On Unix `O_NOFOLLOW` errors on a symlinked
+/// final component; on Windows the equivalent is opening the reparse point
+/// itself and rejecting it before any truncation happens.
 async fn open_write_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
     #[cfg(unix)]
     {
@@ -60,7 +61,30 @@ async fn open_write_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
             .open(path)
             .await
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself rather than
+        // following it, so a symlinked path yields a handle we can inspect.
+        // Truncation is deferred to `set_len` *after* the symlink check so
+        // a rejected target is never destroyed.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .await?;
+        if file.metadata().await?.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to write through a symlink",
+            ));
+        }
+        file.set_len(0).await?;
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         tokio::fs::OpenOptions::new()
             .write(true)
@@ -223,8 +247,12 @@ impl Tool for ReadFileTool {
 
         const DEFAULT_LINE_LIMIT: usize = 2000;
 
-        let offset = input["offset"].as_u64().map(|value| value as usize);
-        let limit = input["limit"].as_u64().map(|value| value as usize);
+        let offset = input["offset"]
+            .as_u64()
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX));
+        let limit = input["limit"]
+            .as_u64()
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX));
         let regex = input.get("regex").and_then(|v| v.as_str());
 
         let content =
@@ -668,6 +696,43 @@ mod tests {
 
         let content = std::fs::read_to_string(&file_path).expect("failed to read");
         assert_eq!(content, "hello world");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_write_file_rejects_symlink_on_windows() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let real = temp_dir.path().join("real.txt");
+        std::fs::write(&real, "original").expect("seed real file");
+        let link = temp_dir.path().join("link.txt");
+        // Symlink creation needs Developer Mode / SeCreateSymbolicLink; skip
+        // rather than fail if the runner can't create one.
+        if std::os::windows::fs::symlink_file(&real, &link).is_err() {
+            return;
+        }
+
+        let write_tool = WriteFileTool {
+            read_tracker: test_tracker(),
+        };
+        let result = write_tool
+            .execute(
+                serde_json::json!({
+                    "path": link.to_str().expect("path"),
+                    "content": "overwritten"
+                }),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("read real"),
+            "original",
+            "symlink target was overwritten"
+        );
+        assert!(
+            result.map(|output| output.is_error).unwrap_or(true),
+            "write through a symlink should be rejected"
+        );
     }
 
     #[tokio::test]

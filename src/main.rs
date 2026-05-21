@@ -135,7 +135,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
     // name fails fast — before any session/MCP setup. The combined string
     // (extra + body, mirroring the REPL's `/skill <name> [extra...]`) then
     // takes the place of cli.prompt as the first-turn input.
-    let skill_prompt = build_skill_prompt(&cli)?;
+    let skill_prompt = runtime.block_on(build_skill_prompt(&cli))?;
 
     let mut config = ResolvedConfig::from_cli(&cli);
     if let Some(prompt) = skill_prompt {
@@ -151,7 +151,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
 /// Mirrors the REPL handler at `SlashCommand::SkillInvoke` — same lookup,
 /// same `user_invocable` gate, same `format!("{extra}\n\n{body}")` order
 /// when the positional `[PROMPT]` is supplied.
-fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
+async fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
     let Some(name) = cli.skill.as_deref() else {
         return Ok(None);
     };
@@ -161,6 +161,7 @@ fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
     // This matches the REPL's first-turn `/skill` behaviour, where
     // session_id is also None until run_turn populates it.
     let body = skills::load_skill_body(&skill, None)
+        .await
         .map_err(|error| anyhow::anyhow!("failed to load skill '{}': {}", name, error))?;
     let combined = match cli.prompt.as_deref() {
         Some(extra) if !extra.is_empty() => format!("{}\n\n{}", extra, body),
@@ -916,16 +917,17 @@ async fn run_interactive(
                             break 'invoke;
                         };
                         let session_str = session_id.map(|id| id.to_string());
-                        let body = match skills::load_skill_body(skill, session_str.as_deref()) {
-                            Ok(body) => body,
-                            Err(error) => {
-                                render::render_error(&format!(
-                                    "failed to load skill '{}': {}",
-                                    name, error
-                                ));
-                                break 'invoke;
-                            }
-                        };
+                        let body =
+                            match skills::load_skill_body(skill, session_str.as_deref()).await {
+                                Ok(body) => body,
+                                Err(error) => {
+                                    render::render_error(&format!(
+                                        "failed to load skill '{}': {}",
+                                        name, error
+                                    ));
+                                    break 'invoke;
+                                }
+                            };
                         // Prepend the user's free-form directive to the
                         // skill body when present. The blank-line
                         // separator gives the model a visual cue that

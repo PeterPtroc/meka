@@ -1,6 +1,6 @@
 [package]
 name = "agsh"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2024"
 license = "MIT"
 description = "A general-purpose AI agent runtime"
@@ -31,9 +31,9 @@ rand = "0.10"
 reedline = { git = "https://github.com/wtfbbqhax/reedline", rev = "3a457ff1dab28c9021db116f2575eed5116bed88", features = ["external_printer"] }
 regex = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "gzip", "deflate", "brotli", "cookies"] }
-rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "auth-client-credentials-jwt"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "auth-client-credentials-jwt"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-scraper = { version = "0.26", default-features = false }
+scraper = { version = "0.27", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"

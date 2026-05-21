@@ -321,7 +321,10 @@ impl WebClientConfig {
                 .read_timeout_seconds
                 .filter(|n| *n > 0)
                 .map(std::time::Duration::from_secs),
-            max_redirects: file.max_redirects.map(|n| n as usize).unwrap_or(10),
+            max_redirects: file
+                .max_redirects
+                .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+                .unwrap_or(10),
             proxy: file.proxy.clone(),
             ca_cert_file: file.ca_cert_file.clone().map(std::path::PathBuf::from),
             https_only: file.https_only.unwrap_or(false),
@@ -336,6 +339,15 @@ impl WebClientConfig {
 /// Kept in sync with what real Chrome emits so anti-bot filters don't
 /// single out agsh by default.
 pub const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+
+/// Max conversation messages kept in the per-turn API window by default.
+const DEFAULT_CONTEXT_MESSAGES: usize = 200;
+/// Default session-retention window, in days.
+const DEFAULT_RETENTION_DAYS: u64 = 90;
+/// Default cap on total session storage, in bytes (50 MiB).
+const DEFAULT_MAX_STORAGE_BYTES: u64 = 50 * 1024 * 1024;
+/// Default extended-thinking token budget.
+const DEFAULT_THINKING_BUDGET_TOKENS: u64 = 16_000;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ShellConfig {
@@ -1102,15 +1114,21 @@ impl ResolvedConfig {
                 .render_mode
                 .or(file_display.render_mode)
                 .unwrap_or_default(),
-            context_messages: file_session.context_messages.or(Some(200)),
-            retention_days: file_session.retention_days.or(Some(90)),
-            max_storage_bytes: file_session.max_storage_bytes.or(Some(52_428_800)),
+            context_messages: file_session
+                .context_messages
+                .or(Some(DEFAULT_CONTEXT_MESSAGES)),
+            retention_days: file_session.retention_days.or(Some(DEFAULT_RETENTION_DAYS)),
+            max_storage_bytes: file_session
+                .max_storage_bytes
+                .or(Some(DEFAULT_MAX_STORAGE_BYTES)),
             thinking_enabled: cli
                 .thinking
                 .unwrap_or_else(|| file_thinking.enabled.unwrap_or(true)),
-            thinking_budget_tokens: cli
-                .thinking_budget
-                .unwrap_or_else(|| file_thinking.budget_tokens.unwrap_or(16_000)),
+            thinking_budget_tokens: cli.thinking_budget.unwrap_or_else(|| {
+                file_thinking
+                    .budget_tokens
+                    .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS)
+            }),
             thinking_show_content: file_thinking.show_content.unwrap_or(false),
             reasoning_effort: file_provider.reasoning_effort.clone(),
             device_id,
@@ -1240,8 +1258,20 @@ mod device_id {
     }
 
     pub(super) fn read_user_id_from(path: &Path) -> Option<String> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let document: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                tracing::debug!("could not read user-id file {}: {}", path.display(), error);
+                return None;
+            }
+        };
+        let document: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(document) => document,
+            Err(error) => {
+                tracing::debug!("could not parse user-id file {}: {}", path.display(), error);
+                return None;
+            }
+        };
         let id = document.get("userID")?.as_str()?.trim();
         if id.is_empty() {
             return None;

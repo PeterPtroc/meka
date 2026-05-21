@@ -492,7 +492,7 @@ pub unsafe fn apply_landlock_readonly(abi_version: i32) -> Result<(), i32> {
         let attr = LandlockRulesetAttr {
             handled_access_fs: handled_access_for_abi(abi_version),
             handled_access_net: 0,
-            scoped: 0,
+            scoped: scoped_for_abi(abi_version),
         };
 
         let ruleset_fd = libc::syscall(
@@ -570,6 +570,20 @@ fn handled_access_for_abi(abi_version: i32) -> u64 {
     access
 }
 
+/// IPC scoping flags for the ruleset. ABI v6 (kernel 6.12) added scoping;
+/// restricting it blocks the sandboxed child from reaching abstract Unix
+/// sockets (D-Bus and similar) and from signalling processes outside its own
+/// Landlock domain. Setting an unknown `scoped` bit makes
+/// `landlock_create_ruleset` fail with `EINVAL`, so this stays zero below v6.
+#[cfg(target_os = "linux")]
+fn scoped_for_abi(abi_version: i32) -> u64 {
+    if abi_version >= 6 {
+        LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL
+    } else {
+        0
+    }
+}
+
 // Landlock constants
 #[cfg(target_os = "linux")]
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
@@ -608,6 +622,11 @@ const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
 const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 #[cfg(target_os = "linux")]
 const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+
+#[cfg(target_os = "linux")]
+const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
+#[cfg(target_os = "linux")]
+const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
 
 // Landlock kernel structs (stack-allocated, no heap)
 #[cfg(target_os = "linux")]

@@ -180,6 +180,31 @@ impl Conversation {
         let _ = summary;
     }
 
+    /// Drop every event preceding the most recent `CompactBoundary`.
+    ///
+    /// Those events are fully superseded: a `CompactBoundary` truncates all
+    /// materialized messages before it and replaces them with its summary,
+    /// and [`extract_loaded_tool_names_from_events`] reads the boundary's
+    /// `loaded_tools_snapshot` rather than the events preceding it. So the
+    /// materialized view and the recovered tool set are byte-identical
+    /// before and after this call — it only stops the in-memory log from
+    /// growing unbounded across a long-lived, repeatedly-compacted session.
+    ///
+    /// Persistence is unaffected: every event was already written to its
+    /// own row by `save_event`, so the on-disk log stays complete.
+    pub fn prune_compacted_events(&mut self) {
+        let last_boundary = self
+            .events
+            .iter()
+            .rposition(|event| matches!(event, Event::CompactBoundary { .. }));
+        if let Some(index) = last_boundary
+            && index > 0
+        {
+            self.events.drain(..index);
+            self.rebuild_materialized();
+        }
+    }
+
     /// Drop assistant messages whose `tool_use` blocks lack matching
     /// `tool_result`s in the immediately-following user message. Returns
     /// the dropped messages so callers can log them. Used at session
@@ -622,6 +647,56 @@ mod tests {
 
         let loaded = extract_loaded_tool_names_from_events(log.events());
         assert!(loaded.contains("scratchpad_read"));
+    }
+
+    #[test]
+    fn test_prune_compacted_events_drops_pre_boundary_log() {
+        let mut log = Conversation::new();
+        log.append(load_tool_use("u1", "scratchpad_read"));
+        log.append(load_tool_result("u1", false));
+        log.append(Message::user("m1"));
+
+        let snapshot: HashSet<String> = ["scratchpad_read".to_string()].into_iter().collect();
+        log.replace_for_compaction(
+            Message::user("[summary-1]"),
+            vec![Message::user("tail-1")],
+            snapshot.clone(),
+        );
+        log.append(Message::assistant_text("m2"));
+        log.replace_for_compaction(
+            Message::user("[summary-2]"),
+            vec![Message::user("tail-2")],
+            snapshot,
+        );
+
+        let view_before: Vec<String> = log.as_slice().iter().map(|m| m.text_content()).collect();
+        let loaded_before = extract_loaded_tool_names_from_events(log.events());
+
+        log.prune_compacted_events();
+
+        // Materialized view and recovered tool set are unchanged.
+        let view_after: Vec<String> = log.as_slice().iter().map(|m| m.text_content()).collect();
+        assert_eq!(view_before, view_after);
+        assert_eq!(
+            loaded_before,
+            extract_loaded_tool_names_from_events(log.events())
+        );
+        assert!(
+            extract_loaded_tool_names_from_events(log.events()).contains("scratchpad_read"),
+            "deferred tool must survive the prune"
+        );
+
+        // The log now starts at the last boundary — nothing precedes it.
+        assert!(matches!(
+            log.events().first(),
+            Some(Event::CompactBoundary { .. })
+        ));
+        let boundary_count = log
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Event::CompactBoundary { .. }))
+            .count();
+        assert_eq!(boundary_count, 1, "only the last boundary should remain");
     }
 
     #[test]

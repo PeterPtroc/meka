@@ -79,3 +79,16 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit dependencies for known advisories
+        run: cargo audit

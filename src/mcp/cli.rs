@@ -194,16 +194,15 @@ pub async fn run_tools(
     );
     manager.await_settled().await;
 
-    if !manager
-        .server_entry(&config.name)
-        .map(|entry| {
-            matches!(
-                futures::executor::block_on(entry.state.read()).clone(),
-                crate::mcp::ServerState::Connected { .. }
-            )
-        })
-        .unwrap_or(false)
-    {
+    let connected = if let Some(entry) = manager.server_entry(&config.name) {
+        matches!(
+            &*entry.state.read().await,
+            crate::mcp::ServerState::Connected { .. }
+        )
+    } else {
+        false
+    };
+    if !connected {
         return Err(config_err(format!(
             "failed to connect to '{}' — see logs above",
             config.name
@@ -316,15 +315,14 @@ pub async fn run_reconnect(
     );
     manager.await_settled().await;
 
-    let connected = manager
-        .server_entry(&config.name)
-        .map(|entry| {
-            matches!(
-                futures::executor::block_on(entry.state.read()).clone(),
-                crate::mcp::ServerState::Connected { .. }
-            )
-        })
-        .unwrap_or(false);
+    let connected = if let Some(entry) = manager.server_entry(&config.name) {
+        matches!(
+            &*entry.state.read().await,
+            crate::mcp::ServerState::Connected { .. }
+        )
+    } else {
+        false
+    };
 
     if connected {
         tracing::info!("connected to '{}'", config.name);
@@ -433,15 +431,14 @@ pub async fn run_login(
     );
     manager.await_settled().await;
 
-    let connected = manager
-        .server_entry(&config.name)
-        .map(|entry| {
-            matches!(
-                futures::executor::block_on(entry.state.read()).clone(),
-                crate::mcp::ServerState::Connected { .. }
-            )
-        })
-        .unwrap_or(false);
+    let connected = if let Some(entry) = manager.server_entry(&config.name) {
+        matches!(
+            &*entry.state.read().await,
+            crate::mcp::ServerState::Connected { .. }
+        )
+    } else {
+        false
+    };
     if !connected {
         return Err(config_err(format!(
             "OAuth flow did not complete for '{}'",

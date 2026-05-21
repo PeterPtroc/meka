@@ -188,19 +188,40 @@ impl SkillCache {
     /// changed: one `read_dir` + N `metadata()` calls and a `BTreeMap`
     /// comparison, then an `Arc::clone` of the cached vec.
     pub async fn current(&self) -> Arc<Vec<Skill>> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(root) = self.root.clone() else {
             return self.state.lock().await.skills.clone();
         };
+        // Discovery touches the filesystem (`read_dir` + per-skill
+        // `metadata` / `read_to_string`); this runs on every prompt from
+        // the async agent loop, so offload it to the blocking pool.
         // Transient errors (e.g. EACCES on the dir) yield `None` — serve
         // stale state rather than wipe the cache.
-        let Some(now) = disk_snapshot(root) else {
+        let now = {
+            let root = root.clone();
+            match tokio::task::spawn_blocking(move || disk_snapshot(&root)).await {
+                Ok(Some(snapshot)) => snapshot,
+                _ => return self.state.lock().await.skills.clone(),
+            }
+        };
+        // Snapshot unchanged: serve the cache without re-discovering.
+        if self.state.lock().await.snapshot == now {
             return self.state.lock().await.skills.clone();
+        }
+        // Run discovery *without* holding the state lock so concurrent
+        // `current()` callers aren't blocked behind the filesystem walk.
+        // A racing caller may discover in parallel — harmless: both
+        // results derive from disk and the last write wins.
+        let discovered = match tokio::task::spawn_blocking(move || discover_skills_in(&root)).await
+        {
+            Ok(skills) => skills,
+            Err(error) => {
+                tracing::warn!("skill discovery task failed: {}", error);
+                return self.state.lock().await.skills.clone();
+            }
         };
         let mut state = self.state.lock().await;
-        if state.snapshot != now {
-            state.skills = Arc::new(discover_skills_in(root));
-            state.snapshot = now;
-        }
+        state.skills = Arc::new(discovered);
+        state.snapshot = now;
         state.skills.clone()
     }
 }
@@ -264,8 +285,9 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 }
 
 /// Load the body (post-frontmatter) of a skill and perform variable substitution.
-pub fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<String, String> {
-    let content = std::fs::read_to_string(&skill.body_path)
+pub async fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<String, String> {
+    let content = tokio::fs::read_to_string(&skill.body_path)
+        .await
         .map_err(|error| format!("failed to read {}: {}", skill.body_path.display(), error))?;
 
     let body = split_frontmatter(&content)
@@ -526,8 +548,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_load_skill_body_with_substitution() {
+    #[tokio::test]
+    async fn test_load_skill_body_with_substitution() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(
             temp.path(),
@@ -542,13 +564,15 @@ mod tests {
         let skill = load_skill_definition("var-skill", &skill_path, &skill_path.join("SKILL.md"))
             .expect("load");
 
-        let body = load_skill_body(&skill, Some("abc-123")).expect("body");
+        let body = load_skill_body(&skill, Some("abc-123"))
+            .await
+            .expect("body");
         assert!(body.contains(&skill_path.display().to_string()));
         assert!(body.contains("Session: abc-123"));
     }
 
-    #[test]
-    fn test_load_skill_body_without_session_id() {
+    #[tokio::test]
+    async fn test_load_skill_body_without_session_id() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(
             temp.path(),
@@ -563,7 +587,7 @@ mod tests {
         let skill = load_skill_definition("var-skill", &skill_path, &skill_path.join("SKILL.md"))
             .expect("load");
 
-        let body = load_skill_body(&skill, None).expect("body");
+        let body = load_skill_body(&skill, None).await.expect("body");
         assert!(body.contains("Session: ${AGSH_SESSION_ID}"));
     }
 

@@ -190,29 +190,43 @@ fn walk_directory(
     glob_pattern: &Option<glob::Pattern>,
     results: &mut Vec<String>,
 ) -> Result<()> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
+    // Iterative traversal via an explicit work-stack: a recursive walk would
+    // overflow the call stack on a pathologically deep directory tree.
+    let mut pending: Vec<std::path::PathBuf> = vec![directory.to_path_buf()];
 
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
 
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if file_name.starts_with('.') || file_name == "target" || file_name == "node_modules" {
-            continue;
-        }
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
 
-        if path.is_dir() {
-            walk_directory(&path, matcher, glob_pattern, results)?;
-        } else if path.is_file() {
-            if let Some(pattern) = glob_pattern
-                && !pattern.matches(file_name)
-            {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.starts_with('.') || file_name == "target" || file_name == "node_modules" {
                 continue;
             }
-            search_file(matcher, &path, results)?;
+
+            // `entry.file_type()` does not follow symlinks: a symlinked
+            // directory reports as a symlink, not a dir, so it is never
+            // descended into. That removes any symlink-cycle risk while
+            // still letting symlinked *files* be searched via the
+            // path-based `is_file()` check below.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
+                if let Some(pattern) = glob_pattern
+                    && !pattern.matches(file_name)
+                {
+                    continue;
+                }
+                search_file(matcher, &path, results)?;
+            }
         }
     }
 
@@ -248,6 +262,35 @@ mod tests {
         assert!(!result.is_error);
         assert!(text_content(&result).contains("hello world"));
         assert!(text_content(&result).contains("hello again"));
+    }
+
+    #[tokio::test]
+    async fn test_search_contents_deeply_nested_tree() {
+        // Exercises the iterative work-stack traversal: a file buried many
+        // directory levels deep must still be found. A recursive walk would
+        // recurse once per level; the iterative version uses a heap stack.
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mut deep = temp_dir.path().to_path_buf();
+        for _ in 0..300 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).expect("create nested tree");
+        std::fs::write(deep.join("buried.txt"), "needle here\n").expect("write");
+
+        let tool = SearchContentsTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": temp_dir.path().to_str().expect("path")
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        assert!(text_content(&result).contains("needle here"));
     }
 
     #[tokio::test]

@@ -374,7 +374,7 @@ fn parse_response_status(status: &str) -> StopReason {
 /// resulting [`StreamEvent`]s to the agent.
 pub(super) async fn drive_responses_sse_stream(
     response: reqwest::Response,
-    event_sender: mpsc::UnboundedSender<StreamEvent>,
+    event_sender: mpsc::Sender<StreamEvent>,
     cancellation: CancellationToken,
 ) -> Result<()> {
     let status = response.status();
@@ -402,7 +402,11 @@ pub(super) async fn drive_responses_sse_stream(
                 let event = match event {
                     Ok(event) => event,
                     Err(error) => {
-                        if event_sender.send(StreamEvent::Error(error.to_string())).is_err() {
+                        if event_sender
+                            .send(StreamEvent::Error(error.to_string()))
+                            .await
+                            .is_err()
+                        {
                             tracing::trace!("stream event receiver dropped");
                         }
                         return Err(AgshError::StreamError(error.to_string()));
@@ -426,7 +430,7 @@ pub(super) async fn drive_responses_sse_stream(
                 };
 
                 for emit in events {
-                    if event_sender.send(emit).is_err() {
+                    if event_sender.send(emit).await.is_err() {
                         tracing::trace!("stream event receiver dropped");
                         return Ok(());
                     }

@@ -101,6 +101,39 @@ pub(super) fn model_is_haiku(model: &str) -> bool {
     model.to_ascii_lowercase().contains("haiku")
 }
 
+/// Insert the `max_tokens` + `thinking` fields shared by both Claude
+/// providers' request bodies. Adaptive-thinking models get a fixed 64k
+/// ceiling; others get `max(budget*2, 32k)` with an explicit budget;
+/// thinking-off uses a flat 32k.
+pub(super) fn insert_thinking_fields(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    thinking_enabled: bool,
+    model: &str,
+    budget_tokens: u64,
+) {
+    if thinking_enabled {
+        if model_supports_adaptive_thinking(model) {
+            body.insert("max_tokens".to_string(), serde_json::json!(64_000));
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "adaptive" }),
+            );
+        } else {
+            let max_tokens = std::cmp::max(budget_tokens * 2, 32_000);
+            body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget_tokens
+                }),
+            );
+        }
+    } else {
+        body.insert("max_tokens".to_string(), serde_json::json!(32_000));
+    }
+}
+
 /// Mirrors Claude Code's `modelSupportsThinking` (and the equivalent
 /// `modelSupportsISP` / `modelSupportsContextManagement`) on the 1P API:
 /// any Claude 4+ model. Claude-3.x is excluded.
@@ -365,7 +398,7 @@ pub(super) fn parse_non_streaming_response(
 
 pub(super) async fn drive_claude_sse_stream(
     response: reqwest::Response,
-    event_sender: mpsc::UnboundedSender<StreamEvent>,
+    event_sender: mpsc::Sender<StreamEvent>,
     cancellation: CancellationToken,
 ) -> Result<()> {
     let status = response.status();
@@ -422,15 +455,18 @@ pub(super) async fn drive_claude_sse_stream(
                                 } else if block_type == "redacted_thinking" {
                                     // Emit a stub thinking block so the UI
                                     // shows something for redacted content.
-                                    let _ = event_sender.send(
-                                        StreamEvent::ThinkingDelta("[redacted]".to_string()),
-                                    );
+                                    let _ = event_sender
+                                        .send(StreamEvent::ThinkingDelta(
+                                            "[redacted]".to_string(),
+                                        ))
+                                        .await;
                                     let signature = content_block
                                         .get("signature")
                                         .and_then(|s| s.as_str())
                                         .map(|s| s.to_string());
                                     let _ = event_sender
-                                        .send(StreamEvent::ThinkingComplete { signature });
+                                        .send(StreamEvent::ThinkingComplete { signature })
+                                        .await;
                                 } else if block_type == "tool_use" {
                                     let id = content_block
                                         .get("id")
@@ -454,10 +490,11 @@ pub(super) async fn drive_claude_sse_stream(
 
                                     current_tool_input.clear();
                                     in_tool_use = true;
-                                    if event_sender.send(StreamEvent::ToolUseStart {
-                                        id,
-                                        name,
-                                    }).is_err() {
+                                    if event_sender
+                                        .send(StreamEvent::ToolUseStart { id, name })
+                                        .await
+                                        .is_err()
+                                    {
                                         tracing::trace!("stream event receiver dropped");
                                         break;
                                     }
@@ -478,7 +515,7 @@ pub(super) async fn drive_claude_sse_stream(
                                             && !thinking.is_empty()
                                                 && event_sender.send(
                                                     StreamEvent::ThinkingDelta(thinking.to_string()),
-                                                ).is_err() {
+                                                ).await.is_err() {
                                                     tracing::trace!("stream event receiver dropped");
                                                     break;
                                                 }
@@ -488,7 +525,7 @@ pub(super) async fn drive_claude_sse_stream(
                                             && !text.is_empty()
                                                 && event_sender.send(
                                                     StreamEvent::TextDelta(text.to_string()),
-                                                ).is_err() {
+                                                ).await.is_err() {
                                                     tracing::trace!("stream event receiver dropped");
                                                     break;
                                                 }
@@ -510,7 +547,7 @@ pub(super) async fn drive_claude_sse_stream(
                                                 StreamEvent::ToolInputDelta(
                                                     partial_json.to_string(),
                                                 ),
-                                            ).is_err() {
+                                            ).await.is_err() {
                                                 tracing::trace!("stream event receiver dropped");
                                                 break;
                                             }
@@ -525,6 +562,7 @@ pub(super) async fn drive_claude_sse_stream(
                                     let signature = current_thinking_signature.take();
                                     if event_sender
                                         .send(StreamEvent::ThinkingComplete { signature })
+                                        .await
                                         .is_err()
                                     {
                                         tracing::trace!("stream event receiver dropped");
@@ -544,6 +582,7 @@ pub(super) async fn drive_claude_sse_stream(
                                     };
                                     if event_sender
                                         .send(StreamEvent::ToolUseEnd { input })
+                                        .await
                                         .is_err()
                                     {
                                         tracing::trace!("stream event receiver dropped");
@@ -559,7 +598,11 @@ pub(super) async fn drive_claude_sse_stream(
                                 };
                                 if let Some(usage) = data.get("usage") {
                                     let token_usage = parse_usage_object(usage);
-                                    if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                    if event_sender
+                                        .send(StreamEvent::Usage(token_usage))
+                                        .await
+                                        .is_err()
+                                    {
                                         tracing::trace!("stream event receiver dropped");
                                         break;
                                     }
@@ -570,6 +613,7 @@ pub(super) async fn drive_claude_sse_stream(
                                     let stop_reason = parse_claude_stop_reason(stop_reason_str);
                                     if event_sender
                                         .send(StreamEvent::MessageEnd { stop_reason })
+                                        .await
                                         .is_err()
                                     {
                                         tracing::trace!("stream event receiver dropped");
@@ -585,7 +629,11 @@ pub(super) async fn drive_claude_sse_stream(
                                     data.get("message").and_then(|m| m.get("usage"))
                                 {
                                     let token_usage = parse_usage_object(usage);
-                                    if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                    if event_sender
+                                        .send(StreamEvent::Usage(token_usage))
+                                        .await
+                                        .is_err()
+                                    {
                                         tracing::trace!("stream event receiver dropped");
                                         break;
                                     }
@@ -598,7 +646,11 @@ pub(super) async fn drive_claude_sse_stream(
                         }
                     }
                     Err(error) => {
-                        if event_sender.send(StreamEvent::Error(error.to_string())).is_err() {
+                        if event_sender
+                            .send(StreamEvent::Error(error.to_string()))
+                            .await
+                            .is_err()
+                        {
                             tracing::trace!("stream event receiver dropped");
                         }
                         return Err(AgshError::StreamError(error.to_string()));

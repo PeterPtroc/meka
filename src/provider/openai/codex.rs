@@ -318,7 +318,7 @@ impl Provider for OpenAiCodexProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-        event_sender: mpsc::UnboundedSender<StreamEvent>,
+        event_sender: mpsc::Sender<StreamEvent>,
         cancellation: CancellationToken,
     ) -> Result<()> {
         let body = build_request_body(

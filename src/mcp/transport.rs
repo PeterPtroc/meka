@@ -220,3 +220,72 @@ fn parse_header_lines(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn parse_header_lines_basic() {
+        let map = parse_header_lines("X-Token: abc\nX-Env: prod\n").expect("parses");
+        assert_eq!(map.get("X-Token").map(String::as_str), Some("abc"));
+        assert_eq!(map.get("X-Env").map(String::as_str), Some("prod"));
+    }
+
+    #[test]
+    fn parse_header_lines_skips_blank_and_comment_lines() {
+        let map = parse_header_lines("# a comment\n\n  \nX-Real: yes\n").expect("parses");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("X-Real").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn parse_header_lines_trims_surrounding_whitespace() {
+        let map = parse_header_lines("  Name  :   value with spaces  \n").expect("parses");
+        assert_eq!(
+            map.get("Name").map(String::as_str),
+            Some("value with spaces")
+        );
+    }
+
+    #[test]
+    fn parse_header_lines_value_may_contain_colons() {
+        // Only the first ':' separates — URL values must survive intact.
+        let map = parse_header_lines("Location: https://example.com/x\n").expect("parses");
+        assert_eq!(
+            map.get("Location").map(String::as_str),
+            Some("https://example.com/x")
+        );
+    }
+
+    #[test]
+    fn parse_header_lines_rejects_missing_separator() {
+        let err = parse_header_lines("Valid: ok\nbroken line\n").expect_err("must fail");
+        assert!(err.contains("line 2"), "error should cite line 2: {}", err);
+    }
+
+    #[test]
+    fn build_stdio_command_passes_through_program_and_args() {
+        let args = vec!["--flag".to_string(), "value".to_string()];
+        let cmd = build_stdio_command("my-server", &args);
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), OsStr::new("my-server"));
+        let collected: Vec<_> = std_cmd.get_args().collect();
+        assert_eq!(collected, vec![OsStr::new("--flag"), OsStr::new("value")]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_stdio_command_wraps_npx_in_cmd_shim() {
+        let args = vec!["my-pkg".to_string()];
+        let cmd = build_stdio_command("npx", &args);
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), OsStr::new("cmd"));
+        let collected: Vec<_> = std_cmd.get_args().collect();
+        assert_eq!(
+            collected,
+            vec![OsStr::new("/c"), OsStr::new("npx"), OsStr::new("my-pkg")]
+        );
+    }
+}

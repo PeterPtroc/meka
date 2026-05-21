@@ -241,6 +241,9 @@ pub struct ToolRegistry {
     /// Built-in allow/block-list. MCP tools have their own per-server
     /// filtering in `src/mcp.rs` and bypass this.
     builtin_filter: Arc<BuiltinToolFilter>,
+    /// Files read this session, shared with the file tools so `edit_file`
+    /// can require a prior read. Cleared on conversation compaction.
+    read_tracker: ReadTracker,
 }
 
 impl ToolRegistry {
@@ -259,7 +262,15 @@ impl ToolRegistry {
             deferred: Arc::new(std::sync::RwLock::new(HashSet::new())),
             permission_overrides: Arc::new(overrides),
             builtin_filter: Arc::new(filter),
+            read_tracker: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// Clear the read-tracker. Called on conversation compaction: the
+    /// model's context is reset, so a follow-up `edit_file` should re-read
+    /// the file rather than trust a pre-compaction read.
+    pub async fn clear_read_tracker(&self) {
+        self.read_tracker.write().await.clear();
     }
 
     /// Register a tool. Returns an error if another tool with the same name
@@ -434,7 +445,7 @@ impl ToolRegistry {
         sandbox_backend: crate::config::SandboxBackend,
         backend_probe: crate::sandbox::BackendProbe,
     ) -> Result<()> {
-        let read_tracker: ReadTracker = Arc::new(RwLock::new(HashSet::new()));
+        let read_tracker = self.read_tracker.clone();
         self.register_builtin(Arc::new(file::ReadFileTool {
             read_tracker: read_tracker.clone(),
         }));

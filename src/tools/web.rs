@@ -351,7 +351,7 @@ impl Tool for FetchUrlTool {
         } else {
             input["max_length"]
                 .as_u64()
-                .map(|value| value as usize)
+                .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
                 .unwrap_or(DEFAULT_MAX_LENGTH)
         };
 

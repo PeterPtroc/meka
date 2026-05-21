@@ -94,7 +94,7 @@ impl Tool for FindFilesTool {
         let explicit_limit = input
             .get("limit")
             .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX));
         let cap = match explicit_limit {
             Some(limit) => limit,
             None if redirects_to_scratchpad(&input) => usize::MAX,

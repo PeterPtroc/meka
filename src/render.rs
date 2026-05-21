@@ -948,10 +948,10 @@ pub fn render_todo_list(items: &[crate::tools::todo::TodoItem]) {
     }
     eprintln!();
     for item in items {
-        let (marker, color) = match item.status.as_str() {
-            "done" => ("[x]", Color::Green),
-            "in_progress" => ("[~]", Color::Yellow),
-            _ => ("[ ]", Color::DarkGrey),
+        let (marker, color) = match item.status {
+            crate::tools::todo::TodoStatus::Done => ("[x]", Color::Green),
+            crate::tools::todo::TodoStatus::InProgress => ("[~]", Color::Yellow),
+            crate::tools::todo::TodoStatus::Pending => ("[ ]", Color::DarkGrey),
         };
         eprintln!(
             "  {} {} {}",

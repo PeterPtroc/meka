@@ -16,11 +16,19 @@ use crate::render;
 
 use super::{Tool, ToolOutput};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: String,
     pub description: String,
-    pub status: String,
+    pub status: TodoStatus,
 }
 
 pub type SharedTodoList = Arc<RwLock<Vec<TodoItem>>>;
@@ -153,10 +161,10 @@ impl Tool for TodoReadTool {
 pub fn format_todo_for_context(items: &[TodoItem]) -> String {
     let mut output = String::from("[Current task list]\n");
     for item in items {
-        let marker = match item.status.as_str() {
-            "done" => "[x]",
-            "in_progress" => "[~]",
-            _ => "[ ]",
+        let marker = match item.status {
+            TodoStatus::Done => "[x]",
+            TodoStatus::InProgress => "[~]",
+            TodoStatus::Pending => "[ ]",
         };
         output.push_str(&format!("{} {} - {}\n", marker, item.id, item.description));
     }
@@ -199,8 +207,32 @@ mod tests {
 
         let items = list.read().await;
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].status, "pending");
-        assert_eq!(items[1].status, "done");
+        assert_eq!(items[0].status, TodoStatus::Pending);
+        assert_eq!(items[1].status, TodoStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn test_todo_write_rejects_unknown_status() {
+        let list = test_list();
+        let tool = TodoWriteTool {
+            todo_list: list.clone(),
+            render_visible: false,
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "tasks": [{"id": "1", "description": "x", "status": "bogus"}]
+                }),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an unrecognized status must fail the write"
+        );
+        assert!(list.read().await.is_empty(), "list must be untouched");
     }
 
     #[tokio::test]
@@ -296,17 +328,17 @@ mod tests {
             TodoItem {
                 id: "1".to_string(),
                 description: "Do something".to_string(),
-                status: "pending".to_string(),
+                status: TodoStatus::Pending,
             },
             TodoItem {
                 id: "2".to_string(),
                 description: "Working on it".to_string(),
-                status: "in_progress".to_string(),
+                status: TodoStatus::InProgress,
             },
             TodoItem {
                 id: "3".to_string(),
                 description: "Already done".to_string(),
-                status: "done".to_string(),
+                status: TodoStatus::Done,
             },
         ];
 

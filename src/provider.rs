@@ -301,7 +301,7 @@ pub trait Provider: Send + Sync {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-        event_sender: mpsc::UnboundedSender<StreamEvent>,
+        event_sender: mpsc::Sender<StreamEvent>,
         cancellation: CancellationToken,
     ) -> Result<()>;
 
@@ -321,9 +321,9 @@ struct ToolCallAccumulator {
     arguments: String,
 }
 
-fn finalize_tool_call_accumulators(
+async fn finalize_tool_call_accumulators(
     accumulators: &mut std::collections::HashMap<i64, ToolCallAccumulator>,
-    event_sender: &mpsc::UnboundedSender<StreamEvent>,
+    event_sender: &mpsc::Sender<StreamEvent>,
 ) -> bool {
     let has_tools = !accumulators.is_empty();
     let mut indices: Vec<i64> = accumulators.keys().copied().collect();
@@ -335,6 +335,7 @@ fn finalize_tool_call_accumulators(
                     id: accumulator.id.clone(),
                     name: accumulator.name.clone(),
                 })
+                .await
                 .is_err()
             {
                 tracing::trace!("stream event receiver dropped");
@@ -344,6 +345,7 @@ fn finalize_tool_call_accumulators(
                 Ok(value) => {
                     if event_sender
                         .send(StreamEvent::ToolUseEnd { input: value })
+                        .await
                         .is_err()
                     {
                         tracing::trace!("stream event receiver dropped");
@@ -362,6 +364,7 @@ fn finalize_tool_call_accumulators(
                             name: accumulator.name.clone(),
                             reason: format!("invalid JSON arguments: {}", error),
                         })
+                        .await
                         .is_err()
                     {
                         tracing::trace!("stream event receiver dropped");
@@ -581,8 +584,8 @@ mod tests {
     /// [`StreamEvent::ToolCallRejected`] rather than replayed with an
     /// empty input object (which would run the tool on whatever defaults
     /// it happens to tolerate).
-    #[test]
-    fn test_finalize_tool_call_accumulators_rejects_invalid_json() {
+    #[tokio::test]
+    async fn test_finalize_tool_call_accumulators_rejects_invalid_json() {
         let mut accumulators = std::collections::HashMap::new();
         accumulators.insert(
             0,
@@ -593,8 +596,8 @@ mod tests {
             },
         );
 
-        let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
-        let has_tools = finalize_tool_call_accumulators(&mut accumulators, &sender);
+        let (sender, mut receiver) = mpsc::channel::<StreamEvent>(16);
+        let has_tools = finalize_tool_call_accumulators(&mut accumulators, &sender).await;
         assert!(has_tools, "accumulator was non-empty");
 
         let first = receiver.try_recv().expect("ToolUseStart emitted first");
@@ -620,8 +623,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_finalize_tool_call_accumulators_passes_valid_json() {
+    #[tokio::test]
+    async fn test_finalize_tool_call_accumulators_passes_valid_json() {
         let mut accumulators = std::collections::HashMap::new();
         accumulators.insert(
             0,
@@ -632,8 +635,8 @@ mod tests {
             },
         );
 
-        let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
-        finalize_tool_call_accumulators(&mut accumulators, &sender);
+        let (sender, mut receiver) = mpsc::channel::<StreamEvent>(16);
+        finalize_tool_call_accumulators(&mut accumulators, &sender).await;
 
         let first = receiver.try_recv().expect("ToolUseStart");
         assert!(matches!(first, StreamEvent::ToolUseStart { .. }));

@@ -403,8 +403,9 @@ impl Tool for ScratchpadReadTool {
 }
 
 fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
-    let offset = input["offset"].as_u64().unwrap_or(0) as usize;
-    let limit = input["limit"].as_u64().unwrap_or(DEFAULT_READ_LIMIT as u64) as usize;
+    let offset = usize::try_from(input["offset"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
+    let limit = usize::try_from(input["limit"].as_u64().unwrap_or(DEFAULT_READ_LIMIT as u64))
+        .unwrap_or(usize::MAX);
     let total = content.len();
 
     if offset >= total {
@@ -415,7 +416,7 @@ fn read_mode(content: &str, input: &serde_json::Value) -> Result<ToolOutput> {
     }
 
     let start = content.floor_char_boundary(offset);
-    let end = content.floor_char_boundary((start + limit).min(total));
+    let end = content.floor_char_boundary(start.saturating_add(limit).min(total));
     let slice = &content[start..end];
 
     Ok(ToolOutput::text(

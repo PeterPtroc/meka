@@ -67,13 +67,26 @@ pub struct SessionManager {
 /// to release the `flock`/`LockFileEx` lock automatically. There is no
 /// "stale lock" failure mode — even `SIGKILL` is safe.
 ///
-/// Internally this is a self-referential struct: `_guard` borrows from
-/// `*_lock` (a `Box` for stable heap address). Field declaration order
-/// guarantees `_guard` is dropped before `_lock`, which is the safety
-/// invariant of the lifetime transmute used during construction.
+/// Internally this is a self-referential struct: `guard` borrows from
+/// `*lock` (a `Box` for stable heap address). The explicit [`Drop`] impl
+/// drops `guard` before `lock` regardless of field declaration order — the
+/// safety invariant of the lifetime transmute used during construction.
 pub struct SessionLock {
-    _guard: FdRwLockWriteGuard<'static, File>,
-    _lock: Box<FdRwLock<File>>,
+    guard: std::mem::ManuallyDrop<FdRwLockWriteGuard<'static, File>>,
+    lock: std::mem::ManuallyDrop<Box<FdRwLock<File>>>,
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        // SAFETY: `guard` borrows from `*lock`; drop it first so the borrow
+        // never outlives the borrowee. This ordering is explicit here and
+        // does not depend on the field declaration order above. Neither
+        // field is touched again after this.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.guard);
+            std::mem::ManuallyDrop::drop(&mut self.lock);
+        }
+    }
 }
 
 fn default_database_path() -> Result<PathBuf> {
@@ -552,14 +565,14 @@ impl SessionManager {
 
         // SAFETY: `guard` borrows from `*lock`. We move the box (not the
         // RwLock inside it) into the returned `SessionLock`, so the RwLock's
-        // heap address is stable for as long as the box lives. Field
-        // declaration order in `SessionLock` ensures `_guard` is dropped
-        // before `_lock`, so the borrow never outlives the borrowee.
+        // heap address is stable for as long as the box lives. The explicit
+        // `Drop` impl on `SessionLock` drops `guard` before `lock`, so the
+        // borrow never outlives the borrowee.
         let guard: FdRwLockWriteGuard<'static, File> = unsafe { std::mem::transmute(guard) };
 
         Ok(SessionLock {
-            _guard: guard,
-            _lock: lock,
+            guard: std::mem::ManuallyDrop::new(guard),
+            lock: std::mem::ManuallyDrop::new(lock),
         })
     }
 
@@ -880,7 +893,15 @@ impl SessionManager {
     }
 
     pub async fn delete_expired_sessions(&self, retention_days: u64) -> Result<u64> {
-        let cutoff = chrono::Utc::now() - chrono::TimeDelta::days(retention_days as i64);
+        // `TimeDelta::days` panics on out-of-range input, so route through
+        // `try_days`: an absurdly large `retention_days` falls back to a
+        // ~100-year window, which deletes nothing — the intended
+        // "retain everything" outcome.
+        let retention = i64::try_from(retention_days)
+            .ok()
+            .and_then(chrono::TimeDelta::try_days)
+            .unwrap_or_else(|| chrono::TimeDelta::days(36_500));
+        let cutoff = chrono::Utc::now() - retention;
         let cutoff_str = cutoff.to_rfc3339();
 
         let deleted = self
@@ -1145,7 +1166,7 @@ impl SessionManager {
                         |row| row.get(0),
                     )?;
 
-                    if (total_bytes as u64) <= max_bytes {
+                    if u64::try_from(total_bytes).unwrap_or(0) <= max_bytes {
                         break;
                     }
 

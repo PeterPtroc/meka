@@ -298,15 +298,30 @@ impl Tool for ExecuteCommandTool {
 
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
 
+        // Drain stdout/stderr on dedicated tasks that start *before* the
+        // wait. `tokio::process::Child::wait()` does not read the pipes;
+        // a child writing past the OS pipe buffer (~64 KiB) would block in
+        // `write()`, `wait()` would never return, and the call would
+        // spuriously hit the timeout below. After the child's process
+        // group exits the pipe write ends close and the drains hit EOF.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = tokio::spawn(async move { read_to_string_best_effort(stdout).await });
+        let stderr_task = tokio::spawn(async move { read_to_string_best_effort(stderr).await });
+
         // wait_with_output() consumes the child, so use wait() + manual
         // stdout/stderr reading instead to allow kill on cancellation.
         tokio::select! {
             _ = cancellation.cancelled() => {
                 kill_child_tree(&mut child).await;
+                stdout_task.abort();
+                stderr_task.abort();
                 Err(AgshError::Interrupted)
             }
             _ = tokio::time::sleep(timeout_duration) => {
                 kill_child_tree(&mut child).await;
+                stdout_task.abort();
+                stderr_task.abort();
                 Ok(ToolOutput::text(
                     format!("Command timed out after {}ms", timeout_ms),
                     true,
@@ -319,15 +334,25 @@ impl Tool for ExecuteCommandTool {
                 })?;
 
                 let exit_code = status.code().unwrap_or(-1);
-                let stdout_content = read_to_string_best_effort(child.stdout.take()).await;
-                let stderr_content = read_to_string_best_effort(child.stderr.take()).await;
+                // A backgrounded grandchild can keep the pipe open past the
+                // direct child's exit; cap the drain so the tool call can't
+                // hang, attaching a truncation note if the cap fires.
+                let (stdout_content, stdout_timed_out) =
+                    join_drain_with_timeout(stdout_task, DRAIN_TIMEOUT).await;
+                let (stderr_content, stderr_timed_out) =
+                    join_drain_with_timeout(stderr_task, DRAIN_TIMEOUT).await;
 
                 // No output-length truncation here: the agent layer's
                 // `persist_oversized_results` auto-persists any oversized
                 // result to the scratchpad losslessly. Truncating here would
                 // corrupt binary-in-base64 pipelines (see #1 in the trial
                 // feedback).
-                Ok(assemble_command_output(&stdout_content, &stderr_content, exit_code))
+                let mut output =
+                    assemble_command_output(&stdout_content, &stderr_content, exit_code);
+                if stdout_timed_out || stderr_timed_out {
+                    append_drain_truncation_note(&mut output, stdout_timed_out, stderr_timed_out);
+                }
+                Ok(output)
             }
         }
     }
@@ -375,6 +400,12 @@ async fn kill_child_tree(child: &mut tokio::process::Child) {
         tracing::debug!("failed to kill child process: {}", error);
     }
 }
+
+/// Upper bound on draining a child's stdout/stderr after it has exited. A
+/// backgrounded grandchild that inherited the pipe write handle can keep the
+/// pipe open past the direct child's exit; rather than block the tool call we
+/// cap the drain, abort it, and attach a truncation note.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn read_to_string_best_effort<R>(reader: Option<R>) -> String
 where
@@ -450,11 +481,6 @@ async fn run_windows_low_integrity(
     // drain task that somehow fails to reach EOF can't hang the tool
     // indefinitely. Two seconds is generous for kernel-side teardown.
     const POST_KILL_TIMEOUT: Duration = Duration::from_secs(2);
-    // Bound the post-exit drain on the happy path. Anything longer than
-    // this is almost certainly a grandchild holding the pipe open; we'd
-    // rather return quickly with a truncation note than block the whole
-    // tool call indefinitely.
-    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
     let mut sandboxed = crate::sandbox::spawn_low_integrity_command(command).map_err(|error| {
         AgshError::ToolExecution {
@@ -544,7 +570,6 @@ async fn run_windows_low_integrity(
 /// Await a `JoinHandle<String>` up to `timeout`. If the timeout expires the
 /// task is aborted and an empty string is returned alongside `timed_out=true`
 /// so the caller can surface a truncation note.
-#[cfg(windows)]
 async fn join_drain_with_timeout(
     mut task: tokio::task::JoinHandle<String>,
     timeout: std::time::Duration,
@@ -579,7 +604,6 @@ async fn abort_after_timeout<T: 'static>(
     }
 }
 
-#[cfg(windows)]
 fn append_drain_truncation_note(
     output: &mut ToolOutput,
     stdout_timed_out: bool,
@@ -815,6 +839,41 @@ mod tests {
         assert!(
             text.trim().len() >= 50_000,
             "expected >= 50 000 chars, got {}",
+            text.trim().len()
+        );
+    }
+
+    /// Regression test for the stdout/stderr pipe deadlock on Unix: a
+    /// command writing far more than the OS pipe buffer (~64 KiB on Linux)
+    /// must complete without blocking. Before draining stdout/stderr on
+    /// dedicated tasks that start *before* `child.wait()`, the child
+    /// blocked in `write()`, `wait()` never returned, and the call hit a
+    /// spurious timeout with truncated output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_command_large_output_no_deadlock() {
+        let tool = test_tool(test_shared_permission(), true);
+        // 5 MiB of 'x' — two orders of magnitude past any pipe buffer.
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "head -c 5242880 /dev/zero | tr '\\0' x"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "large output spuriously flagged as error");
+        let text = text_content(&result);
+        assert!(
+            !text.contains("drain timed out"),
+            "unexpected drain-timeout note: {:.200}",
+            text
+        );
+        assert!(
+            text.trim().len() >= 5_242_880,
+            "expected >= 5 MiB of output, got {}",
             text.trim().len()
         );
     }

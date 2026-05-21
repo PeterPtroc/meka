@@ -153,6 +153,40 @@ fn short_description(description: &str) -> String {
     format!("{}…", clipped.trim_end())
 }
 
+/// OS description for the system prompt's environment block, detected once.
+/// Probing the OS is blocking I/O (`sw_vers` subprocess on macOS,
+/// `/etc/os-release` read on Linux); the system prompt is rebuilt every turn
+/// from the async agent loop, so the result is cached process-wide.
+static OS_DESCRIPTION: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(detect_os_description);
+
+fn detect_os_description() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/etc/os-release").ok()?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+            .map(|name| name.trim_matches('"').to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()?;
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!version.is_empty()).then(|| format!("macOS {}", version))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some("Windows".to_string())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
 /// Build the static, session-level system prompt: role, permission model,
 /// user instructions, full tool catalogue, skills, guidelines, and
 /// environment info. The output does NOT depend on `permission`, so callers
@@ -304,35 +338,8 @@ pub fn build_system_prompt(
         prompt.push_str(&format!("- Shell: {}\n", shell));
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(info) = std::fs::read_to_string("/etc/os-release") {
-            for line in info.lines() {
-                if let Some(name) = line.strip_prefix("PRETTY_NAME=") {
-                    let name = name.trim_matches('"');
-                    prompt.push_str(&format!("- OS: {}\n", name));
-                    break;
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-        {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !version.is_empty() {
-                prompt.push_str(&format!("- OS: macOS {}\n", version));
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        prompt.push_str("- OS: Windows\n");
+    if let Some(os) = &*OS_DESCRIPTION {
+        prompt.push_str(&format!("- OS: {}\n", os));
     }
 
     prompt
@@ -448,11 +455,11 @@ mod tests {
         }
     }
 
-    fn sample_todo(id: &str, description: &str, status: &str) -> TodoItem {
+    fn sample_todo(id: &str, description: &str, status: todo::TodoStatus) -> TodoItem {
         TodoItem {
             id: id.to_string(),
             description: description.to_string(),
-            status: status.to_string(),
+            status,
         }
     }
 
@@ -878,7 +885,11 @@ mod tests {
 
     #[test]
     fn test_turn_context_includes_todos() {
-        let todos = vec![sample_todo("1", "write tests", "in_progress")];
+        let todos = vec![sample_todo(
+            "1",
+            "write tests",
+            todo::TodoStatus::InProgress,
+        )];
         let context = build_turn_context(Permission::Read, &todos);
         assert!(context.contains("write tests"));
         assert!(context.contains("[Environment context]"));
@@ -887,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_turn_context_none_mode_omits_environment() {
-        let todos = vec![sample_todo("1", "do a thing", "pending")];
+        let todos = vec![sample_todo("1", "do a thing", todo::TodoStatus::Pending)];
         let context = build_turn_context(Permission::None, &todos);
         assert!(context.contains("do a thing"));
         assert!(context.contains("[Permission context]"));
@@ -902,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_post_compact_context_includes_env_todos_scratchpad() {
-        let todos = vec![sample_todo("1", "keep working", "pending")];
+        let todos = vec![sample_todo("1", "keep working", todo::TodoStatus::Pending)];
         let entries = vec![sample_scratchpad_entry("notes", 1024)];
         let result = build_post_compact_context(Permission::Read, &todos, &entries);
         assert!(result.contains("[Environment context]"));

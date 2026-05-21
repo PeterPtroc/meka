@@ -339,28 +339,12 @@ impl ClaudeOAuthProvider {
         body.insert("model".to_string(), serde_json::json!(self.model));
         body.insert("messages".to_string(), serde_json::json!(claude_messages));
 
-        if self.is_thinking_enabled() {
-            if model_supports_adaptive_thinking(&self.model) {
-                body.insert("max_tokens".to_string(), serde_json::json!(64_000));
-                body.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({ "type": "adaptive" }),
-                );
-            } else {
-                let budget = self.thinking_budget_tokens;
-                let max_tokens = std::cmp::max(budget * 2, 32_000);
-                body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-                body.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget
-                    }),
-                );
-            }
-        } else {
-            body.insert("max_tokens".to_string(), serde_json::json!(32_000));
-        }
+        shared::insert_thinking_fields(
+            &mut body,
+            self.is_thinking_enabled(),
+            &self.model,
+            self.thinking_budget_tokens,
+        );
 
         // Mirrors `getAPIContextManagement` (`compact/apiMicrocompact.ts:64-92`)
         // for the OAuth-without-ant-tool-clearing case: when thinking is on
@@ -469,7 +453,7 @@ impl Provider for ClaudeOAuthProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-        event_sender: mpsc::UnboundedSender<StreamEvent>,
+        event_sender: mpsc::Sender<StreamEvent>,
         cancellation: CancellationToken,
     ) -> Result<()> {
         let body_json =

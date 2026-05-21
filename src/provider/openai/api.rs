@@ -235,8 +235,18 @@ impl OpenAiProvider {
                 let input: serde_json::Value = match serde_json::from_str(arguments_str) {
                     Ok(value) => value,
                     Err(error) => {
-                        tracing::warn!("failed to parse tool arguments: {}", error);
-                        serde_json::json!({})
+                        // Mirror the streaming path: surface the parse
+                        // failure via the sentinel so the dispatch loop
+                        // rejects the call instead of silently running the
+                        // tool with empty arguments.
+                        tracing::warn!(
+                            "rejecting tool call with unparseable JSON arguments: {}",
+                            error
+                        );
+                        serde_json::json!({
+                            crate::provider::INVALID_TOOL_ARGS_MARKER:
+                                format!("invalid JSON arguments: {}", error),
+                        })
                     }
                 };
 
@@ -317,7 +327,7 @@ impl Provider for OpenAiProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-        event_sender: mpsc::UnboundedSender<StreamEvent>,
+        event_sender: mpsc::Sender<StreamEvent>,
         cancellation: CancellationToken,
     ) -> Result<()> {
         use eventsource_stream::Eventsource;
@@ -369,13 +379,18 @@ impl Provider for OpenAiProvider {
                                 let has_tools = finalize_tool_call_accumulators(
                                     &mut tool_call_accumulators,
                                     &event_sender,
-                                );
+                                )
+                                .await;
                                 let stop_reason = if has_tools {
                                     StopReason::ToolUse
                                 } else {
                                     StopReason::EndTurn
                                 };
-                                if event_sender.send(StreamEvent::MessageEnd { stop_reason }).is_err() {
+                                if event_sender
+                                    .send(StreamEvent::MessageEnd { stop_reason })
+                                    .await
+                                    .is_err()
+                                {
                                     tracing::trace!("stream event receiver dropped");
                                 }
                                 break;
@@ -401,7 +416,11 @@ impl Provider for OpenAiProvider {
                                         .unwrap_or(0),
                                     ..TokenUsage::default()
                                 };
-                                if event_sender.send(StreamEvent::Usage(token_usage)).is_err() {
+                                if event_sender
+                                    .send(StreamEvent::Usage(token_usage))
+                                    .await
+                                    .is_err()
+                                {
                                     tracing::trace!("stream event receiver dropped");
                                     break;
                                 }
@@ -416,8 +435,13 @@ impl Provider for OpenAiProvider {
                                 finalize_tool_call_accumulators(
                                     &mut tool_call_accumulators,
                                     &event_sender,
-                                );
-                                if event_sender.send(StreamEvent::MessageEnd { stop_reason }).is_err() {
+                                )
+                                .await;
+                                if event_sender
+                                    .send(StreamEvent::MessageEnd { stop_reason })
+                                    .await
+                                    .is_err()
+                                {
                                     tracing::trace!("stream event receiver dropped");
                                 }
                                 break;
@@ -429,7 +453,7 @@ impl Provider for OpenAiProvider {
 
                             if let Some(text) = delta.get("content").and_then(|content| content.as_str())
                                 && !text.is_empty()
-                                    && event_sender.send(StreamEvent::TextDelta(text.to_string())).is_err() {
+                                    && event_sender.send(StreamEvent::TextDelta(text.to_string())).await.is_err() {
                                         tracing::trace!("stream event receiver dropped");
                                         break;
                                     }
@@ -473,7 +497,7 @@ impl Provider for OpenAiProvider {
                                             if let Some(accumulator) = tool_call_accumulators.get_mut(&index) {
                                                 accumulator.arguments.push_str(args);
                                             }
-                                            if event_sender.send(StreamEvent::ToolInputDelta(args.to_string())).is_err() {
+                                            if event_sender.send(StreamEvent::ToolInputDelta(args.to_string())).await.is_err() {
                                                 tracing::trace!("stream event receiver dropped");
                                                 break;
                                             }
@@ -482,7 +506,11 @@ impl Provider for OpenAiProvider {
                             }
                         }
                         Err(error) => {
-                            if event_sender.send(StreamEvent::Error(error.to_string())).is_err() {
+                            if event_sender
+                                .send(StreamEvent::Error(error.to_string()))
+                                .await
+                                .is_err()
+                            {
                                 tracing::trace!("stream event receiver dropped");
                             }
                             return Err(AgshError::StreamError(error.to_string()));
@@ -656,6 +684,49 @@ mod tests {
             assert_eq!(id, "call_abc");
             assert_eq!(name, "read_file");
             assert_eq!(input["path"], "/tmp/test.txt");
+        } else {
+            panic!("expected ToolUse block");
+        }
+    }
+
+    #[test]
+    fn test_openai_parse_non_streaming_malformed_tool_args() {
+        let provider =
+            OpenAiProvider::new("test-key".to_string(), "gpt-4o".to_string(), None, None);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{not valid json"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let (message, _, _) = provider
+            .parse_non_streaming_response(&response)
+            .expect("envelope should parse even with bad tool args");
+
+        let tool_uses = message.tool_uses();
+        assert_eq!(tool_uses.len(), 1);
+        if let ContentBlock::ToolUse { input, .. } = &tool_uses[0] {
+            assert!(
+                input
+                    .get(crate::provider::INVALID_TOOL_ARGS_MARKER)
+                    .and_then(|reason| reason.as_str())
+                    .is_some(),
+                "malformed args must surface the invalid-args sentinel, got: {}",
+                input
+            );
         } else {
             panic!("expected ToolUse block");
         }

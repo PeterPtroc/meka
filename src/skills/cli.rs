@@ -85,6 +85,7 @@ pub async fn run_get(name: &str) -> Result<()> {
 pub async fn run_show(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
     let body = skills::load_skill_body(&skill, None)
+        .await
         .map_err(|error| AgshError::Config(format!("failed to load skill body: {}", error)))?;
     print!("{}", body);
     Ok(())
@@ -347,7 +348,16 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
                 ))
             })?;
 
-    let current = std::fs::read_to_string(&skill.body_path).unwrap_or_default();
+    let current = tokio::fs::read_to_string(&skill.body_path)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "could not read existing skill body {}: {}",
+                skill.body_path.display(),
+                error
+            );
+            String::new()
+        });
     if current == fetched {
         return Ok(UpdateOutcome::Unchanged);
     }
@@ -646,7 +656,7 @@ mod tests {
         // assert the substitution since capturing stdout in tests is
         // brittle.
         let skill = require_skill("subst").expect("found");
-        let rendered = skills::load_skill_body(&skill, None).expect("load");
+        let rendered = skills::load_skill_body(&skill, None).await.expect("load");
         assert!(rendered.contains(&dir.display().to_string()));
         assert!(!rendered.contains("${AGSH_SKILL_DIR}"));
     }

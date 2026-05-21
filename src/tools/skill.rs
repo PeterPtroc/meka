@@ -79,12 +79,12 @@ impl Tool for SkillTool {
 
         let session_id = self.session_id.read().await.map(|id| id.to_string());
 
-        let body = skills::load_skill_body(skill, session_id.as_deref()).map_err(|error| {
-            AgshError::ToolExecution {
+        let body = skills::load_skill_body(skill, session_id.as_deref())
+            .await
+            .map_err(|error| AgshError::ToolExecution {
                 tool_name: "skill".to_string(),
                 message: error,
-            }
-        })?;
+            })?;
 
         Ok(ToolOutput::text(body, false))
     }

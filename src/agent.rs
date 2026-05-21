@@ -357,19 +357,24 @@ impl Agent {
             .as_ref()
             .map(|manager| manager.server_instructions())
             .unwrap_or_default();
-        let system_prompt = match &self.options.system_prompt_override {
-            Some(prompt) => prompt.clone(),
-            None => context::build_system_prompt(
+        let system_prompt: Arc<str> = match &self.options.system_prompt_override {
+            Some(prompt) => Arc::from(prompt.as_str()),
+            None => Arc::from(context::build_system_prompt(
                 &catalogue,
                 self.options.sandboxed_shell,
                 skills.as_slice(),
                 self.options.user_instructions.as_deref(),
                 &mcp_instructions,
-            ),
+            )),
         };
 
-        let base_messages =
-            truncate_messages_for_context(messages.as_slice(), self.options.context_messages);
+        // Wrapped in `Arc` once so the no-tool-progress branch below can
+        // share it with a cheap `Arc::clone` instead of a deep `Vec` clone
+        // on every loop iteration.
+        let base_messages: Arc<[Message]> = Arc::from(truncate_messages_for_context(
+            messages.as_slice(),
+            self.options.context_messages,
+        ));
         let turn_start_len = messages.len();
 
         let mut user_saved = false;
@@ -384,12 +389,12 @@ impl Agent {
                     break 'turn Err(AgshError::Interrupted);
                 }
 
-                let api_messages = if messages.len() > turn_start_len {
-                    let mut combined = base_messages.clone();
+                let api_messages: Arc<[Message]> = if messages.len() > turn_start_len {
+                    let mut combined = base_messages.to_vec();
                     combined.extend_from_slice(&messages.as_slice()[turn_start_len..]);
-                    combined
+                    Arc::from(combined)
                 } else {
-                    base_messages.clone()
+                    Arc::clone(&base_messages)
                 };
 
                 // Recompute the active tool set every iteration so a
@@ -405,13 +410,14 @@ impl Agent {
                 // active set on the next turn.
                 let loaded =
                     crate::conversation::extract_loaded_tool_names_from_events(messages.events());
-                let tools = self.tool_registry.definitions_active_with_loaded(&loaded);
+                let tools: Arc<[ToolDefinition]> =
+                    Arc::from(self.tool_registry.definitions_active_with_loaded(&loaded));
 
                 let (assistant_message, stop_reason, usage) = match if self.options.streaming {
                     self.run_streaming(
-                        &system_prompt,
-                        &api_messages,
-                        &tools,
+                        Arc::clone(&system_prompt),
+                        api_messages,
+                        tools,
                         cancellation.clone(),
                         &mut spacing,
                     )
@@ -484,10 +490,12 @@ impl Agent {
                             tracing::warn!("failed to save explicit scratchpad results: {}", error);
                         }
 
-                        let hints_snapshot = {
-                            let guard = self.scratchpad_hints.read().await;
-                            guard.clone()
-                        };
+                        // Take the per-turn hints — this both snapshots them
+                        // for the call below and clears them, so a long
+                        // session doesn't accumulate entries for tool calls
+                        // that already ran. No clone needed.
+                        let hints_snapshot =
+                            std::mem::take(&mut *self.scratchpad_hints.write().await);
                         if let Err(error) = crate::tools::scratchpad::persist_oversized_results(
                             &self.session_manager,
                             sid,
@@ -499,9 +507,6 @@ impl Agent {
                         {
                             tracing::warn!("failed to persist oversized tool results: {}", error);
                         }
-                        // Drop the per-turn hints so a long session doesn't
-                        // accumulate entries for tool calls that already ran.
-                        self.scratchpad_hints.write().await.clear();
 
                         let result_message = Message {
                             role: Role::User,
@@ -558,18 +563,18 @@ impl Agent {
 
     async fn run_streaming(
         &self,
-        system_prompt: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
+        system_prompt: Arc<str>,
+        messages: Arc<[Message]>,
+        tools: Arc<[ToolDefinition]>,
         cancellation: CancellationToken,
         spacing: &mut render::OutputSpacing,
     ) -> Result<(Message, StopReason, crate::provider::TokenUsage)> {
-        let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<StreamEvent>();
+        // Bounded so a provider streaming faster than the renderer consumes
+        // can't grow memory without limit. 1024 is far above any realistic
+        // in-flight backlog, so backpressure effectively never engages.
+        let (event_sender, mut event_receiver) = mpsc::channel::<StreamEvent>(1024);
 
         let provider = Arc::clone(&self.provider);
-        let system_prompt = system_prompt.to_string();
-        let messages = messages.to_vec();
-        let tools = tools.to_vec();
         let cancellation_clone = cancellation.clone();
 
         let stream_handle = tokio::spawn(async move {
@@ -954,7 +959,7 @@ impl Agent {
 
         // Clone and preprocess messages for the summarizer: strip images and
         // truncate large text blocks to avoid overwhelming the summary call.
-        let mut compact_messages = to_summarize.clone();
+        let mut compact_messages = to_summarize;
         for message in &mut compact_messages {
             strip_images_and_truncate(&mut message.content);
         }
@@ -1030,6 +1035,16 @@ impl Agent {
                 .save_event(sid, &crate::conversation::Event::Append(message.clone()))
                 .await?;
         }
+
+        // Pre-boundary events are now fully superseded and already
+        // persisted; drop them so the in-memory log doesn't grow unbounded
+        // across repeated compactions.
+        messages.prune_compacted_events();
+
+        // The model's view of which files it has read is reset by the
+        // summary; drop the read-tracker so `edit_file` re-reads rather
+        // than trusting a pre-compaction read (also bounds its growth).
+        self.tool_registry.clear_read_tracker().await;
 
         Ok(())
     }

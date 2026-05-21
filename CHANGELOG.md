@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-05-21
+
+### Added
+
+- CI runs `cargo audit` to flag known security advisories in dependencies.
+
+### Changed
+
+- Stream-event channel is now bounded; in-memory event log is pruned after compaction to bound memory.
+- `grep` traverses directories iteratively, so a deeply-nested tree can't overflow the stack.
+- `grep` no longer descends into symlinked directories, removing any symlink-cycle traversal risk.
+
+### Fixed
+
+- Large-output shell commands no longer spuriously time out — stdout/stderr are drained before the wait.
+- Malformed OpenAI tool-call arguments are rejected explicitly instead of run with empty input.
+- `write_file` rejects symlinked targets on Windows, matching the `O_NOFOLLOW` behavior on Unix.
+- Landlock sandbox (ABI v6+) now blocks abstract Unix sockets and cross-domain signals.
+- Blocking skill-discovery, skill-load, and OS-detection calls no longer stall the async runtime.
+- Session-lock guard drop order is now explicit, removing a field-reorder use-after-free hazard.
+- Numeric casts on tool inputs (offsets, limits, sizes) are bounds-checked instead of overflowing.
+- `todo_write` rejects an unrecognized task status instead of silently mis-rendering it.
+
 ## [0.26.0] - 2026-05-20
 
 ### Added

@@ -14,7 +14,7 @@ use crate::provider::{Message, Provider, StopReason, StreamEvent, TokenUsage, To
 
 use super::shared::{
     self, convert_messages_to_claude_content, convert_tools_to_claude_tools,
-    drive_claude_sse_stream, model_supports_adaptive_thinking, parse_non_streaming_response,
+    drive_claude_sse_stream, parse_non_streaming_response,
 };
 
 pub struct ClaudeApiProvider {
@@ -78,28 +78,12 @@ impl ClaudeApiProvider {
         }
         body.insert("messages".to_string(), serde_json::json!(claude_messages));
 
-        if self.is_thinking_enabled() {
-            if model_supports_adaptive_thinking(&self.model) {
-                body.insert("max_tokens".to_string(), serde_json::json!(64_000));
-                body.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({ "type": "adaptive" }),
-                );
-            } else {
-                let budget = self.thinking_budget_tokens;
-                let max_tokens = std::cmp::max(budget * 2, 32_000);
-                body.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-                body.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget
-                    }),
-                );
-            }
-        } else {
-            body.insert("max_tokens".to_string(), serde_json::json!(32_000));
-        }
+        shared::insert_thinking_fields(
+            &mut body,
+            self.is_thinking_enabled(),
+            &self.model,
+            self.thinking_budget_tokens,
+        );
 
         body.insert("stream".to_string(), serde_json::json!(stream));
 
@@ -180,7 +164,7 @@ impl Provider for ClaudeApiProvider {
         system_prompt: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-        event_sender: mpsc::UnboundedSender<StreamEvent>,
+        event_sender: mpsc::Sender<StreamEvent>,
         cancellation: CancellationToken,
     ) -> Result<()> {
         let body_json =
