@@ -137,6 +137,33 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn test_skill_tool_prepends_context_header() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(
+            temp.path(),
+            "demo",
+            "---\ndescription: x\n---\nRun helper.py to do the thing.\n",
+        );
+        let tool = SkillTool {
+            session_id: Arc::new(RwLock::new(None)),
+            skills: SkillCache::for_root(Some(temp.path().to_path_buf())),
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "demo"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("should load");
+
+        assert!(!result.is_error);
+        let text = crate::provider::ContentBlock::tool_result_text_content(&result.content);
+        assert!(text.starts_with("Base directory for this skill and its bundled files:"));
+        assert!(text.contains(&temp.path().join("demo").display().to_string()));
+        assert!(text.contains("Run helper.py to do the thing."));
+    }
+
     #[test]
     fn test_find_skill() {
         let skill = Skill {

@@ -101,6 +101,25 @@ skill(name: "download-videos")
 
 The tool returns the full body of `SKILL.md` (with variables expanded) as its output. The agent then follows the instructions.
 
+Whenever a skill body is loaded — by the `skill` tool, `--skill`, `/skill`, `spawn_agent`, or `agsh skill show` — it is prefixed with a one-line header naming the skill's directory:
+
+```
+Base directory for this skill and its bundled files: /home/user/.config/agsh/skills/download-videos
+```
+
+This lets the agent locate files bundled alongside `SKILL.md` even when the body refers to them by bare name (e.g. `helper.sh`) rather than via `${AGSH_SKILL_DIR}`.
+
+## Running a Skill in a Sub-Agent
+
+The agent can delegate a skill to a sub-agent by passing the `skill` parameter to the `spawn_agent` tool. The sub-agent runs the skill in its own fresh context and returns a report, keeping the skill's instructions out of the parent's conversation:
+
+```
+spawn_agent(skill: "summarize-financial-news")
+spawn_agent(skill: "summarize-financial-news", prompt: "focus on UK markets")
+```
+
+`prompt` is optional when `skill` is given; if both are supplied, `prompt` is prepended to the skill body as extra direction — the same ordering as `agsh --skill <name> [prompt]`.
+
 ## Invoking a Skill from the CLI
 
 Any skill can be triggered directly from the command line with `--skill <name>`. The rendered body becomes the first user turn, and agsh drops into the interactive REPL after the turn finishes:

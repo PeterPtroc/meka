@@ -284,7 +284,10 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Load the body (post-frontmatter) of a skill and perform variable substitution.
+/// Load the body (post-frontmatter) of a skill, perform variable
+/// substitution, and prepend the [`skill_context_header`] so every
+/// consumer (the `skill` tool, `--skill`, `/skill`, `spawn_agent`'s skill
+/// delegation, and `agsh skill show`) sees the skill's base directory.
 pub async fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<String, String> {
     let content = tokio::fs::read_to_string(&skill.body_path)
         .await
@@ -294,7 +297,23 @@ pub async fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<
         .map(|(_, body)| body.to_string())
         .unwrap_or(content);
 
-    Ok(substitute_variables(&body, skill, session_id))
+    Ok(format!(
+        "{}\n\n{}",
+        skill_context_header(skill),
+        substitute_variables(&body, skill, session_id)
+    ))
+}
+
+/// Build the one-line context header prepended to a skill body by
+/// [`load_skill_body`]. Points the agent at the skill's directory so bare
+/// filenames in the body (bundled scripts, data files) resolve correctly
+/// without the author having to spell out `${AGSH_SKILL_DIR}` on every
+/// reference.
+fn skill_context_header(skill: &Skill) -> String {
+    format!(
+        "Base directory for this skill and its bundled files: {}",
+        skill.source_dir.display()
+    )
 }
 
 fn substitute_variables(text: &str, skill: &Skill, session_id: Option<&str>) -> String {
@@ -665,6 +684,19 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "expected cache to skip rediscovery when nothing changed"
         );
+    }
+
+    #[test]
+    fn test_skill_context_header_points_at_source_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "demo", &valid_frontmatter("x"));
+        let skill_path = temp.path().join("demo");
+        let skill =
+            load_skill_definition("demo", &skill_path, &skill_path.join("SKILL.md")).expect("load");
+
+        let header = skill_context_header(&skill);
+        assert!(header.contains("bundled files"));
+        assert!(header.contains(&skill_path.display().to_string()));
     }
 
     #[tokio::test]

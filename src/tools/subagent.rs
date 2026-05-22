@@ -73,22 +73,31 @@ impl Tool for SpawnAgentTool {
             description: "Spawn a sub-agent to perform a research, analysis, or delegated task. \
                           The sub-agent inherits the parent's permission level, has its own \
                           private todo list and scratchpad, and returns a single text report. \
-                          Multiple spawn_agent calls in one turn run in parallel. Use \
-                          `inherit_scratchpad` to grant read-only access to specific parent \
-                          scratchpad entries by name so the sub-agent can consume large captured \
-                          output via `scratchpad_read` without you re-inlining it in the prompt. \
-                          Tip: when you expect to hand output to a sub-agent later, set the \
-                          `scratchpad` parameter on the originating tool call (e.g. \
-                          `execute_command({command: \"...\", scratchpad: \"build_log\"})`) so \
-                          the entry has a semantic name you can pass through \
-                          `inherit_scratchpad`."
+                          Multiple spawn_agent calls in one turn run in parallel. Pass `skill` \
+                          to run an installed skill in the sub-agent — the skill's instructions \
+                          become the sub-agent's task; supply at least one of `prompt` or \
+                          `skill`. Use `inherit_scratchpad` to grant read-only access to \
+                          specific parent scratchpad entries by name so the sub-agent can \
+                          consume large captured output via `scratchpad_read` without you \
+                          re-inlining it in the prompt. Tip: when you expect to hand output to a \
+                          sub-agent later, set the `scratchpad` parameter on the originating \
+                          tool call (e.g. `execute_command({command: \"...\", scratchpad: \
+                          \"build_log\"})`) so the entry has a semantic name you can pass \
+                          through `inherit_scratchpad`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "The task description for the sub-agent"
+                        "description": "The task description for the sub-agent. Optional when \
+                                        `skill` is given; otherwise required."
+                    },
+                    "skill": {
+                        "type": "string",
+                        "description": "Name of an installed skill to run in the sub-agent. The \
+                                        skill's instructions become the sub-agent's task; \
+                                        `prompt`, if also given, is prepended as extra direction."
                     },
                     "scratchpad": {
                         "type": "string",
@@ -108,8 +117,7 @@ impl Tool for SpawnAgentTool {
                                         sub-agent can't silently shadow your copy. Names that \
                                         don't exist in the parent are silently skipped."
                     }
-                },
-                "required": ["prompt"]
+                }
             }),
             ..Default::default()
         }
@@ -124,13 +132,51 @@ impl Tool for SpawnAgentTool {
         input: serde_json::Value,
         cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
+        // Both `prompt` and `skill` are optional, but at least one must
+        // be present — mirrors the CLI's `--oneshot` guard in
+        // `src/main.rs`. An empty/whitespace `prompt` counts as absent.
         let prompt = input["prompt"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        let skill_name = input["skill"]
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        if prompt.is_none() && skill_name.is_none() {
+            return Err(AgshError::ToolExecution {
                 tool_name: "spawn_agent".to_string(),
-                message: "missing 'prompt' parameter".to_string(),
-            })?
-            .to_string();
+                message: "spawn_agent requires 'prompt', 'skill', or both".to_string(),
+            });
+        }
+
+        // Resolve the skill against the shared cache up front, before any
+        // session is created, so a bad name fails fast without leaving an
+        // orphan child session behind.
+        let skill = match &skill_name {
+            Some(name) => {
+                let installed = self.tool_builder_params.skills.current().await;
+                match installed.iter().find(|skill| &skill.name == name) {
+                    Some(skill) => Some(skill.clone()),
+                    None => {
+                        let available: Vec<&str> =
+                            installed.iter().map(|skill| skill.name.as_str()).collect();
+                        let hint = if available.is_empty() {
+                            "No skills are installed.".to_string()
+                        } else {
+                            format!("Available skills: {}", available.join(", "))
+                        };
+                        return Err(AgshError::ToolExecution {
+                            tool_name: "spawn_agent".to_string(),
+                            message: format!("skill '{}' not found. {}", name, hint),
+                        });
+                    }
+                }
+            }
+            None => None,
+        };
 
         // `inherit_scratchpad`: optional array of parent-scratchpad
         // names. Non-string entries are silently skipped so a partially-
@@ -193,6 +239,22 @@ impl Tool for SpawnAgentTool {
             sub_session_id
         );
 
+        // Render the skill body now that the sub-agent's session ID
+        // exists, so `${AGSH_SESSION_ID}` resolves to the sub-agent's own
+        // session. `load_skill_body` also prepends the base-directory
+        // header so bundled-file references resolve.
+        let skill_body = match &skill {
+            Some(skill) => Some(
+                crate::skills::load_skill_body(skill, Some(&sub_session_id.to_string()))
+                    .await
+                    .map_err(|error| AgshError::ToolExecution {
+                        tool_name: "spawn_agent".to_string(),
+                        message: format!("failed to load skill: {}", error),
+                    })?,
+            ),
+            None => None,
+        };
+
         // Build a sub-agent tool registry: no `spawn_agent` (no recursive
         // spawning) and a fresh, private todo list so the sub-agent's
         // todo_write / todo_read calls don't touch the parent's task
@@ -244,8 +306,17 @@ impl Tool for SpawnAgentTool {
             &inherited_scratchpad,
         );
 
+        // Compose the first-turn task: parent directive first, skill body
+        // second. The at-least-one check above guarantees a `Some`.
+        let task =
+            compose_subagent_task(prompt.as_deref(), skill_body.as_deref()).ok_or_else(|| {
+                AgshError::ToolExecution {
+                    tool_name: "spawn_agent".to_string(),
+                    message: "spawn_agent requires 'prompt', 'skill', or both".to_string(),
+                }
+            })?;
         let environment_context = build_environment_context(sub_perm);
-        let augmented_prompt = format!("{}\n{}", environment_context, prompt);
+        let augmented_prompt = format!("{}\n{}", environment_context, task);
 
         let sub_agent = Agent::new_subagent(
             Arc::clone(&self.provider),
@@ -281,6 +352,20 @@ impl Tool for SpawnAgentTool {
             .last_assistant_text()
             .unwrap_or_else(|| "(sub-agent produced no final text)".to_string());
         Ok(ToolOutput::text(report, false))
+    }
+}
+
+/// Compose the sub-agent's first-turn task from an optional parent
+/// directive and an optional rendered skill body. Mirrors the CLI's
+/// `--skill` ordering (`build_skill_prompt` in `src/main.rs`): the parent
+/// directive comes first, the skill body second. Returns `None` only when
+/// both inputs are absent — the caller treats that as an error.
+fn compose_subagent_task(prompt: Option<&str>, skill_body: Option<&str>) -> Option<String> {
+    match (prompt, skill_body) {
+        (Some(prompt), Some(body)) => Some(format!("{}\n\n{}", prompt, body)),
+        (Some(prompt), None) => Some(prompt.to_string()),
+        (None, Some(body)) => Some(body.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -402,6 +487,24 @@ mod tests {
             "expected naming suggestion, got: {}",
             prompt,
         );
+    }
+
+    #[test]
+    fn test_compose_subagent_task_combinations() {
+        assert_eq!(
+            compose_subagent_task(Some("focus on UK news"), Some("skill body")),
+            Some("focus on UK news\n\nskill body".to_string()),
+            "parent directive must come first, skill body second",
+        );
+        assert_eq!(
+            compose_subagent_task(Some("just a prompt"), None),
+            Some("just a prompt".to_string()),
+        );
+        assert_eq!(
+            compose_subagent_task(None, Some("skill body")),
+            Some("skill body".to_string()),
+        );
+        assert_eq!(compose_subagent_task(None, None), None);
     }
 
     async fn test_session_manager() -> SessionManager {
