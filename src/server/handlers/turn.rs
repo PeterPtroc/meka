@@ -866,10 +866,10 @@ fn assemble_response(
             FrontendEvent::AssistantTextDelta(text) => {
                 final_text.push_str(&text);
             }
-            FrontendEvent::ThinkingBlock { content, .. } => {
-                if capabilities.supports_reasoning_stream {
-                    thinking_segments.push(content);
-                }
+            FrontendEvent::ThinkingBlock { content, .. }
+                if capabilities.supports_reasoning_stream =>
+            {
+                thinking_segments.push(content);
             }
             FrontendEvent::ToolCallStarted {
                 id,
