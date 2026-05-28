@@ -18,7 +18,7 @@ The `claude-oauth` provider authenticates with a Claude Code subscription via OA
 ### Quickest Start (Setup Wizard)
 
 ```bash
-agsh setup
+meka setup
 ```
 
 Pick **claude-oauth** when prompted. The wizard opens your browser, walks you through authorization, and saves the tokens to the local database.
@@ -26,10 +26,10 @@ Pick **claude-oauth** when prompted. The wizard opens your browser, walks you th
 ### Minimal Setup (Manual OAuth Token)
 
 ```bash
-export AGSH_PROVIDER=claude-oauth
-export AGSH_MODEL=claude-opus-4-6
+export MEKA_PROVIDER=claude-oauth
+export MEKA_MODEL=claude-opus-4-6
 export CLAUDE_OAUTH_TOKEN=sk-ant-oat01-...
-agsh
+meka
 ```
 
 On first run the OAuth token is saved to the database. Subsequent runs load it automatically; you no longer need the env var.
@@ -55,24 +55,24 @@ Sent as `output_config.effort` for effort-capable models (`opus-4-6`, `sonnet-4-
 
 ### `[provider].redact_thinking`
 
-When `true`, agsh adds the `redact-thinking-2026-02-12` beta header so the server returns redacted thinking blocks instead of full thinking summaries. The redacted payloads can't be replayed back to the server in multi-turn conversations, so agsh stores them as opaque signatures only. Defaults to `false`.
+When `true`, meka adds the `redact-thinking-2026-02-12` beta header so the server returns redacted thinking blocks instead of full thinking summaries. The redacted payloads can't be replayed back to the server in multi-turn conversations, so meka stores them as opaque signatures only. Defaults to `false`.
 
 ### `[provider].device_id`
 
 Stable per-machine identifier embedded in `metadata.user_id` to mirror Claude Code's `~/.claude.json` device ID (`getOrCreateUserID` in `utils/config.ts`).
 
-If unset, agsh first tries to adopt `userID` from `~/.claude.json` (so agsh and Claude Code on the same machine present as the same device). If that file is missing or has no `userID`, agsh generates a 64-character hex string. Either way the resolved value is persisted back to `[provider].device_id` in `config.toml`. Other providers ignore this field — no stub config file is written for them.
+If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine present as the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way the resolved value is persisted back to `[provider].device_id` in `config.toml`. Other providers ignore this field — no stub config file is written for them.
 
 ## Authentication
 
 ### Setup Wizard (recommended)
 
-`agsh setup` performs an OAuth 2.0 Authorization Code flow with PKCE:
+`meka setup` performs an OAuth 2.0 Authorization Code flow with PKCE:
 
-1. agsh generates a PKCE challenge and opens your browser to Claude's authorization page.
+1. meka generates a PKCE challenge and opens your browser to Claude's authorization page.
 2. You authorize the application in your browser.
-3. You paste the authorization code back into agsh (the redirect URI is the platform.claude.com hosted callback page, not a local listener).
-4. agsh exchanges the code for access + refresh tokens.
+3. You paste the authorization code back into meka (the redirect URI is the platform.claude.com hosted callback page, not a local listener).
+4. meka exchanges the code for access + refresh tokens.
 5. Tokens are stored in the local database and refreshed automatically.
 
 The OAuth client ID defaults to Claude Code's client ID but can be overridden via the `CLAUDE_CLIENT_ID` env var.
@@ -80,9 +80,9 @@ The OAuth client ID defaults to Claude Code's client ID but can be overridden vi
 ### Token Lifecycle
 
 1. Provide the initial token via setup wizard, env var, or config.
-2. agsh saves it to the database on first use.
+2. meka saves it to the database on first use.
 3. On subsequent launches the token is loaded from the database.
-4. agsh refreshes the access token automatically when it's within 5 minutes of expiry; the new token is written back to the database.
+4. meka refreshes the access token automatically when it's within 5 minutes of expiry; the new token is written back to the database.
 5. Setting a new env var or config value replaces the stored token.
 
 **Token refresh URL:** defaults to `https://api.anthropic.com/v1/oauth/token`. Configurable via `provider.oauth_token_url` in the config file.
@@ -99,7 +99,7 @@ Any model your Claude Code subscription exposes. Current line-up (per [Anthropic
 
 Older but still available: `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-1`. Deprecated and retiring 2026-06-15: `claude-opus-4-20250514`, `claude-sonnet-4-20250514`.
 
-agsh forwards the model string verbatim — it doesn't gate which strings are valid. Per-model behaviour depends on capability gates baked into the request shape (see [Beta header](#beta-header)). The current gates target `opus-4-6` / `sonnet-4-6` for adaptive-thinking and effort; newer models (e.g. Opus 4.7) fall through to the conservative defaults until the gates are updated.
+meka forwards the model string verbatim — it doesn't gate which strings are valid. Per-model behaviour depends on capability gates baked into the request shape (see [Beta header](#beta-header)). The current gates target `opus-4-6` / `sonnet-4-6` for adaptive-thinking and effort; newer models (e.g. Opus 4.7) fall through to the conservative defaults until the gates are updated.
 
 ## API Details
 

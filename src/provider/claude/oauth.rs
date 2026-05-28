@@ -20,7 +20,7 @@ use super::shared::{
     model_supports_effort, model_supports_modern_features, parse_non_streaming_response,
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{
         AuthCredential, DEFAULT_CLAUDE_CLIENT_ID, Message, Notice, Provider, StopReason,
         StreamEvent, TokenUsage, ToolDefinition,
@@ -157,7 +157,7 @@ impl ClaudeOAuthProvider {
             let credential = self.credential.read().await;
             match &*credential {
                 AuthCredential::ApiKey(_) => {
-                    return Err(AgshError::Provider(
+                    return Err(MekaError::Provider(
                         "claude-oauth requires an OAuth token, not an API key".to_string(),
                     ));
                 }
@@ -183,7 +183,7 @@ impl ClaudeOAuthProvider {
         let mut credential = self.credential.write().await;
 
         // Re-read the latest credential from the DB. Refresh tokens rotate on each successful
-        // refresh, and a sibling agsh process (or `agsh mcp login` flow) may have rotated ours
+        // refresh, and a sibling meka process (or `meka mcp login` flow) may have rotated ours
         // since startup. Without this re-read we'd POST a stale refresh_token and the OAuth
         // provider would reject it with `invalid_grant`.
         if let Some(store) = &self.token_store {
@@ -221,7 +221,7 @@ impl ClaudeOAuthProvider {
         };
 
         let Some(refresh_token) = refresh_token else {
-            return Err(AgshError::Provider(
+            return Err(MekaError::Provider(
                 "OAuth access token expired and no refresh token available".to_string(),
             ));
         };
@@ -255,7 +255,7 @@ impl ClaudeOAuthProvider {
             .send()
             .await
             .map_err(|error| {
-                AgshError::Provider(format!(
+                MekaError::Provider(format!(
                     "OAuth token refresh request failed: {}",
                     crate::error::format_reqwest_error(&error)
                 ))
@@ -267,7 +267,7 @@ impl ClaudeOAuthProvider {
                 tracing::warn!("failed to read OAuth refresh error body: {}", error);
                 String::new()
             });
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "OAuth token refresh failed ({}): {}",
                 status, body
             )));
@@ -281,7 +281,7 @@ impl ClaudeOAuthProvider {
         }
 
         let data: RefreshResponse = response.json().await.map_err(|error| {
-            AgshError::Provider(format!("failed to parse refresh response: {}", error))
+            MekaError::Provider(format!("failed to parse refresh response: {}", error))
         })?;
 
         let expires_at = data
@@ -407,7 +407,7 @@ impl Provider for ClaudeOAuthProvider {
             shared::build_body_within_budget(messages, self.session_stats.as_ref(), |msgs| {
                 serde_json::to_string(&self.build_request_body(system_prompt, msgs, tools, false))
                     .map_err(|error| {
-                        AgshError::Provider(format!("failed to serialize body: {}", error))
+                        MekaError::Provider(format!("failed to serialize body: {}", error))
                     })
             })?;
         let body_json = if !system_prompt.is_empty() {
@@ -430,7 +430,7 @@ impl Provider for ClaudeOAuthProvider {
         );
 
         let response = request.body(body_json).send().await.map_err(|error| {
-            AgshError::Provider(format!(
+            MekaError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
                 body_size_mib,
                 crate::error::format_reqwest_error(&error),
@@ -441,17 +441,17 @@ impl Provider for ClaudeOAuthProvider {
         let response_text = response
             .text()
             .await
-            .map_err(|error| AgshError::Provider(format!("failed to read response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("failed to read response: {}", error)))?;
 
         if !status.is_success() {
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "API returned status {}: {}",
                 status, response_text
             )));
         }
 
         let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|error| AgshError::Provider(format!("invalid JSON response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("invalid JSON response: {}", error)))?;
 
         let (message, stop_reason, usage) = parse_non_streaming_response(&response_json)?;
         let notices = redaction_notice.into_iter().collect();
@@ -470,7 +470,7 @@ impl Provider for ClaudeOAuthProvider {
             shared::build_body_within_budget(messages, self.session_stats.as_ref(), |msgs| {
                 serde_json::to_string(&self.build_request_body(system_prompt, msgs, tools, true))
                     .map_err(|error| {
-                        AgshError::Provider(format!("failed to serialize body: {}", error))
+                        MekaError::Provider(format!("failed to serialize body: {}", error))
                     })
             })?;
         // Surface the redaction notice ahead of any provider text. See the mirror in
@@ -501,7 +501,7 @@ impl Provider for ClaudeOAuthProvider {
         );
 
         let response = request.body(body_json).send().await.map_err(|error| {
-            AgshError::Provider(format!(
+            MekaError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
                 body_size_mib,
                 crate::error::format_reqwest_error(&error),

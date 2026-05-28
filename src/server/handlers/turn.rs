@@ -638,7 +638,7 @@ fn build_sse_stream(
                                     "turn_id": turn_id.to_string(),
                                     "session_id": session_id.to_string(),
                                     "error": {
-                                        "type": "https://agsh.dev/errors/sse-lag",
+                                        "type": "https://meka.so/errors/sse-lag",
                                         "title": "SSE consumer lagged",
                                         "status": 500,
                                         "detail": format!(
@@ -713,7 +713,7 @@ fn terminal_event_from_join(
     }
     match turn_result {
         Ok(Ok(_)) => unreachable!("already handled above"),
-        Ok(Err(crate::error::AgshError::Interrupted)) => {
+        Ok(Err(crate::error::MekaError::Interrupted)) => {
             cancelled_event("client", ids, turn_id, session_id)
         }
         Ok(Err(error)) => {
@@ -740,7 +740,7 @@ fn terminal_event_from_join(
                     "turn_id": turn_id.to_string(),
                     "session_id": session_id.to_string(),
                     "error": {
-                        "type": "https://agsh.dev/errors/internal",
+                        "type": "https://meka.so/errors/internal",
                         "title": "Internal server error",
                         "status": 500,
                         "detail": "turn task panicked",

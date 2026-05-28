@@ -1,6 +1,6 @@
-//! RFC 9457 Problem Details for HTTP APIs. Every error response from `agsh serve` uses this
+//! RFC 9457 Problem Details for HTTP APIs. Every error response from `meka serve` uses this
 //! shape, with content type `application/problem+json`. Stable `type` URIs under
-//! `https://agsh.dev/errors/` act as machine-readable error codes that survive HTTP-status
+//! `https://meka.so/errors/` act as machine-readable error codes that survive HTTP-status
 //! collisions (multiple 404 meanings, multiple 409 meanings); see the HTTP API docs for the full
 //! catalogue.
 //!
@@ -19,10 +19,10 @@ use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::error::AgshError;
+use crate::error::MekaError;
 
 /// RFC 9457 Problem Details body. The five core members (`type`, `title`, `status`, `detail`,
-/// `instance`) are first-class; agsh-specific extension members ride in `extensions` and get
+/// `instance`) are first-class; meka-specific extension members ride in `extensions` and get
 /// flattened into the top-level JSON object on serialization.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProblemDetail {
@@ -138,19 +138,19 @@ pub enum ErrorKind {
 impl ErrorKind {
     pub const fn type_uri(self) -> &'static str {
         match self {
-            Self::Auth => "https://agsh.dev/errors/auth",
-            Self::AuthScope => "https://agsh.dev/errors/auth-scope",
-            Self::SessionNotFound => "https://agsh.dev/errors/session-not-found",
-            Self::SessionLocked => "https://agsh.dev/errors/session-locked",
-            Self::TurnInFlight => "https://agsh.dev/errors/turn-in-flight",
-            Self::TurnCancelled => "https://agsh.dev/errors/turn-cancelled",
-            Self::RequestNotFound => "https://agsh.dev/errors/request-not-found",
-            Self::Idempotency => "https://agsh.dev/errors/idempotency",
-            Self::InvalidBody => "https://agsh.dev/errors/invalid-body",
-            Self::PayloadTooLarge => "https://agsh.dev/errors/payload-too-large",
-            Self::ConcurrencyLimit => "https://agsh.dev/errors/concurrency-limit",
-            Self::Provider => "https://agsh.dev/errors/provider",
-            Self::Internal => "https://agsh.dev/errors/internal",
+            Self::Auth => "https://meka.so/errors/auth",
+            Self::AuthScope => "https://meka.so/errors/auth-scope",
+            Self::SessionNotFound => "https://meka.so/errors/session-not-found",
+            Self::SessionLocked => "https://meka.so/errors/session-locked",
+            Self::TurnInFlight => "https://meka.so/errors/turn-in-flight",
+            Self::TurnCancelled => "https://meka.so/errors/turn-cancelled",
+            Self::RequestNotFound => "https://meka.so/errors/request-not-found",
+            Self::Idempotency => "https://meka.so/errors/idempotency",
+            Self::InvalidBody => "https://meka.so/errors/invalid-body",
+            Self::PayloadTooLarge => "https://meka.so/errors/payload-too-large",
+            Self::ConcurrencyLimit => "https://meka.so/errors/concurrency-limit",
+            Self::Provider => "https://meka.so/errors/provider",
+            Self::Internal => "https://meka.so/errors/internal",
         }
     }
 
@@ -193,35 +193,35 @@ impl IntoResponse for ProblemDetail {
         if status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
-                header::HeaderValue::from_static(r#"Bearer realm="agsh""#),
+                header::HeaderValue::from_static(r#"Bearer realm="meka""#),
             );
         }
         response
     }
 }
 
-/// Best-effort mapping from internal `AgshError` to a Problem Detail. Used by handlers that
+/// Best-effort mapping from internal `MekaError` to a Problem Detail. Used by handlers that
 /// propagate agent-layer errors back to the client. Variants without a dedicated HTTP shape
 /// land on `internal` (500) — refine on demand as new error paths surface.
-impl From<&AgshError> for ProblemDetail {
-    fn from(error: &AgshError) -> Self {
+impl From<&MekaError> for ProblemDetail {
+    fn from(error: &MekaError) -> Self {
         match error {
-            AgshError::Config(message) => ProblemDetail::new(
+            MekaError::Config(message) => ProblemDetail::new(
                 ErrorKind::InvalidBody,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 message.clone(),
             ),
-            AgshError::Provider(message) => ProblemDetail::new(
+            MekaError::Provider(message) => ProblemDetail::new(
                 ErrorKind::Provider,
                 StatusCode::BAD_GATEWAY,
                 message.clone(),
             ),
-            AgshError::Interrupted => ProblemDetail::new(
+            MekaError::Interrupted => ProblemDetail::new(
                 ErrorKind::TurnCancelled,
                 StatusCode::CONFLICT,
                 "turn was cancelled (client cancel, shutdown, or disconnect)",
             ),
-            AgshError::SessionLocked(id) => ProblemDetail::new(
+            MekaError::SessionLocked(id) => ProblemDetail::new(
                 ErrorKind::SessionLocked,
                 StatusCode::CONFLICT,
                 format!("session {} is locked by another process", id),
@@ -254,7 +254,7 @@ mod tests {
         .with("session_id", "s_abc");
         let body = serde_json::to_value(&problem).expect("serializable");
         assert_eq!(
-            body["type"], "https://agsh.dev/errors/session-not-found",
+            body["type"], "https://meka.so/errors/session-not-found",
             "type URI must match the catalogue entry exactly",
         );
         assert_eq!(body["status"], 404);
@@ -266,19 +266,19 @@ mod tests {
     }
 
     #[test]
-    fn agsh_error_provider_maps_to_502() {
-        let error = AgshError::Provider("upstream 529".into());
+    fn meka_error_provider_maps_to_502() {
+        let error = MekaError::Provider("upstream 529".into());
         let problem = ProblemDetail::from(&error);
         assert_eq!(problem.status, 502);
-        assert_eq!(problem.type_uri, "https://agsh.dev/errors/provider");
+        assert_eq!(problem.type_uri, "https://meka.so/errors/provider");
     }
 
     #[test]
-    fn agsh_error_session_locked_carries_session_id() {
+    fn meka_error_session_locked_carries_session_id() {
         let id = uuid::Uuid::nil();
-        let problem = ProblemDetail::from(&AgshError::SessionLocked(id));
+        let problem = ProblemDetail::from(&MekaError::SessionLocked(id));
         assert_eq!(problem.status, 409);
-        assert_eq!(problem.type_uri, "https://agsh.dev/errors/session-locked");
+        assert_eq!(problem.type_uri, "https://meka.so/errors/session-locked");
         assert_eq!(
             problem.extensions.get("session_id"),
             Some(&Value::String(id.to_string()))

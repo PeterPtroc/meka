@@ -1,4 +1,4 @@
-//! Skill discovery and loading. Walks `~/.config/agsh/skills/<name>/SKILL.md`, parses the YAML
+//! Skill discovery and loading. Walks `~/.config/meka/skills/<name>/SKILL.md`, parses the YAML
 //! frontmatter (`description`, `version`, `author`, `source_url`; unknown keys are ignored), and
 //! exposes the resulting [`Skill`] structs to the agent for system-prompt injection and `skill`
 //! tool dispatch.
@@ -23,7 +23,7 @@ pub struct Skill {
     pub version: Option<String>,
     /// Optional attribution string. Informational only.
     pub author: Option<String>,
-    /// Optional `https://` URL the skill's `SKILL.md` can be re-fetched from. When set, `agsh skill
+    /// Optional `https://` URL the skill's `SKILL.md` can be re-fetched from. When set, `meka skill
     /// update` can refresh the skill in place. `None` skills are skipped by `update`.
     pub source_url: Option<String>,
     pub body_path: PathBuf,
@@ -38,7 +38,7 @@ struct Frontmatter {
 }
 
 pub fn skills_dir() -> Option<PathBuf> {
-    crate::config::agsh_config_dir().map(|dir| dir.join("skills"))
+    crate::config::meka_config_dir().map(|dir| dir.join("skills"))
 }
 
 /// Discover all valid skills in the user's skills directory. Returns an empty vec if the directory
@@ -157,7 +157,7 @@ impl SkillCache {
     }
 
     /// Construct a cache backed by a specific root. `None` produces a permanently-empty cache —
-    /// useful for tests and for subcommands (`agsh tools list`) that don't read skill metadata.
+    /// useful for tests and for subcommands (`meka tools list`) that don't read skill metadata.
     pub fn for_root(root: Option<PathBuf>) -> Arc<Self> {
         let (skills, snapshot) = match root.as_deref() {
             Some(root) => (
@@ -224,7 +224,7 @@ fn load_skill_definition(
     parse_skill_definition(name, source_dir, skill_file, &content)
 }
 
-/// Parse a `SKILL.md`'s text into a [`Skill`]. Split out from [`load_skill_definition`] so `agsh
+/// Parse a `SKILL.md`'s text into a [`Skill`]. Split out from [`load_skill_definition`] so `meka
 /// skill update` can validate fetched content in memory before it touches the on-disk file.
 pub fn parse_skill_definition(
     name: &str,
@@ -273,7 +273,7 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 
 /// Load the body (post-frontmatter) of a skill, perform variable substitution, and prepend the
 /// [`skill_context_header`] so every consumer (the `skill` tool, `--skill`, `/skill`,
-/// `spawn_agent`'s skill delegation, and `agsh skill show`) sees the skill's base directory.
+/// `spawn_agent`'s skill delegation, and `meka skill show`) sees the skill's base directory.
 pub async fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<String, String> {
     let content = tokio::fs::read_to_string(&skill.body_path)
         .await
@@ -292,7 +292,7 @@ pub async fn load_skill_body(skill: &Skill, session_id: Option<&str>) -> Result<
 
 /// Build the one-line context header prepended to a skill body by [`load_skill_body`]. Points the
 /// agent at the skill's directory so bare filenames in the body (bundled scripts, data files)
-/// resolve correctly without the author having to spell out `${AGSH_SKILL_DIR}` on every reference.
+/// resolve correctly without the author having to spell out `${MEKA_SKILL_DIR}` on every reference.
 fn skill_context_header(skill: &Skill) -> String {
     format!(
         "Base directory for this skill and its bundled files: {}",
@@ -301,9 +301,9 @@ fn skill_context_header(skill: &Skill) -> String {
 }
 
 fn substitute_variables(text: &str, skill: &Skill, session_id: Option<&str>) -> String {
-    let mut result = text.replace("${AGSH_SKILL_DIR}", &skill.source_dir.display().to_string());
+    let mut result = text.replace("${MEKA_SKILL_DIR}", &skill.source_dir.display().to_string());
     if let Some(id) = session_id {
-        result = result.replace("${AGSH_SESSION_ID}", id);
+        result = result.replace("${MEKA_SESSION_ID}", id);
     }
     result
 }
@@ -348,7 +348,7 @@ pub fn validate_skill_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve `~/.config/agsh/skills/<name>` for a given skill name. Returns `None` if the agsh config
+/// Resolve `~/.config/meka/skills/<name>` for a given skill name. Returns `None` if the meka config
 /// directory cannot be determined. Performs no I/O and does not validate the name — callers are
 /// expected to call [`validate_skill_name`] first.
 pub fn skill_dir_for(name: &str) -> Option<PathBuf> {
@@ -382,8 +382,8 @@ pub fn render_template(
     let _ = writeln!(out, "# {}", name);
     out.push('\n');
     out.push_str(
-        "Skill body. Use `${AGSH_SKILL_DIR}` to reference files bundled in this skill's\n\
-         directory, or `${AGSH_SESSION_ID}` for the active session UUID.\n",
+        "Skill body. Use `${MEKA_SKILL_DIR}` to reference files bundled in this skill's\n\
+         directory, or `${MEKA_SESSION_ID}` for the active session UUID.\n",
     );
     out
 }
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_unknown_frontmatter_keys_are_ignored() {
-        // Skills authored for Claude Code carry keys agsh doesn't model (when_to_use,
+        // Skills authored for Claude Code carry keys meka doesn't model (when_to_use,
         // allowed-tools, hooks, ...). serde ignores unknown fields, so such a skill still parses on
         // a `description`.
         let temp = tempfile::tempdir().expect("tempdir");
@@ -560,7 +560,7 @@ mod tests {
             "---\n\
              description: X\n\
              ---\n\
-             Path: ${AGSH_SKILL_DIR}\nSession: ${AGSH_SESSION_ID}\n",
+             Path: ${MEKA_SKILL_DIR}\nSession: ${MEKA_SESSION_ID}\n",
         );
 
         let skill_path = temp.path().join("var-skill");
@@ -583,7 +583,7 @@ mod tests {
             "---\n\
              description: X\n\
              ---\n\
-             Session: ${AGSH_SESSION_ID}\n",
+             Session: ${MEKA_SESSION_ID}\n",
         );
 
         let skill_path = temp.path().join("var-skill");
@@ -591,7 +591,7 @@ mod tests {
             .expect("load");
 
         let body = load_skill_body(&skill, None).await.expect("body");
-        assert!(body.contains("Session: ${AGSH_SESSION_ID}"));
+        assert!(body.contains("Session: ${MEKA_SESSION_ID}"));
     }
 
     fn valid_frontmatter(description: &str) -> String {

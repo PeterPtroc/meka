@@ -39,7 +39,7 @@ impl Highlighter for UserInputHighlighter {
 
 const CYCLE_PERMISSION_SENTINEL: &str = "__cycle_permission__";
 
-struct AgshPrompt {
+struct MekaPrompt {
     shared_permission: SharedPermission,
     show_path: bool,
     /// Per-session working directory shared with the agent and the `/cd` slash command. Reading
@@ -48,13 +48,13 @@ struct AgshPrompt {
     cwd: crate::agent::SharedCwd,
 }
 
-impl Prompt for AgshPrompt {
+impl Prompt for MekaPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         if self.show_path {
             let path = crate::agent::cwd_snapshot(&self.cwd);
-            Cow::Owned(format!("agsh {} ", shorten_path_with_tilde(&path)))
+            Cow::Owned(format!("meka {} ", shorten_path_with_tilde(&path)))
         } else {
-            Cow::Borrowed("agsh ")
+            Cow::Borrowed("meka ")
         }
     }
 
@@ -360,7 +360,7 @@ pub fn run_repl(
     RELAY.install(printer.clone());
 
     let mut editor = build_reedline_editor(input_style, printer);
-    let prompt = AgshPrompt {
+    let prompt = MekaPrompt {
         shared_permission: shared_permission.clone(),
         show_path: show_path_in_prompt,
         cwd: cwd.clone(),

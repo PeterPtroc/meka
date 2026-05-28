@@ -1,4 +1,4 @@
-//! `skill` tool: loads a named skill body (with `${AGSH_SKILL_DIR}` and `${AGSH_SESSION_ID}`
+//! `skill` tool: loads a named skill body (with `${MEKA_SKILL_DIR}` and `${MEKA_SESSION_ID}`
 //! substitution) so its instructions become available to the agent on demand.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{Tool, ToolOutput, util::require_str};
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
     skills::{self, Skill, SkillCache},
@@ -79,7 +79,7 @@ impl Tool for SkillTool {
 
         let body = skills::load_skill_body(skill, session_id.as_deref())
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "skill".to_string(),
                 message: error,
             })?;

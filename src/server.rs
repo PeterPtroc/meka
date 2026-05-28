@@ -1,4 +1,4 @@
-//! `agsh serve` subcommand entry point. Exposes the agent over HTTP+JSON for programmatic
+//! `meka serve` subcommand entry point. Exposes the agent over HTTP+JSON for programmatic
 //! clients (bots, scripts, web UIs). See the HTTP API docs for the full wire
 //! specification; this module owns the implementation.
 //!
@@ -38,7 +38,7 @@ use crate::{
     session::SessionManager,
 };
 
-/// Run agsh as an HTTP server until the listener stops accepting (e.g. on SIGTERM after the
+/// Run meka as an HTTP server until the listener stops accepting (e.g. on SIGTERM after the
 /// graceful-shutdown drain completes). The signature mirrors [`crate::acp::run_acp`] for
 /// consistency with the existing dispatch in `main::async_main`.
 pub async fn run_serve(
@@ -73,7 +73,7 @@ pub async fn run_serve(
     let credential = config
         .auth_credential
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("agsh serve requires a configured provider credential"))?;
+        .ok_or_else(|| anyhow::anyhow!("meka serve requires a configured provider credential"))?;
 
     let shared = Arc::new(
         crate::build_shared_deps(
@@ -87,7 +87,7 @@ pub async fn run_serve(
     );
 
     #[cfg(debug_assertions)]
-    let shared = if std::env::var("AGSH_ACP_MOCK_PROVIDER").as_deref() == Ok("1") {
+    let shared = if std::env::var("MEKA_ACP_MOCK_PROVIDER").as_deref() == Ok("1") {
         let rounds = crate::provider::mock::load_script_from_env()
             .map_err(|error| anyhow::anyhow!("load mock provider script: {}", error))?
             .unwrap_or_default();
@@ -99,7 +99,7 @@ pub async fn run_serve(
         new_inner
             .mcp_context
             .set_provider(Arc::clone(&new_inner.provider));
-        tracing::info!("AGSH_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
+        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
         Arc::new(new_inner)
     } else {
         shared
@@ -120,7 +120,7 @@ pub async fn run_serve(
         .await
         .map_err(|error| anyhow::anyhow!("failed to bind {}: {}", bind_addr, error))?;
     let local = listener.local_addr()?;
-    tracing::info!("agsh serve: listening on {}", local);
+    tracing::info!("meka serve: listening on {}", local);
 
     // The timeout wraps only the post-signal drain, not the entire serve future.
     // Wrapping the whole future would start the timer at construction, causing the
@@ -136,7 +136,7 @@ pub async fn run_serve(
     let serve_handle = tokio::spawn(serve_future);
 
     shutdown_signal().await;
-    tracing::info!("agsh serve: drain begin");
+    tracing::info!("meka serve: drain begin");
     state.shutdown.cancel();
     drain_active_sessions(&state).await;
     let _ = drain_tx.send(());
@@ -147,9 +147,9 @@ pub async fn run_serve(
     // Flush the SQLite WAL before exit so a quick restart doesn't pay WAL-replay cost.
     // Best-effort — SQLite recovers from an unflushed WAL automatically.
     if let Err(error) = state.shared.session_manager.checkpoint().await {
-        tracing::warn!("agsh serve: WAL checkpoint on shutdown failed: {}", error);
+        tracing::warn!("meka serve: WAL checkpoint on shutdown failed: {}", error);
     } else {
-        tracing::info!("agsh serve: WAL checkpoint complete");
+        tracing::info!("meka serve: WAL checkpoint complete");
     }
     match drain_result {
         Ok(join_result) => join_result
@@ -157,11 +157,11 @@ pub async fn run_serve(
             .map_err(|error| anyhow::anyhow!("server error: {}", error))?,
         Err(_elapsed) => {
             tracing::warn!(
-                "agsh serve: drain exceeded {}s — forcing exit",
+                "meka serve: drain exceeded {}s — forcing exit",
                 shutdown_drain_timeout.as_secs()
             );
             // Non-zero exit so systemd / container orchestrators can distinguish forced
-            // abort from a clean drain. Same semantics as `agsh acp`.
+            // abort from a clean drain. Same semantics as `meka acp`.
             std::process::exit(1);
         }
     }
@@ -289,7 +289,7 @@ async fn inject_problem_instance(
     // Problem Details are sub-KB in practice; the 64 KB cap is a safety net.
     // On failure (body exceeds the limit or the stream errors), we return
     // the status + headers with an empty body — the original stream is already
-    // consumed and can't be replayed. This is acceptable because agsh never
+    // consumed and can't be replayed. This is acceptable because meka never
     // produces a Problem Detail anywhere near this size.
     const PROBLEM_DETAIL_BUFFER_LIMIT: usize = 64 * 1024;
     let bytes = match axum::body::to_bytes(body, PROBLEM_DETAIL_BUFFER_LIMIT).await {

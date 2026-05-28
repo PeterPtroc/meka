@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// Why an [`Agent::run_turn`] invocation finished cleanly. Callers that drive a user-facing
 /// protocol (e.g. the ACP `session/prompt` response) use this to map to a protocol-level stop
 /// reason; REPL and one-shot callers discard it. `Interrupted` is not represented here — it
-/// surfaces as `Err(AgshError::Interrupted)` so the success-path return type stays straightforward.
+/// surfaces as `Err(MekaError::Interrupted)` so the success-path return type stays straightforward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     /// The model returned a natural end-of-turn (or an unrecognised stop reason — treated as
@@ -37,7 +37,7 @@ pub enum TurnOutcome {
 pub type SharedCwd = Arc<RwLock<PathBuf>>;
 
 /// Read the current value of [`SharedCwd`]. Recovers from a poisoned lock by extracting the inner
-/// value; agsh never panics with the cwd lock held, so the only way to see a poisoned lock is a
+/// value; meka never panics with the cwd lock held, so the only way to see a poisoned lock is a
 /// separate bug that already triggered, and falling back to the stored value beats crashing the
 /// agent on every subsequent tool call.
 pub fn cwd_snapshot(cwd: &SharedCwd) -> PathBuf {
@@ -71,7 +71,7 @@ pub fn test_cwd() -> SharedCwd {
 use crate::{
     context,
     conversation::Conversation,
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     frontend::{Frontend, FrontendEvent, PermissionOutcome, PermissionRequest},
     permission::SharedPermission,
     provider::{ContentBlock, Message, Provider, Role, StopReason, StreamEvent, ToolDefinition},
@@ -109,7 +109,7 @@ pub struct AgentOptions {
     /// User-authored instructions, surfaced in the system prompt and to sub-agents. Per-run
     /// `--instructions` overrides the config-file value.
     pub user_instructions: Option<String>,
-    /// Pre-turn MCP readiness gate. When true, a turn is rejected with `AgshError::McpTurnGated`
+    /// Pre-turn MCP readiness gate. When true, a turn is rejected with `MekaError::McpTurnGated`
     /// if any enabled server isn't `Connected` after [`Self::mcp_grace`].
     pub mcp_strict: bool,
     /// Max time to wait for still-`Pending` MCP servers to reach `Connected` before applying the
@@ -200,7 +200,7 @@ impl Agent {
     }
 
     /// Swap the provider after construction. Used by the ACP integration test path
-    /// (`AGSH_ACP_MOCK_PROVIDER=1`) so the test can drive a scripted
+    /// (`MEKA_ACP_MOCK_PROVIDER=1`) so the test can drive a scripted
     /// [`crate::provider::mock::MockProvider`] without going through the credential / HTTP-client
     /// setup that `create_agent_from_config` performs for real providers. Debug builds only —
     /// release builds don't include it.
@@ -344,7 +344,7 @@ impl Agent {
                 .iter()
                 .map(|(name, state)| (name.clone(), state.label().to_string()))
                 .collect();
-            Err(AgshError::McpTurnGated { servers: summary })
+            Err(MekaError::McpTurnGated { servers: summary })
         } else {
             let names: Vec<&str> = not_ready.iter().map(|(n, _)| n.as_str()).collect();
             tracing::warn!(
@@ -380,7 +380,7 @@ impl Agent {
 
         self.frontend.emit(FrontendEvent::TurnStarted).await;
 
-        let sid = session_id.ok_or(AgshError::Config("session_id not set".into()))?;
+        let sid = session_id.ok_or(MekaError::Config("session_id not set".into()))?;
 
         // Keep the shared session ID in sync so scratchpad tools can access it.
         *self.shared_session_id.write().await = Some(sid);
@@ -469,13 +469,13 @@ impl Agent {
         let result: Result<TurnOutcome> = 'turn: {
             loop {
                 if cancellation.is_cancelled() {
-                    break 'turn Err(AgshError::Interrupted);
+                    break 'turn Err(MekaError::Interrupted);
                 }
                 // Bail out if the frontend has noticed its client went away (e.g. ACP stdio
                 // disconnect). No point burning more provider tokens for an audience that won't see
                 // the output. REPL frontends report `false` here, so this is a no-op for them.
                 if self.frontend.client_disconnected() {
-                    break 'turn Err(AgshError::Interrupted);
+                    break 'turn Err(MekaError::Interrupted);
                 }
 
                 let api_messages: Arc<[Message]> = if messages.len() > turn_start_len {
@@ -565,7 +565,7 @@ impl Agent {
                 messages.append(assistant_message.clone());
 
                 if cancellation.is_cancelled() {
-                    break 'turn Err(AgshError::Interrupted);
+                    break 'turn Err(MekaError::Interrupted);
                 }
 
                 let assistant_event = crate::conversation::Event::Append(assistant_message.clone());
@@ -662,14 +662,14 @@ impl Agent {
         }
 
         match &result {
-            Err(AgshError::Interrupted) if !user_saved => {
+            Err(MekaError::Interrupted) if !user_saved => {
                 let user_event =
                     crate::conversation::Event::Append(Message::user(augmented_input.as_str()));
                 if let Err(error) = self.session_manager.save_event(sid, &user_event).await {
                     tracing::error!("failed to save user message on interruption: {}", error);
                 }
             }
-            Err(error) if !matches!(error, AgshError::Interrupted) && !user_saved => {
+            Err(error) if !matches!(error, MekaError::Interrupted) && !user_saved => {
                 messages.pop_unsaved();
             }
             _ => {}
@@ -829,7 +829,7 @@ impl Agent {
                     // Treat as terminal: if the worker emits Error then closes the channel with
                     // Ok(()), a log-and-continue would silently truncate the turn to EndTurn.
                     tracing::error!("stream error: {}", error);
-                    return Err(crate::error::AgshError::Provider(error));
+                    return Err(crate::error::MekaError::Provider(error));
                 }
             }
         }
@@ -840,13 +840,13 @@ impl Agent {
 
         match stream_handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(AgshError::Interrupted)) => {
+            Ok(Err(MekaError::Interrupted)) => {
                 // Interrupted — fall through to return partial content. The caller detects
                 // interruption via the cancellation token.
             }
             Ok(Err(error)) => return Err(error),
             Err(join_error) => {
-                return Err(AgshError::Provider(format!(
+                return Err(MekaError::Provider(format!(
                     "stream task panicked: {}",
                     join_error
                 )));
@@ -1034,7 +1034,7 @@ impl Agent {
             crate::mcp::with_session_frontend(frontend, async move {
                 match tool.execute(input, cancellation).await {
                     Ok(output) => output,
-                    Err(AgshError::Interrupted) => crate::tools::ToolOutput::text(
+                    Err(MekaError::Interrupted) => crate::tools::ToolOutput::text(
                         "Tool execution interrupted.".to_string(),
                         true,
                     ),
@@ -1054,13 +1054,13 @@ impl Agent {
         messages: &mut Conversation,
     ) -> Result<()> {
         let Some(sid) = *session_id else {
-            return Err(AgshError::Config(
+            return Err(MekaError::Config(
                 "no active session to compact".to_string(),
             ));
         };
 
         if messages.is_empty() {
-            return Err(AgshError::Config("no messages to compact".to_string()));
+            return Err(MekaError::Config("no messages to compact".to_string()));
         }
 
         let system_prompt = "You are a conversation summarizer. Produce a structured summary \
@@ -1127,7 +1127,7 @@ impl Agent {
 
         let summary_text = summary_message.text_content();
         if summary_text.is_empty() {
-            return Err(AgshError::Provider(
+            return Err(MekaError::Provider(
                 "LLM returned an empty summary".to_string(),
             ));
         }
@@ -1169,7 +1169,7 @@ impl Agent {
             .find(|e| matches!(e, crate::conversation::Event::CompactBoundary { .. }))
             .cloned()
             .ok_or_else(|| {
-                AgshError::Internal(
+                MekaError::Internal(
                     "compact boundary missing after replace_for_compaction".to_string(),
                 )
             })?;

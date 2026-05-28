@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{Tool, ToolOutput};
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     image::{build_image_tool_output, classify_bytes},
     permission::Permission,
     provider::ToolDefinition,
@@ -74,7 +74,7 @@ impl Tool for RenderImageTool {
                 ));
             }
             (None, None) => {
-                return Err(AgshError::ToolExecution {
+                return Err(MekaError::ToolExecution {
                     tool_name: "render_image".to_string(),
                     message: "missing `from_scratchpad` or `base64` parameter".to_string(),
                 });
@@ -84,14 +84,14 @@ impl Tool for RenderImageTool {
                     self.session_id
                         .read()
                         .await
-                        .ok_or_else(|| AgshError::ToolExecution {
+                        .ok_or_else(|| MekaError::ToolExecution {
                             tool_name: "render_image".to_string(),
                             message: "no active session".to_string(),
                         })?;
                 self.session_manager
                     .load_tool_output(session_id, name)
                     .await?
-                    .ok_or_else(|| AgshError::ToolExecution {
+                    .ok_or_else(|| MekaError::ToolExecution {
                         tool_name: "render_image".to_string(),
                         message: format!("scratchpad entry \"{}\" not found", name),
                     })?

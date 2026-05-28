@@ -31,7 +31,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     config::{McpServerConfig, McpTransport},
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::Provider,
     session::TokenStore,
@@ -63,7 +63,7 @@ pub const ALLOWED_IMAGE_MIME_TYPES: &[&str] =
 pub const MCP_AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 pub(crate) type McpRunningService =
-    rmcp::service::RunningService<RoleClient, handler::AgshClientHandler>;
+    rmcp::service::RunningService<RoleClient, handler::MekaClientHandler>;
 
 tokio::task_local! {
     /// Per-task override for the cwd reported in MCP `roots/list`. When an agent dispatches an MCP
@@ -239,15 +239,15 @@ impl ServerEntry {
     pub(crate) async fn require_connected(&self) -> Result<Peer<RoleClient>> {
         match &*self.state.read().await {
             ServerState::Connected { service } => Ok(service.peer().clone()),
-            ServerState::Pending => Err(AgshError::McpConnection {
+            ServerState::Pending => Err(MekaError::McpConnection {
                 server_name: self.server_name.clone(),
                 message: "server is still connecting; try again".to_string(),
             }),
-            ServerState::Failed { error, .. } => Err(AgshError::McpConnection {
+            ServerState::Failed { error, .. } => Err(MekaError::McpConnection {
                 server_name: self.server_name.clone(),
                 message: format!("server failed to connect: {}", error),
             }),
-            ServerState::Disabled => Err(AgshError::McpConnection {
+            ServerState::Disabled => Err(MekaError::McpConnection {
                 server_name: self.server_name.clone(),
                 message: "server is disabled in config".to_string(),
             }),
@@ -292,7 +292,7 @@ impl ServerEntry {
             McpTransport::Stdio => 1,
             McpTransport::Http => 5,
         };
-        let mut last_error: Option<AgshError> = None;
+        let mut last_error: Option<MekaError> = None;
         for attempt in 0..max_attempts {
             if attempt > 0 {
                 // 1s, 2s, 4s, 8s, 16s, capped at 30s.
@@ -343,14 +343,14 @@ impl ServerEntry {
                         attempt + 1,
                         join_error
                     );
-                    last_error = Some(AgshError::McpConnection {
+                    last_error = Some(MekaError::McpConnection {
                         server_name: self.server_name.clone(),
                         message: format!("reconnect task join error: {}", join_error),
                     });
                 }
             }
         }
-        Err(last_error.unwrap_or_else(|| AgshError::McpConnection {
+        Err(last_error.unwrap_or_else(|| MekaError::McpConnection {
             server_name: self.server_name.clone(),
             message: format!("exhausted {} reconnect attempts", max_attempts),
         }))
@@ -362,9 +362,9 @@ impl ServerEntry {
 pub struct McpRuntimeConfig {
     /// Per-server wrap around connect + `initialize` + `list_tools`.
     pub connect_timeout: std::time::Duration,
-    /// Max concurrent stdio spawns. Defaults to 3 (env `AGSH_MCP_STDIO_CONCURRENCY`).
+    /// Max concurrent stdio spawns. Defaults to 3 (env `MEKA_MCP_STDIO_CONCURRENCY`).
     pub stdio_concurrency: usize,
-    /// Max concurrent HTTP connects. Defaults to 20 (env `AGSH_MCP_HTTP_CONCURRENCY`).
+    /// Max concurrent HTTP connects. Defaults to 20 (env `MEKA_MCP_HTTP_CONCURRENCY`).
     pub http_concurrency: usize,
 }
 
@@ -372,8 +372,8 @@ impl McpRuntimeConfig {
     pub fn from_config(config: &crate::config::ResolvedConfig) -> Self {
         Self {
             connect_timeout: config.mcp_connect_timeout,
-            stdio_concurrency: resolve_concurrency_env("AGSH_MCP_STDIO_CONCURRENCY", 3),
-            http_concurrency: resolve_concurrency_env("AGSH_MCP_HTTP_CONCURRENCY", 20),
+            stdio_concurrency: resolve_concurrency_env("MEKA_MCP_STDIO_CONCURRENCY", 3),
+            http_concurrency: resolve_concurrency_env("MEKA_MCP_HTTP_CONCURRENCY", 20),
         }
     }
 }
@@ -424,24 +424,24 @@ impl McpClientManager {
             }
 
             if config.name.is_empty() {
-                return Err(AgshError::McpConnection {
+                return Err(MekaError::McpConnection {
                     server_name: "(empty)".to_string(),
                     message: "server name must not be empty".to_string(),
                 });
             }
 
-            // Reject anything that would collide with agsh-internal names or our
+            // Reject anything that would collide with meka-internal names or our
             // `mcp__<server>__<tool>` namespace separator.
             if crate::mcp::sanitize::is_reserved_server_name(&config.name) {
-                return Err(AgshError::McpConnection {
+                return Err(MekaError::McpConnection {
                     server_name: config.name.clone(),
-                    message: "server name is reserved (agsh, ide, or mcp_*)".to_string(),
+                    message: "server name is reserved (meka, ide, or mcp_*)".to_string(),
                 });
             }
 
             let normalised = crate::mcp::sanitize::normalize_server_name(&config.name);
             if normalised != config.name {
-                return Err(AgshError::McpConnection {
+                return Err(MekaError::McpConnection {
                     server_name: config.name.clone(),
                     message: format!(
                         "server name contains characters not allowed in tool prefixes (would normalise to '{}')",
@@ -451,7 +451,7 @@ impl McpClientManager {
             }
 
             if config.name.contains("__") {
-                return Err(AgshError::McpConnection {
+                return Err(MekaError::McpConnection {
                     server_name: config.name.clone(),
                     message: "server name must not contain '__' (reserved as namespace separator)"
                         .to_string(),
@@ -459,7 +459,7 @@ impl McpClientManager {
             }
 
             if servers.contains_key(&config.name) {
-                return Err(AgshError::McpConnection {
+                return Err(MekaError::McpConnection {
                     server_name: config.name.clone(),
                     message: "duplicate server name".to_string(),
                 });
@@ -668,7 +668,7 @@ impl McpClientManager {
         let tools = peer
             .list_all_tools()
             .await
-            .map_err(|error| AgshError::McpConnection {
+            .map_err(|error| MekaError::McpConnection {
                 server_name: server_name.to_string(),
                 message: format!("list_tools failed: {}", error),
             })?;
@@ -820,7 +820,7 @@ impl McpClientManager {
     /// (b) not registering adapters, and (c) capturing the resolution source for display.
     pub async fn list_advertised_tools(&self, server_name: &str) -> Result<Vec<AdvertisedTool>> {
         let Some(entry) = self.servers.get(server_name) else {
-            return Err(AgshError::McpConnection {
+            return Err(MekaError::McpConnection {
                 server_name: server_name.to_string(),
                 message: format!("no MCP server named '{}'", server_name),
             });
@@ -831,7 +831,7 @@ impl McpClientManager {
         let tools = peer
             .list_all_tools()
             .await
-            .map_err(|error| AgshError::McpConnection {
+            .map_err(|error| MekaError::McpConnection {
                 server_name: server_name.to_string(),
                 message: format!("list_tools failed: {}", error),
             })?;
@@ -1071,7 +1071,7 @@ pub(crate) fn resolve_tool_permission(
     .map(|(permission, _)| permission)
 }
 
-/// Identifies which step of the 5-step resolution chain produced a tool's permission. Used by `agsh
+/// Identifies which step of the 5-step resolution chain produced a tool's permission. Used by `meka
 /// mcp tools <name>` so users can see which knob is driving each tool's classification when editing
 /// allow/block lists or per-tool overrides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1098,7 +1098,7 @@ impl PermissionSource {
 
 /// A tool advertised by an MCP server, paired with the resolved permission and the source step of
 /// the resolution chain. Returned by [`McpClientManager::list_advertised_tools`] and printed by
-/// `agsh mcp tools <server>`. The raw `readOnlyHint` value isn't carried here because
+/// `meka mcp tools <server>`. The raw `readOnlyHint` value isn't carried here because
 /// [`PermissionSource::ReadOnlyHint`] already signals when the hint drove the decision; downstream
 /// renderers that want the raw value can re-query.
 pub struct AdvertisedTool {
@@ -1117,7 +1117,7 @@ pub struct AdvertisedTool {
 }
 
 /// Same resolution as [`resolve_tool_permission`] but also returns which step of the chain fired,
-/// so `agsh mcp tools` can show the user exactly why a given tool has its current permission.
+/// so `meka mcp tools` can show the user exactly why a given tool has its current permission.
 fn resolve_tool_permission_with_source(
     server_name: &str,
     tool_raw_name: &str,
@@ -1131,7 +1131,7 @@ fn resolve_tool_permission_with_source(
     {
         let permission = raw
             .parse::<Permission>()
-            .map_err(|_| AgshError::McpConnection {
+            .map_err(|_| MekaError::McpConnection {
                 server_name: server_name.to_string(),
                 message: format!(
                     "invalid tool_permissions['{}'] = '{}': expected \
@@ -1145,7 +1145,7 @@ fn resolve_tool_permission_with_source(
     if let Some(raw) = server_config.permission.as_deref() {
         let permission = raw
             .parse::<Permission>()
-            .map_err(|_| AgshError::McpConnection {
+            .map_err(|_| MekaError::McpConnection {
                 server_name: server_name.to_string(),
                 message: format!(
                     "invalid permission '{}': expected 'none', 'read', \
@@ -1174,7 +1174,7 @@ fn resolve_tool_permission_with_source(
     Ok((Permission::Write, PermissionSource::Fallback))
 }
 
-/// Shared context threaded into every [`handler::AgshClientHandler`] so notification callbacks and
+/// Shared context threaded into every [`handler::MekaClientHandler`] so notification callbacks and
 /// server-to-client requests (sampling, list_roots, elicitation) can reach the rest of the agent.
 /// All slots are optional because the handler is constructed before the agent/provider exist — they
 /// are filled in post-construction by `main.rs` using the `set_*` helpers.
@@ -1259,12 +1259,12 @@ pub async fn list_resources(entry: &Arc<ServerEntry>) -> Result<Vec<Resource>> {
             let peer = entry.require_connected().await?;
             peer.list_all_resources()
                 .await
-                .map_err(|error| AgshError::McpConnection {
+                .map_err(|error| MekaError::McpConnection {
                     server_name: entry.server_name.clone(),
                     message: format!("list_resources failed: {}", error),
                 })
         }
-        Err(error) => Err(AgshError::McpConnection {
+        Err(error) => Err(MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("list_resources failed: {}", error),
         }),
@@ -1281,12 +1281,12 @@ pub async fn read_resource(entry: &Arc<ServerEntry>, uri: String) -> Result<Read
             let peer = entry.require_connected().await?;
             peer.read_resource(params)
                 .await
-                .map_err(|error| AgshError::McpConnection {
+                .map_err(|error| MekaError::McpConnection {
                     server_name: entry.server_name.clone(),
                     message: format!("read_resource({}) failed: {}", uri, error),
                 })
         }
-        Err(error) => Err(AgshError::McpConnection {
+        Err(error) => Err(MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("read_resource({}) failed: {}", uri, error),
         }),
@@ -1302,12 +1302,12 @@ pub async fn list_prompts(entry: &Arc<ServerEntry>) -> Result<Vec<Prompt>> {
             let peer = entry.require_connected().await?;
             peer.list_all_prompts()
                 .await
-                .map_err(|error| AgshError::McpConnection {
+                .map_err(|error| MekaError::McpConnection {
                     server_name: entry.server_name.clone(),
                     message: format!("list_prompts failed: {}", error),
                 })
         }
-        Err(error) => Err(AgshError::McpConnection {
+        Err(error) => Err(MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("list_prompts failed: {}", error),
         }),
@@ -1319,7 +1319,7 @@ pub async fn subscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Result
     let params = rmcp::model::SubscribeRequestParams::new(uri.clone());
     peer.subscribe(params)
         .await
-        .map_err(|error| AgshError::McpConnection {
+        .map_err(|error| MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("subscribe({}) failed: {}", uri, error),
         })
@@ -1330,7 +1330,7 @@ pub async fn unsubscribe_resource(entry: &Arc<ServerEntry>, uri: String) -> Resu
     let params = rmcp::model::UnsubscribeRequestParams::new(uri.clone());
     peer.unsubscribe(params)
         .await
-        .map_err(|error| AgshError::McpConnection {
+        .map_err(|error| MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("unsubscribe({}) failed: {}", uri, error),
         })
@@ -1352,12 +1352,12 @@ pub async fn get_prompt(
             let peer = entry.require_connected().await?;
             peer.get_prompt(params)
                 .await
-                .map_err(|error| AgshError::McpConnection {
+                .map_err(|error| MekaError::McpConnection {
                     server_name: entry.server_name.clone(),
                     message: format!("get_prompt({}) failed: {}", name, error),
                 })
         }
-        Err(error) => Err(AgshError::McpConnection {
+        Err(error) => Err(MekaError::McpConnection {
             server_name: entry.server_name.clone(),
             message: format!("get_prompt({}) failed: {}", name, error),
         }),
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[test]
     fn permission_source_labels_match_config_keys() {
-        // The labels printed by `agsh mcp tools` must match the config keys users would edit to
+        // The labels printed by `meka mcp tools` must match the config keys users would edit to
         // change a classification.
         assert_eq!(PermissionSource::ToolOverride.as_str(), "tool_permission");
         assert_eq!(
@@ -1707,7 +1707,7 @@ mod tests {
             .await
             .expect_err("pending should not yield a peer");
         match err {
-            AgshError::McpConnection {
+            MekaError::McpConnection {
                 server_name,
                 message,
             } => {
@@ -1726,7 +1726,7 @@ mod tests {
             at: std::time::Instant::now(),
         };
         let err = entry.require_connected().await.unwrap_err();
-        assert!(matches!(err, AgshError::McpConnection { .. }));
+        assert!(matches!(err, MekaError::McpConnection { .. }));
     }
 
     #[tokio::test]
@@ -1735,7 +1735,7 @@ mod tests {
         *entry.state.write().await = ServerState::Disabled;
         let err = entry.require_connected().await.unwrap_err();
         match err {
-            AgshError::McpConnection { message, .. } => assert!(message.contains("disabled")),
+            MekaError::McpConnection { message, .. } => assert!(message.contains("disabled")),
             other => panic!("expected McpConnection, got: {:?}", other),
         }
     }
@@ -1789,7 +1789,7 @@ mod tests {
     #[test]
     fn resolve_concurrency_env_uses_default_when_unset() {
         // Unique var names so parallel tests can't race on env state.
-        let var = "AGSH_TEST_CONCURRENCY_UNSET";
+        let var = "MEKA_TEST_CONCURRENCY_UNSET";
         unsafe {
             std::env::remove_var(var);
         }
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn resolve_concurrency_env_parses_positive_override() {
-        let var = "AGSH_TEST_CONCURRENCY_OVERRIDE";
+        let var = "MEKA_TEST_CONCURRENCY_OVERRIDE";
         unsafe {
             std::env::set_var(var, "11");
         }
@@ -1810,7 +1810,7 @@ mod tests {
 
     #[test]
     fn resolve_concurrency_env_falls_back_on_garbage() {
-        let var = "AGSH_TEST_CONCURRENCY_GARBAGE";
+        let var = "MEKA_TEST_CONCURRENCY_GARBAGE";
         unsafe {
             std::env::set_var(var, "not-a-number");
         }
@@ -1823,7 +1823,7 @@ mod tests {
     #[test]
     fn resolve_concurrency_env_rejects_zero() {
         // Zero would deadlock `buffer_unordered(0)`; must fall back.
-        let var = "AGSH_TEST_CONCURRENCY_ZERO";
+        let var = "MEKA_TEST_CONCURRENCY_ZERO";
         unsafe {
             std::env::set_var(var, "0");
         }

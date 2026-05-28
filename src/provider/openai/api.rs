@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{
         ContentBlock, Message, Provider, Role, StopReason, StreamEvent, TokenUsage,
         ToolCallAccumulator, ToolDefinition, finalize_tool_call_accumulators,
@@ -174,7 +174,7 @@ impl OpenAiProvider {
         let choice = response
             .get("choices")
             .and_then(|choices| choices.get(0))
-            .ok_or_else(|| AgshError::Provider("no choices in response".to_string()))?;
+            .ok_or_else(|| MekaError::Provider("no choices in response".to_string()))?;
 
         let finish_reason = choice
             .get("finish_reason")
@@ -185,7 +185,7 @@ impl OpenAiProvider {
 
         let assistant_message = choice
             .get("message")
-            .ok_or_else(|| AgshError::Provider("no 'message' in choice".to_string()))?;
+            .ok_or_else(|| MekaError::Provider("no 'message' in choice".to_string()))?;
         let mut content_blocks = Vec::new();
 
         if let Some(text) = assistant_message
@@ -206,7 +206,7 @@ impl OpenAiProvider {
                 let id = tool_call
                     .get("id")
                     .and_then(|id| id.as_str())
-                    .ok_or_else(|| AgshError::Provider("tool call missing 'id' field".to_string()))?
+                    .ok_or_else(|| MekaError::Provider("tool call missing 'id' field".to_string()))?
                     .to_string();
                 let name = tool_call
                     .get("function")
@@ -214,7 +214,7 @@ impl OpenAiProvider {
                     .and_then(|name| name.as_str())
                     .or_else(|| tool_call.get("name").and_then(|name| name.as_str()))
                     .ok_or_else(|| {
-                        AgshError::Provider("tool call missing 'function.name' field".to_string())
+                        MekaError::Provider("tool call missing 'function.name' field".to_string())
                     })?
                     .to_string();
                 let arguments_str = tool_call
@@ -296,7 +296,7 @@ impl Provider for OpenAiProvider {
             .send()
             .await
             .map_err(|error| {
-                AgshError::Provider(format!(
+                MekaError::Provider(format!(
                     "HTTP request failed: {}",
                     crate::error::format_reqwest_error(&error)
                 ))
@@ -306,17 +306,17 @@ impl Provider for OpenAiProvider {
         let response_text = response
             .text()
             .await
-            .map_err(|error| AgshError::Provider(format!("failed to read response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("failed to read response: {}", error)))?;
 
         if !status.is_success() {
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "API returned status {}: {}",
                 status, response_text
             )));
         }
 
         let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|error| AgshError::Provider(format!("invalid JSON response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("invalid JSON response: {}", error)))?;
 
         let (message, stop_reason, usage) = self.parse_non_streaming_response(&response_json)?;
         Ok((message, stop_reason, usage, Vec::new()))
@@ -343,7 +343,7 @@ impl Provider for OpenAiProvider {
             .send()
             .await
             .map_err(|error| {
-                AgshError::Provider(format!(
+                MekaError::Provider(format!(
                     "HTTP request failed: {}",
                     crate::error::format_reqwest_error(&error)
                 ))
@@ -352,7 +352,7 @@ impl Provider for OpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let response_text = response.text().await.unwrap_or_default();
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "API returned status {}: {}",
                 status, response_text
             )));
@@ -366,7 +366,7 @@ impl Provider for OpenAiProvider {
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    return Err(AgshError::Interrupted);
+                    return Err(MekaError::Interrupted);
                 }
                 event = event_stream.next() => {
                     let Some(event) = event else {
@@ -513,7 +513,7 @@ impl Provider for OpenAiProvider {
                             {
                                 tracing::trace!("stream event receiver dropped");
                             }
-                            return Err(AgshError::StreamError(error.to_string()));
+                            return Err(MekaError::StreamError(error.to_string()));
                         }
                     }
                 }

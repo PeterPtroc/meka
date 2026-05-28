@@ -257,7 +257,7 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Empty registry with the default filter — no built-ins, no MCP tools. Used by out-of-band CLI
-    /// commands that spin up a manager for a single RPC (`agsh mcp reconnect`, `agsh mcp tools`)
+    /// commands that spin up a manager for a single RPC (`meka mcp reconnect`, `meka mcp tools`)
     /// and don't need a populated registry. The `dead_code` allow keeps the helper available for
     /// future CLI subcommands that need a throwaway registry.
     #[allow(dead_code)]
@@ -300,7 +300,7 @@ impl ToolRegistry {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if tools.iter().any(|t| t.definition().name == name) {
-            return Err(crate::error::AgshError::ToolRegistration {
+            return Err(crate::error::MekaError::ToolRegistration {
                 message: format!("tool name '{}' is already registered", name),
             });
         }
@@ -309,7 +309,7 @@ impl ToolRegistry {
     }
 
     /// Replace every tool whose name starts with `mcp__<server_name>__` with the supplied set. Used
-    /// by `AgshClientHandler::on_tool_list_changed` to hot-swap a server's tools without restarting
+    /// by `MekaClientHandler::on_tool_list_changed` to hot-swap a server's tools without restarting
     /// the agent. Deferred markers for removed tool names are cleared so the registry's deferred
     /// set doesn't grow unbounded.
     pub fn replace_server_tools(&self, server_name: &str, new_tools: Vec<Arc<dyn Tool>>) {

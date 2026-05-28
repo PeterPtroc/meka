@@ -19,7 +19,7 @@ use tokio_rusqlite::Connection;
 use uuid::Uuid;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::AuthCredential,
 };
 
@@ -118,11 +118,11 @@ impl Drop for SessionLock {
 }
 
 fn default_database_path() -> Result<PathBuf> {
-    // `AGSH_DATA_DIR` is the cross-platform override — the only env var that works on every OS,
-    // mirroring how `AGSH_CONFIG_DIR` overrides the config directory. The value points at the
-    // `agsh` data dir itself (the parent that contains `sessions.db`). Useful for tests, portable
+    // `MEKA_DATA_DIR` is the cross-platform override — the only env var that works on every OS,
+    // mirroring how `MEKA_CONFIG_DIR` overrides the config directory. The value points at the
+    // `meka` data dir itself (the parent that contains `sessions.db`). Useful for tests, portable
     // installs, and isolating per-project session state from the global one.
-    if let Ok(value) = std::env::var("AGSH_DATA_DIR")
+    if let Ok(value) = std::env::var("MEKA_DATA_DIR")
         && !value.is_empty()
     {
         return Ok(PathBuf::from(value).join("sessions.db"));
@@ -131,15 +131,15 @@ fn default_database_path() -> Result<PathBuf> {
     // `dirs::data_dir()` honors XDG_DATA_HOME on Linux, returns `~/Library/Application Support` on
     // macOS, and `%APPDATA%` on Windows. No silent fallback: writing the session DB to a
     // wrong-for-the-platform path (e.g. the old Linux-only `~/.local/share` default) is worse than
-    // asking the user to set `AGSH_DATA_DIR` explicitly.
+    // asking the user to set `MEKA_DATA_DIR` explicitly.
     let base = dirs::data_dir().ok_or_else(|| {
-        AgshError::Config(
+        MekaError::Config(
             "could not determine a data directory for the session database; \
-             set AGSH_DATA_DIR to an absolute path"
+             set MEKA_DATA_DIR to an absolute path"
                 .into(),
         )
     })?;
-    Ok(base.join("agsh").join("sessions.db"))
+    Ok(base.join("meka").join("sessions.db"))
 }
 
 /// Create a directory (and any missing parents) born at mode 0700 on Unix. Avoids the umask window
@@ -209,7 +209,7 @@ impl SessionManager {
         // share lock files.
         let is_in_memory = database_path == Path::new(":memory:");
         let lock_dir = if is_in_memory {
-            std::env::temp_dir().join(format!("agsh-test-locks-{}", Uuid::new_v4()))
+            std::env::temp_dir().join(format!("meka-test-locks-{}", Uuid::new_v4()))
         } else {
             if let Some(parent) = database_path.parent() {
                 create_private_dir(parent)?;
@@ -239,7 +239,7 @@ impl SessionManager {
                 .mode(0o600)
                 .open(&database_path)
                 .map_err(|error| {
-                    AgshError::Database(format!(
+                    MekaError::Database(format!(
                         "failed to pre-touch database '{}': {}",
                         database_path.display(),
                         error
@@ -249,7 +249,7 @@ impl SessionManager {
 
         let connection = Connection::open(&database_path)
             .await
-            .map_err(|error| AgshError::Database(format!("failed to open database: {}", error)))?;
+            .map_err(|error| MekaError::Database(format!("failed to open database: {}", error)))?;
 
         // Belt-and-braces: if the file pre-existed at a more permissive mode (manual setup,
         // restored backup, etc.), tighten it now. The pre-touch above is the primary protection for
@@ -269,7 +269,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to enable foreign keys: {}", error))
+                MekaError::Database(format!("failed to enable foreign keys: {}", error))
             })?;
 
         let manager = Self {
@@ -564,12 +564,12 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to initialize schema: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to initialize schema: {}", error)))
     }
 
     /// Create a new session, optionally recording its working directory. `cwd` is persisted as an
     /// absolute path string; pass `None` only for code paths that genuinely have no cwd context
-    /// (legacy/test fixtures, `agsh tools list`). Production paths (the REPL and `agsh acp`) pass
+    /// (legacy/test fixtures, `meka tools list`). Production paths (the REPL and `meka acp`) pass
     /// the agent's current cwd so `session/list` can surface it later.
     pub async fn create_session(&self, cwd: Option<std::path::PathBuf>) -> Result<Uuid> {
         self.create_session_with_metadata(cwd, None, None, None)
@@ -612,7 +612,7 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to create session: {}", error)))?;
+            .map_err(|error| MekaError::Database(format!("failed to create session: {}", error)))?;
 
         Ok(CreatedSession {
             id: session_id,
@@ -650,7 +650,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to create child session: {}", error))
+                MekaError::Database(format!("failed to create child session: {}", error))
             })?;
 
         Ok(session_id)
@@ -659,7 +659,7 @@ impl SessionManager {
     /// Acquire an exclusive OS file lock on the session. Returns a [`SessionLock`] handle whose
     /// lifetime owns the lock; drop it (or let the process exit) to release.
     ///
-    /// The session must already exist in the database. Returns [`AgshError::SessionLocked`] if
+    /// The session must already exist in the database. Returns [`MekaError::SessionLocked`] if
     /// another live process holds the lock.
     pub fn lock_session(&self, session_id: Uuid) -> Result<SessionLock> {
         let path = self.lock_dir.join(format!("{}.lock", session_id));
@@ -670,7 +670,7 @@ impl SessionManager {
             .truncate(false)
             .open(&path)
             .map_err(|error| {
-                AgshError::Database(format!(
+                MekaError::Database(format!(
                     "failed to open session lock file '{}': {}",
                     path.display(),
                     error
@@ -681,10 +681,10 @@ impl SessionManager {
         let guard = match lock.try_write() {
             Ok(guard) => guard,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(AgshError::SessionLocked(session_id));
+                return Err(MekaError::SessionLocked(session_id));
             }
             Err(error) => {
-                return Err(AgshError::Database(format!(
+                return Err(MekaError::Database(format!(
                     "failed to acquire session lock '{}': {}",
                     path.display(),
                     error
@@ -788,7 +788,7 @@ impl SessionManager {
         event: &crate::conversation::Event,
     ) -> Result<()> {
         let (role, content) = encode_event_for_db(event)
-            .map_err(|error| AgshError::Database(format!("failed to encode event: {}", error)))?;
+            .map_err(|error| MekaError::Database(format!("failed to encode event: {}", error)))?;
         self.save_message(session_id, &role, &content).await
     }
 
@@ -814,7 +814,7 @@ impl SessionManager {
         let mut encoded: Vec<(String, String)> = Vec::with_capacity(events.len());
         for event in &events {
             let pair = encode_event_for_db(event).map_err(|error| {
-                AgshError::Database(format!("failed to encode event: {}", error))
+                MekaError::Database(format!("failed to encode event: {}", error))
             })?;
             encoded.push(pair);
         }
@@ -841,7 +841,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to save event batch atomically: {}", error))
+                MekaError::Database(format!("failed to save event batch atomically: {}", error))
             })
     }
 
@@ -928,7 +928,7 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to save message: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to save message: {}", error)))
     }
 
     /// Fetch raw rows for a session. Internal helper for [`Self::load_events`]; external consumers
@@ -953,7 +953,7 @@ impl SessionManager {
                 Ok(messages)
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to load messages: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to load messages: {}", error)))
     }
 
     pub async fn last_session_id(&self) -> Result<Option<Uuid>> {
@@ -977,7 +977,7 @@ impl SessionManager {
                 }
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to get last session: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to get last session: {}", error)))
     }
 
     pub async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
@@ -992,13 +992,13 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to check session existence: {}", error))
+                MekaError::Database(format!("failed to check session existence: {}", error))
             })
     }
 
     /// Resolve a session-ID prefix (e.g. `d64`) to the matching full UUIDs.
     ///
-    /// Used by `agsh -c <prefix>` so the user doesn't have to type the whole UUID. Capped at 16
+    /// Used by `meka -c <prefix>` so the user doesn't have to type the whole UUID. Capped at 16
     /// matches; ordered most-recent-first so the caller's "ambiguous prefix" listing leads with the
     /// session the user most likely meant.
     ///
@@ -1030,14 +1030,14 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to find sessions by prefix: {}", error))
+                MekaError::Database(format!("failed to find sessions by prefix: {}", error))
             })
     }
 
     /// List sessions, most-recent first. When `include_children` is `false`, sub-agent sessions
     /// (rows with non-NULL `parent_session_id`) are hidden — they're persisted for audit/debug but
     /// shouldn't clutter the user's view of their own conversations. Set to `true` to surface them,
-    /// e.g. via `agsh list --include-children`.
+    /// e.g. via `meka list --include-children`.
     ///
     /// `cwd_filter`, if `Some`, restricts the result set to sessions whose persisted `cwd` matches
     /// the given path (rows with NULL `cwd` are excluded — legacy rows can't be filtered by cwd
@@ -1046,7 +1046,7 @@ impl SessionManager {
     /// `cursor`, if `Some`, is a previous `next_cursor` value from this method; rows are returned
     /// strictly *after* the cursor in `(updated_at, id) DESC` order. Returns `(rows, next_cursor)`
     /// — `next_cursor` is `Some` iff there is at least one more row past `limit`. Invalid cursors
-    /// are rejected with [`AgshError::Database`].
+    /// are rejected with [`MekaError::Database`].
     pub async fn list_sessions(
         &self,
         limit: u32,
@@ -1172,7 +1172,7 @@ impl SessionManager {
                 };
                 (rows, next_cursor)
             })
-            .map_err(|error| AgshError::Database(format!("failed to list sessions: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to list sessions: {}", error)))
     }
 
     /// Fetch a single session by id without scanning the full list. Returns `Ok(None)` if the
@@ -1242,12 +1242,12 @@ impl SessionManager {
                 }
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to fetch session: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to fetch session: {}", error)))
     }
 
     /// Run `PRAGMA wal_checkpoint(TRUNCATE)` to flush the SQLite write-ahead log into the main
-    /// database file. Called from `agsh serve`'s graceful-shutdown path so a `SIGTERM` followed
-    /// by a fresh `agsh` process invocation doesn't see a long WAL replay on open. Errors are
+    /// database file. Called from `meka serve`'s graceful-shutdown path so a `SIGTERM` followed
+    /// by a fresh `meka` process invocation doesn't see a long WAL replay on open. Errors are
     /// non-fatal: SQLite recovers from an unflushed WAL on next open, so we log and continue.
     pub async fn checkpoint(&self) -> Result<()> {
         self.connection
@@ -1256,7 +1256,7 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("WAL checkpoint failed: {}", error)))
+            .map_err(|error| MekaError::Database(format!("WAL checkpoint failed: {}", error)))
     }
 
     pub async fn delete_expired_sessions(&self, retention_days: u64) -> Result<u64> {
@@ -1283,7 +1283,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to delete expired sessions: {}", error))
+                MekaError::Database(format!("failed to delete expired sessions: {}", error))
             })?;
         self.prune_orphan_lock_files().await;
         Ok(deleted)
@@ -1333,7 +1333,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!(
+                MekaError::Database(format!(
                     "failed to update session metadata atomically: {}",
                     error
                 ))
@@ -1360,7 +1360,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to update session cwd: {}", error))
+                MekaError::Database(format!("failed to update session cwd: {}", error))
             })
     }
 
@@ -1385,7 +1385,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to update session permission: {}", error))
+                MekaError::Database(format!("failed to update session permission: {}", error))
             })
     }
 
@@ -1413,7 +1413,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to update session capabilities: {}", error))
+                MekaError::Database(format!("failed to update session capabilities: {}", error))
             })
     }
 
@@ -1438,7 +1438,7 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to clear messages: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to clear messages: {}", error)))
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool> {
@@ -1455,7 +1455,7 @@ impl SessionManager {
                 Ok(deleted > 0)
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to delete session: {}", error)))?;
+            .map_err(|error| MekaError::Database(format!("failed to delete session: {}", error)))?;
         self.prune_orphan_lock_files().await;
         Ok(deleted)
     }
@@ -1470,7 +1470,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to delete all sessions: {}", error))
+                MekaError::Database(format!("failed to delete all sessions: {}", error))
             })?;
         self.prune_orphan_lock_files().await;
         Ok(deleted)
@@ -1496,7 +1496,7 @@ impl SessionManager {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to save tool output: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to save tool output: {}", error)))
     }
 
     pub async fn update_tool_output(
@@ -1519,7 +1519,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to update tool output: {}", error))
+                MekaError::Database(format!("failed to update tool output: {}", error))
             })
     }
 
@@ -1536,7 +1536,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to delete tool output: {}", error))
+                MekaError::Database(format!("failed to delete tool output: {}", error))
             })
     }
 
@@ -1574,7 +1574,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to rename tool output: {}", error))
+                MekaError::Database(format!("failed to rename tool output: {}", error))
             })
     }
 
@@ -1599,7 +1599,7 @@ impl SessionManager {
                 Ok(rows)
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to list tool outputs: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to list tool outputs: {}", error)))
     }
 
     pub async fn load_tool_output(&self, session_id: Uuid, name: &str) -> Result<Option<String>> {
@@ -1621,7 +1621,7 @@ impl SessionManager {
                 }
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to load tool output: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to load tool output: {}", error)))
     }
 
     pub async fn load_all_tool_outputs(&self, session_id: Uuid) -> Result<Vec<(String, String)>> {
@@ -1641,7 +1641,7 @@ impl SessionManager {
                 Ok(rows)
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to load tool outputs: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to load tool outputs: {}", error)))
     }
 
     /// Delete the oldest sessions until total `messages.content` size is at or below `max_bytes`.
@@ -1714,7 +1714,7 @@ impl SessionManager {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to enforce storage limit: {}", error))
+                MekaError::Database(format!("failed to enforce storage limit: {}", error))
             })?;
         self.prune_orphan_lock_files().await;
         Ok(deleted)
@@ -1756,7 +1756,7 @@ impl TokenStore {
                 }
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to load OAuth token: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to load OAuth token: {}", error)))
     }
 
     pub async fn load_mcp_credentials(&self, server_name: &str) -> Result<Option<String>> {
@@ -1777,7 +1777,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to load MCP credentials: {}", error))
+                MekaError::Database(format!("failed to load MCP credentials: {}", error))
             })
     }
 
@@ -1800,7 +1800,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to save MCP credentials: {}", error))
+                MekaError::Database(format!("failed to save MCP credentials: {}", error))
             })
     }
 
@@ -1816,7 +1816,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to clear MCP credentials: {}", error))
+                MekaError::Database(format!("failed to clear MCP credentials: {}", error))
             })
     }
 
@@ -1854,7 +1854,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to load MCP auth probe cache: {}", error))
+                MekaError::Database(format!("failed to load MCP auth probe cache: {}", error))
             })
     }
 
@@ -1877,7 +1877,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to save MCP auth probe cache: {}", error))
+                MekaError::Database(format!("failed to save MCP auth probe cache: {}", error))
             })
     }
 
@@ -1894,7 +1894,7 @@ impl TokenStore {
             })
             .await
             .map_err(|error| {
-                AgshError::Database(format!("failed to clear MCP auth probe cache: {}", error))
+                MekaError::Database(format!("failed to clear MCP auth probe cache: {}", error))
             })
     }
 
@@ -1944,7 +1944,7 @@ impl TokenStore {
                 Ok(())
             })
             .await
-            .map_err(|error| AgshError::Database(format!("failed to save OAuth token: {}", error)))
+            .map_err(|error| MekaError::Database(format!("failed to save OAuth token: {}", error)))
     }
 }
 
@@ -2074,9 +2074,9 @@ fn decode_list_cursor(token: &str) -> Result<(String, String)> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token)
-        .map_err(|error| AgshError::Database(format!("invalid list cursor: {}", error)))?;
+        .map_err(|error| MekaError::Database(format!("invalid list cursor: {}", error)))?;
     let cursor: ListSessionsCursor = serde_json::from_slice(&bytes)
-        .map_err(|error| AgshError::Database(format!("invalid list cursor: {}", error)))?;
+        .map_err(|error| MekaError::Database(format!("invalid list cursor: {}", error)))?;
     Ok((cursor.updated_at, cursor.id))
 }
 
@@ -2446,7 +2446,7 @@ mod tests {
 
         // While the lock handle is alive, a second attempt must fail.
         match manager.lock_session(session_id) {
-            Err(AgshError::SessionLocked(id)) => assert_eq!(id, session_id),
+            Err(MekaError::SessionLocked(id)) => assert_eq!(id, session_id),
             other => panic!("expected SessionLocked, got {:?}", other.map(|_| "Ok(_)")),
         }
 
@@ -2733,7 +2733,7 @@ mod tests {
         assert!(preview.len() <= 84); // 80 chars + "…"
     }
 
-    // End-to-end regression tests for `agsh list`'s preview.
+    // End-to-end regression tests for `meka list`'s preview.
     // These tests mock the complete pipeline that produces the
     // `Preview` column: build the turn-context block the agent
     // actually sends, prepend it to a user prompt the way
@@ -2764,7 +2764,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_preview_is_user_prompt_not_context_wrapper() {
-        // The canonical regression: user types a prompt, turn runs, `agsh list` must show the
+        // The canonical regression: user types a prompt, turn runs, `meka list` must show the
         // prompt — not `<context>`, not the permission/environment metadata.
         let manager = test_manager().await;
         let session_id = manager.create_session(None).await.expect("create_session");
@@ -3278,7 +3278,7 @@ mod tests {
         assert_eq!(after_flip.permission.as_deref(), Some("write"));
     }
 
-    // Child-session tests: parent→sub-agent linkage, cascade-on-delete, and `agsh list` filter
+    // Child-session tests: parent→sub-agent linkage, cascade-on-delete, and `meka list` filter
     // behavior.
 
     #[tokio::test]
@@ -3491,7 +3491,7 @@ mod tests {
         );
     }
 
-    // MCP TokenStore tests. Exercise the methods backing `agsh mcp login/logout` and the auth-probe
+    // MCP TokenStore tests. Exercise the methods backing `meka mcp login/logout` and the auth-probe
     // cache that skips unauthenticated connects after a 401. In-memory DB keeps each case hermetic.
 
     #[tokio::test]

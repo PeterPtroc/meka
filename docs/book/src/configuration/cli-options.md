@@ -1,18 +1,18 @@
 # CLI Options
 
 ```text
-agsh [OPTIONS] [PROMPT]
-agsh <COMMAND>
+meka [OPTIONS] [PROMPT]
+meka <COMMAND>
 ```
 
 ## Commands
 
 ### `setup`
 
-Run the interactive configuration wizard. Prompts for provider, authentication, model, and base URL, then writes the configuration to `~/.config/agsh/config.toml`.
+Run the interactive configuration wizard. Prompts for provider, authentication, model, and base URL, then writes the configuration to `~/.config/meka/config.toml`.
 
 ```bash
-agsh setup
+meka setup
 ```
 
 This wizard also runs automatically on first launch when no config file exists.
@@ -22,7 +22,7 @@ This wizard also runs automatically on first launch when no config file exists.
 Export a session as Markdown.
 
 ```bash
-agsh export <SESSION_ID> [-o <PATH>]
+meka export <SESSION_ID> [-o <PATH>]
 ```
 
 Use `-o -` to print to stdout. See [Sessions](../usage/sessions.md#exporting-a-session) for details.
@@ -32,8 +32,8 @@ Use `-o -` to print to stdout. See [Sessions](../usage/sessions.md#exporting-a-s
 Delete one or more sessions by UUID, or all sessions with `--all`.
 
 ```bash
-agsh delete <SESSION_ID>...
-agsh delete --all
+meka delete <SESSION_ID>...
+meka delete --all
 ```
 
 ### `list`
@@ -41,7 +41,7 @@ agsh delete --all
 List past sessions with ID, last update time, and a preview.
 
 ```bash
-agsh list [-n <LIMIT>]
+meka list [-n <LIMIT>]
 ```
 
 Default limit: 20.
@@ -53,11 +53,11 @@ Default limit: 20.
 Run the agent's first turn immediately with this text as the user message, then drop into the interactive REPL for follow-up. Pair with [`--oneshot`](#oneshot) to exit after the first turn instead of opening the REPL.
 
 ```bash
-agsh "list all files larger than 1MB in the current directory"   # first turn, then REPL
-agsh --oneshot "list all files larger than 1MB"                  # first turn, then exit
+meka "list all files larger than 1MB in the current directory"   # first turn, then REPL
+meka --oneshot "list all files larger than 1MB"                  # first turn, then exit
 ```
 
-When omitted, agsh starts the REPL with no initial input.
+When omitted, meka starts the REPL with no initial input.
 
 ## Options
 
@@ -66,40 +66,40 @@ When omitted, agsh starts the REPL with no initial input.
 Resume a session. Without a session ID, resumes the most recently updated session. With a session ID, resumes that specific session — accepts either the full UUID or any unique leading prefix (most-recent-first if the prefix matches more than one).
 
 ```bash
-agsh -c                                          # resume last session
-agsh -c 550e8400-e29b-41d4-a716-446655440000     # full UUID
-agsh -c 550e                                     # prefix; works if unique
+meka -c                                          # resume last session
+meka -c 550e8400-e29b-41d4-a716-446655440000     # full UUID
+meka -c 550e                                     # prefix; works if unique
 ```
 
-Errors if the session does not exist, the prefix matches multiple sessions (with the matching IDs listed for disambiguation), or the session is locked by another agsh instance.
+Errors if the session does not exist, the prefix matches multiple sessions (with the matching IDs listed for disambiguation), or the session is locked by another meka instance.
 
 ### `--permission <MODE>`
 
 Set the initial permission mode. Accepts `none` (or `n`), `read` (or `r`), `ask` (or `a`), `write` (or `w`).
 
 ```bash
-agsh --permission write
-agsh --permission ask
+meka --permission write
+meka --permission ask
 ```
 
 Default: `read`.
 
 ### `--provider <NAME>`
 
-Set the LLM provider. Overrides `AGSH_PROVIDER` and the config file.
+Set the LLM provider. Overrides `MEKA_PROVIDER` and the config file.
 
 ```bash
-agsh --provider claude-oauth
+meka --provider claude-oauth
 ```
 
 Supported values: `openai-api`, `claude-api`, `claude-oauth`.
 
 ### `-m`, `--model <MODEL>`
 
-Set the model name. Overrides `AGSH_MODEL` and the config file.
+Set the model name. Overrides `MEKA_MODEL` and the config file.
 
 ```bash
-agsh -m gpt-4o-mini
+meka -m gpt-4o-mini
 ```
 
 ### `--base-url <URL>`
@@ -107,7 +107,7 @@ agsh -m gpt-4o-mini
 Set a custom API base URL. Overrides `OPENAI_BASE_URL` and the config file.
 
 ```bash
-agsh --base-url http://localhost:11434/v1
+meka --base-url http://localhost:11434/v1
 ```
 
 ### `--no-stream`
@@ -115,7 +115,7 @@ agsh --base-url http://localhost:11434/v1
 Disable streaming mode. The agent waits for the complete response before displaying it. By default, responses are streamed token-by-token.
 
 ```bash
-agsh --no-stream
+meka --no-stream
 ```
 
 ### `--render-mode <MODE>`
@@ -127,7 +127,7 @@ Set the output render mode. Accepts `bat` (default), `termimad` (or `rich`), or 
 - `raw`: Raw markdown printed verbatim with aligned tables.
 
 ```bash
-agsh --render-mode raw
+meka --render-mode raw
 ```
 
 Can also be set permanently via `display.render_mode` in the config file.
@@ -137,7 +137,7 @@ Can also be set permanently via `display.render_mode` in the config file.
 Enable extended thinking (`claude-api` and `claude-oauth` providers).
 
 ```bash
-agsh --thinking
+meka --thinking
 ```
 
 ### `--thinking-budget <TOKENS>`
@@ -145,15 +145,15 @@ agsh --thinking
 Set the extended thinking token budget. Implies `--thinking`.
 
 ```bash
-agsh --thinking-budget 20000
+meka --thinking-budget 20000
 ```
 
 ### `--instructions <STRING>`
 
-Override [`prompt.instructions`](./config-file.md#promptinstructions) for this run, replacing whatever is in the config file. Also reads from `AGSH_INSTRUCTIONS` if the flag is not given.
+Override [`prompt.instructions`](./config-file.md#promptinstructions) for this run, replacing whatever is in the config file. Also reads from `MEKA_INSTRUCTIONS` if the flag is not given.
 
 ```bash
-agsh --instructions "Be terse. No code fences in answers."
+meka --instructions "Be terse. No code fences in answers."
 ```
 
 ### `--skill <NAME>`
@@ -161,19 +161,19 @@ agsh --instructions "Be terse. No code fences in answers."
 Invoke a [skill](../usage/skills.md) as the first turn. Mirrors the REPL slash command [`/skill <name> [extra...]`](../usage/skills.md#invoking-a-skill-from-the-cli) — the positional `[PROMPT]` arg, if given, is prepended to the rendered skill body as additional context. Pair with [`--oneshot`](#oneshot) to exit after the turn instead of opening the REPL.
 
 ```bash
-agsh --skill download-videos "https://example.com/video"             # first turn, then REPL
-agsh --skill download-videos --oneshot "https://example.com/video"   # first turn, then exit
+meka --skill download-videos "https://example.com/video"             # first turn, then REPL
+meka --skill download-videos --oneshot "https://example.com/video"   # first turn, then exit
 ```
 
 Errors out with a clean message if the skill name is unknown.
 
 ### `--oneshot`
 
-Exit after the first turn finishes. Requires either the positional `[PROMPT]` or `--skill <NAME>` — without one of those, agsh has nothing to do. Useful for scripts and CI invocations.
+Exit after the first turn finishes. Requires either the positional `[PROMPT]` or `--skill <NAME>` — without one of those, meka has nothing to do. Useful for scripts and CI invocations.
 
 ```bash
-agsh --oneshot "summarize the last commit"
-agsh --oneshot --skill deploy "to staging"
+meka --oneshot "summarize the last commit"
+meka --oneshot --skill deploy "to staging"
 ```
 
 ### `--eager-load-tool <SERVER:TOOL>`
@@ -183,7 +183,7 @@ Eager-load a specific MCP tool for this session, bypassing the `load_tool` round
 Particularly useful for scripted runs that know up front which tools they'll need. The flag *appends to* whatever `eager_load_tools` lists in `config.toml` for that server — it doesn't replace existing entries. Unknown server names log a warning and are skipped.
 
 ```bash
-agsh --eager-load-tool notion:search --eager-load-tool github:create_issue \
+meka --eager-load-tool notion:search --eager-load-tool github:create_issue \
      --oneshot "search Notion for the deploy runbook and open a GitHub issue"
 ```
 
@@ -192,9 +192,9 @@ agsh --eager-load-tool notion:search --eager-load-tool github:create_issue \
 Increase log verbosity. Can be repeated up to three times.
 
 ```bash
-agsh -v      # info
-agsh -vv     # debug
-agsh -vvv    # trace
+meka -v      # info
+meka -vv     # debug
+meka -vvv    # trace
 ```
 
 ### `--help`

@@ -8,7 +8,7 @@
 //! [`Relay`] holds an optional [`reedline::ExternalPrinter`] (a crossbeam channel reedline drains
 //! every poll tick to print messages *above* the prompt without clobbering it). Tracing output goes
 //! through the printer when the REPL has registered one; otherwise it falls back to plain stderr so
-//! the non-interactive paths (`agsh export`, `agsh list`, etc.) and the pre-REPL startup window
+//! the non-interactive paths (`meka export`, `meka list`, etc.) and the pre-REPL startup window
 //! still see logs.
 
 use std::{

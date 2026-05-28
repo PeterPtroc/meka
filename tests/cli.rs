@@ -2,40 +2,40 @@
 // by design.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! End-to-end CLI smoke tests. These shell out to the built `agsh` binary
-//! (`env!("CARGO_BIN_EXE_agsh")`) so they exercise the same entry point users hit on the command
+//! End-to-end CLI smoke tests. These shell out to the built `meka` binary
+//! (`env!("CARGO_BIN_EXE_meka")`) so they exercise the same entry point users hit on the command
 //! line. They cover surface-level invariants that unit tests can't reach: argument-parser wiring,
 //! `--help` output, and the exit status of trivial subcommands.
 
 use std::process::Command;
 
-fn agsh() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_agsh"))
+fn meka() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_meka"))
 }
 
 #[test]
 fn version_flag_prints_version_and_exits_zero() {
-    let output = agsh()
+    let output = meka()
         .arg("--version")
         .output()
-        .expect("failed to spawn agsh");
+        .expect("failed to spawn meka");
     assert!(
         output.status.success(),
-        "agsh --version exited non-zero: {:?}",
+        "meka --version exited non-zero: {:?}",
         output.status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.starts_with("agsh "),
-        "expected version output to start with 'agsh ', got: {}",
+        stdout.starts_with("meka "),
+        "expected version output to start with 'meka ', got: {}",
         stdout
     );
 }
 
 #[test]
 fn help_flag_lists_subcommands() {
-    let output = agsh().arg("--help").output().expect("failed to spawn agsh");
-    assert!(output.status.success(), "agsh --help exited non-zero");
+    let output = meka().arg("--help").output().expect("failed to spawn meka");
+    assert!(output.status.success(), "meka --help exited non-zero");
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in ["setup", "export", "delete", "list", "acp"] {
         assert!(
@@ -51,13 +51,13 @@ fn help_flag_lists_subcommands() {
 fn acp_subcommand_help_describes_protocol() {
     // Verifies the `acp` subcommand is wired up. Full JSON-RPC handshake coverage lives in
     // `tests/acp.rs` against the mock-provider build; this smoke test stops at `--help`.
-    let output = agsh()
+    let output = meka()
         .args(["acp", "--help"])
         .output()
-        .expect("failed to spawn agsh acp --help");
+        .expect("failed to spawn meka acp --help");
     assert!(
         output.status.success(),
-        "agsh acp --help exited non-zero: stderr={}",
+        "meka acp --help exited non-zero: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -65,51 +65,51 @@ fn acp_subcommand_help_describes_protocol() {
         stdout.contains("ACP")
             || stdout.contains("Agent Client Protocol")
             || stdout.contains("stdio"),
-        "agsh acp --help should mention the protocol or transport:\n{}",
+        "meka acp --help should mention the protocol or transport:\n{}",
         stdout,
     );
 }
 
 #[test]
 fn unknown_subcommand_exits_nonzero() {
-    let output = agsh()
+    let output = meka()
         .arg("--definitely-not-a-flag")
         .output()
-        .expect("failed to spawn agsh");
+        .expect("failed to spawn meka");
     assert!(
         !output.status.success(),
-        "agsh accepted an unknown flag without erroring"
+        "meka accepted an unknown flag without erroring"
     );
 }
 
-/// Run `agsh` with an isolated config + data directory so host state (e.g.
-/// `~/.config/agsh/config.toml`) doesn't leak in, and the test's writes don't spill out. Sets
-/// `AGSH_CONFIG_DIR` and `AGSH_DATA_DIR` — the only env vars that work on every platform
+/// Run `meka` with an isolated config + data directory so host state (e.g.
+/// `~/.config/meka/config.toml`) doesn't leak in, and the test's writes don't spill out. Sets
+/// `MEKA_CONFIG_DIR` and `MEKA_DATA_DIR` — the only env vars that work on every platform
 /// (`dirs::config_dir()` and `dirs::data_dir()` ignore `XDG_*` on macOS/Windows). Without the
-/// data-dir override, parallel CLI tests collide on a shared `%APPDATA%/agsh/sessions.db` on
+/// data-dir override, parallel CLI tests collide on a shared `%APPDATA%/meka/sessions.db` on
 /// Windows and hit SQLite lock contention.
 fn run_isolated(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    agsh()
+    meka()
         .args(args)
-        .env("AGSH_CONFIG_DIR", dir.join("agsh"))
-        .env("AGSH_DATA_DIR", dir.join("data").join("agsh"))
+        .env("MEKA_CONFIG_DIR", dir.join("meka"))
+        .env("MEKA_DATA_DIR", dir.join("data").join("meka"))
         .env("XDG_CONFIG_HOME", dir)
         .env("HOME", dir)
         .env("XDG_DATA_HOME", dir.join("data"))
         .output()
-        .unwrap_or_else(|err| panic!("failed to spawn agsh {:?}: {}", args, err))
+        .unwrap_or_else(|err| panic!("failed to spawn meka {:?}: {}", args, err))
 }
 
 #[test]
 fn mcp_list_with_empty_config_prints_no_servers_and_exits_zero() {
-    // Isolate the config dir so the host's real `~/.config/agsh` doesn't leak into the test.
-    // `AGSH_CONFIG_DIR` is the only env var that works on every platform (see `run_isolated` for
+    // Isolate the config dir so the host's real `~/.config/meka` doesn't leak into the test.
+    // `MEKA_CONFIG_DIR` is the only env var that works on every platform (see `run_isolated` for
     // details).
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_isolated(dir.path(), &["mcp", "list"]);
     assert!(
         output.status.success(),
-        "agsh mcp list exited non-zero: {:?}\nstderr: {}",
+        "meka mcp list exited non-zero: {:?}\nstderr: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -136,7 +136,7 @@ fn mcp_add_http_positional_url_persists_server() {
     ]);
     assert!(
         output.status.success(),
-        "agsh mcp add failed: {}\n{}",
+        "meka mcp add failed: {}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -203,7 +203,7 @@ fn mcp_disable_sets_disabled_flag() {
         String::from_utf8_lossy(&disable.stderr)
     );
 
-    let config_path = dir.path().join("agsh").join("config.toml");
+    let config_path = dir.path().join("meka").join("config.toml");
     let toml_text = std::fs::read_to_string(&config_path).expect("read config");
     assert!(
         toml_text.contains("disabled = true"),
@@ -241,7 +241,7 @@ fn mcp_add_with_disabled_flag_persists() {
         "add --disabled: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let config_path = dir.path().join("agsh").join("config.toml");
+    let config_path = dir.path().join("meka").join("config.toml");
     let toml_text = std::fs::read_to_string(&config_path).expect("read config");
     assert!(
         toml_text.contains("disabled = true"),
@@ -270,7 +270,7 @@ fn mcp_add_http_without_url_fails() {
 #[test]
 fn mcp_add_no_login_prints_skip_hint_when_probe_says_auth_required() {
     // Probing the real Notion endpoint classifies as AuthRequired; `--no-login` must surface the
-    // "run `agsh mcp login` later" hint rather than entering the OAuth flow. The hint goes to
+    // "run `meka mcp login` later" hint rather than entering the OAuth flow. The hint goes to
     // tracing at info level — default filter is `warn`, so we pass `-v` to lift the floor and read
     // the message from stderr.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -294,7 +294,7 @@ fn mcp_add_no_login_prints_skip_hint_when_probe_says_auth_required() {
         stderr
     );
     assert!(
-        stderr.contains("agsh mcp login notion"),
+        stderr.contains("meka mcp login notion"),
         "expected follow-up command in stderr, got: {}",
         stderr
     );
@@ -304,7 +304,7 @@ fn mcp_add_no_login_prints_skip_hint_when_probe_says_auth_required() {
 #[test]
 fn mcp_add_rollback_on_sigint_during_auto_login() {
     // Reproduces the "user hits Ctrl-C while the OAuth flow is waiting for the browser callback"
-    // scenario: start `agsh mcp add` without --no-login against a server that requires auth, wait
+    // scenario: start `meka mcp add` without --no-login against a server that requires auth, wait
     // until the auto-login is clearly in progress, send SIGINT, then confirm nothing remains in
     // config.toml.
     use std::{
@@ -313,11 +313,11 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut child = agsh()
+    let mut child = meka()
         // `-v` so the `running OAuth authorisation` info log is visible — we use it as the
         // "auto-login has started" signal before sending SIGINT.
         .args(["-v", "mcp", "add", "notion", "https://mcp.notion.com/mcp"])
-        .env("AGSH_CONFIG_DIR", dir.path().join("agsh"))
+        .env("MEKA_CONFIG_DIR", dir.path().join("meka"))
         .env("XDG_CONFIG_HOME", dir.path())
         .env("HOME", dir.path())
         .env("XDG_DATA_HOME", dir.path().join("data"))
@@ -327,7 +327,7 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn agsh mcp add");
+        .expect("spawn meka mcp add");
 
     // Wait until we've seen the "running OAuth authorisation" line so we know the child is past the
     // write + probe and is inside the SIGINT-covered post-persist section. The signpost now lives
@@ -373,10 +373,10 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
         }
     }
 
-    let status = child.wait().expect("wait on agsh");
+    let status = child.wait().expect("wait on meka");
     assert!(
         !status.success(),
-        "agsh should exit non-zero after SIGINT during auto-login"
+        "meka should exit non-zero after SIGINT during auto-login"
     );
     assert!(
         captured.contains("interrupted") && captured.contains("rolling back"),
@@ -385,7 +385,7 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
     );
 
     // Verify the entry was rolled out of config.toml.
-    let config_path = dir.path().join("agsh").join("config.toml");
+    let config_path = dir.path().join("meka").join("config.toml");
     let config_contents = std::fs::read_to_string(&config_path).unwrap_or_default();
     assert!(
         !config_contents.contains("notion"),
@@ -440,7 +440,7 @@ fn mcp_add_tool_filter_and_permission_flags_round_trip() {
         "mcp add should succeed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let config_path = dir.path().join("agsh").join("config.toml");
+    let config_path = dir.path().join("meka").join("config.toml");
     let contents = std::fs::read_to_string(&config_path).expect("read config");
     // Check the allow/block arrays and the nested permissions table.
     assert!(
@@ -494,7 +494,7 @@ fn mcp_add_oauth_writes_auth_block() {
         String::from_utf8_lossy(&output.stderr)
     );
     // Read back the config.toml we wrote.
-    let config_path = dir.path().join("agsh").join("config.toml");
+    let config_path = dir.path().join("meka").join("config.toml");
     let contents = std::fs::read_to_string(&config_path).expect("read config");
     assert!(contents.contains("type = \"oauth\""), "{}", contents);
     assert!(contents.contains("read"), "{}", contents);

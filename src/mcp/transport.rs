@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use crate::{
     config::McpServerConfig,
-    error::{AgshError, Result},
+    error::{MekaError, Result},
 };
 
 /// Build a [`Command`] for a stdio MCP server, wrapping shell shims in `cmd /c` on Windows so
@@ -45,7 +45,7 @@ pub(super) fn build_http_transport_config(
     let url = config
         .url
         .as_deref()
-        .ok_or_else(|| AgshError::McpConnection {
+        .ok_or_else(|| MekaError::McpConnection {
             server_name: server_name.to_string(),
             message: "http transport requires 'url' field".to_string(),
         })?;
@@ -71,13 +71,13 @@ pub(super) fn build_http_transport_config(
         for (key, value) in &merged_headers {
             let header_name =
                 reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
-                    AgshError::McpConnection {
+                    MekaError::McpConnection {
                         server_name: server_name.to_string(),
                         message: format!("invalid header name '{}': {}", key, error),
                     }
                 })?;
             let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
-                AgshError::McpConnection {
+                MekaError::McpConnection {
                     server_name: server_name.to_string(),
                     message: format!("invalid header value for '{}': {}", key, error),
                 }
@@ -94,7 +94,7 @@ pub(super) fn build_http_transport_config(
 /// merged into the HTTP transport's custom headers.
 ///
 /// The script is spawned synchronously (it's a startup-path helper, not called per-request) with a
-/// 15-second wall-clock timeout. `AGSH_MCP_SERVER_NAME` and `AGSH_MCP_SERVER_URL` are injected so
+/// 15-second wall-clock timeout. `MEKA_MCP_SERVER_NAME` and `MEKA_MCP_SERVER_URL` are injected so
 /// one helper can serve multiple servers.
 fn run_headers_helper(
     server_name: &str,
@@ -102,17 +102,17 @@ fn run_headers_helper(
     script: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
     use std::process::Stdio;
-    let err_ctx = |msg: String| AgshError::McpConnection {
+    let err_ctx = |msg: String| MekaError::McpConnection {
         server_name: server_name.to_string(),
         message: msg,
     };
 
     // Resolve the script path. If it's relative and doesn't exist as-is, try resolving against the
-    // agsh config directory for safety (same place config.toml lives).
+    // meka config directory for safety (same place config.toml lives).
     let script_path = std::path::Path::new(script);
     let resolved: std::path::PathBuf = if script_path.is_absolute() || script_path.exists() {
         script_path.to_path_buf()
-    } else if let Some(config_dir) = crate::config::agsh_config_dir() {
+    } else if let Some(config_dir) = crate::config::meka_config_dir() {
         let candidate = config_dir.join(script);
         if candidate.exists() {
             candidate
@@ -125,8 +125,8 @@ fn run_headers_helper(
 
     let mut command = std::process::Command::new(&resolved);
     command
-        .env("AGSH_MCP_SERVER_NAME", server_name)
-        .env("AGSH_MCP_SERVER_URL", url)
+        .env("MEKA_MCP_SERVER_NAME", server_name)
+        .env("MEKA_MCP_SERVER_URL", url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

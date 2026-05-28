@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput, util::require_str};
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     mcp::{MAX_MCP_DESCRIPTION_LENGTH, McpClientManager, sanitize::sanitize_text, truncate},
     permission::Permission,
     provider::ToolDefinition,
@@ -23,8 +23,8 @@ use crate::{
 /// API quota (or OOM the agent).
 pub const MAX_MCP_RESOURCE_BYTES: usize = 10 * 1024 * 1024;
 
-fn no_such_server(tool_name: &str, server: &str, available: &[String]) -> AgshError {
-    AgshError::ToolExecution {
+fn no_such_server(tool_name: &str, server: &str, available: &[String]) -> MekaError {
+    MekaError::ToolExecution {
         tool_name: tool_name.to_string(),
         message: format!(
             "unknown MCP server '{}' (configured: {})",
@@ -560,7 +560,7 @@ impl Tool for SubscribeMcpResourceTool {
             name: "subscribe_mcp_resource".to_string(),
             description: "Subscribe to change notifications for an MCP resource. After \
                           subscribing, the server will send resources/updated notifications \
-                          that agsh records; query them with `list_mcp_resource_updates`."
+                          that meka records; query them with `list_mcp_resource_updates`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -594,7 +594,7 @@ impl Tool for SubscribeMcpResourceTool {
         })?;
         crate::mcp::subscribe_resource(&entry, uri.clone())
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "subscribe_mcp_resource".to_string(),
                 message: format!("subscribe failed: {}", error),
             })?;
@@ -647,7 +647,7 @@ impl Tool for UnsubscribeMcpResourceTool {
         })?;
         crate::mcp::unsubscribe_resource(&entry, uri.clone())
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "unsubscribe_mcp_resource".to_string(),
                 message: format!("unsubscribe failed: {}", error),
             })?;
@@ -666,7 +666,7 @@ impl Tool for ListMcpResourceUpdatesTool {
         ToolDefinition {
             name: "list_mcp_resource_updates".to_string(),
             description: "List all resources that have been reported as updated since \
-                          this agsh session started. Rows are `<server>\\t<uri>\\t<unix_ts>`."
+                          this meka session started. Rows are `<server>\\t<uri>\\t<unix_ts>`."
                 .to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
             ..Default::default()

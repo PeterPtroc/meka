@@ -13,7 +13,7 @@ use crate::{
     agent::{Agent, AgentOptions},
     context::build_environment_context,
     conversation::Conversation,
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::{Permission, SharedPermission},
     provider::{Provider, ToolDefinition},
     session::SessionManager,
@@ -155,7 +155,7 @@ impl Tool for SpawnAgentTool {
             .filter(|text| !text.is_empty())
             .map(str::to_string);
         if prompt.is_none() && skill_name.is_none() {
-            return Err(AgshError::ToolExecution {
+            return Err(MekaError::ToolExecution {
                 tool_name: "spawn_agent".to_string(),
                 message: "spawn_agent requires 'prompt', 'skill', or both".to_string(),
             });
@@ -176,7 +176,7 @@ impl Tool for SpawnAgentTool {
                         } else {
                             format!("Available skills: {}", available.join(", "))
                         };
-                        return Err(AgshError::ToolExecution {
+                        return Err(MekaError::ToolExecution {
                             tool_name: "spawn_agent".to_string(),
                             message: format!("skill '{}' not found. {}", name, hint),
                         });
@@ -212,7 +212,7 @@ impl Tool for SpawnAgentTool {
             .parent_shared_session_id
             .read()
             .await
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "spawn_agent".to_string(),
                 message: "parent session ID not yet assigned (run_turn invariant)".to_string(),
             })?;
@@ -229,7 +229,7 @@ impl Tool for SpawnAgentTool {
                 )),
             )
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "spawn_agent".to_string(),
                 message: format!("failed to create sub-agent session: {}", error),
             })?;
@@ -241,14 +241,14 @@ impl Tool for SpawnAgentTool {
             sub_session_id
         );
 
-        // Render the skill body now that the sub-agent's session ID exists, so `${AGSH_SESSION_ID}`
+        // Render the skill body now that the sub-agent's session ID exists, so `${MEKA_SESSION_ID}`
         // resolves to the sub-agent's own session. `load_skill_body` also prepends the
         // base-directory header so bundled-file references resolve.
         let skill_body = match &skill {
             Some(skill) => Some(
                 crate::skills::load_skill_body(skill, Some(&sub_session_id.to_string()))
                     .await
-                    .map_err(|error| AgshError::ToolExecution {
+                    .map_err(|error| MekaError::ToolExecution {
                         tool_name: "spawn_agent".to_string(),
                         message: format!("failed to load skill: {}", error),
                     })?,
@@ -296,7 +296,7 @@ impl Tool for SpawnAgentTool {
             sub_cwd,
             Arc::clone(&self.tool_builder_params.parent_frontend),
         )
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: "spawn_agent".to_string(),
             message: format!("failed to build sub-agent tool registry: {}", error),
         })?;
@@ -306,7 +306,7 @@ impl Tool for SpawnAgentTool {
         // time. `install_tools_on` is non-spawning and idempotent — see
         // `src/mcp.rs:install_tools_on`.
         if let Some(weak) = self.tool_builder_params.mcp_manager.as_ref() {
-            // Upgrade only if the manager is still alive. If the parent's `agsh acp` process is
+            // Upgrade only if the manager is still alive. If the parent's `meka acp` process is
             // mid-shutdown, the Arc may already be gone — skip silently.
             if let Some(manager) = weak.upgrade() {
                 manager.install_tools_on(&sub_registry).await;
@@ -328,7 +328,7 @@ impl Tool for SpawnAgentTool {
         // check above guarantees a `Some`.
         let task =
             compose_subagent_task(prompt.as_deref(), skill_body.as_deref()).ok_or_else(|| {
-                AgshError::ToolExecution {
+                MekaError::ToolExecution {
                     tool_name: "spawn_agent".to_string(),
                     message: "spawn_agent requires 'prompt', 'skill', or both".to_string(),
                 }

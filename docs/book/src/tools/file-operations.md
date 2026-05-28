@@ -39,13 +39,13 @@ Only read image files when the current model supports vision input — text-only
 Read an entire file:
 
 ```text
-agsh [r] > show me the contents of src/main.rs
+meka [r] > show me the contents of src/main.rs
 ```
 
 Read lines 10-20:
 
 ```text
-agsh [r] > show me lines 10 through 20 of src/main.rs
+meka [r] > show me lines 10 through 20 of src/main.rs
 ```
 
 ---

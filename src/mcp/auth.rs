@@ -12,10 +12,10 @@ use rmcp::{
     },
 };
 
-use super::{McpRunningService, handler::AgshClientHandler};
+use super::{McpRunningService, handler::MekaClientHandler};
 use crate::{
     config::McpAuthConfig,
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     session::TokenStore,
 };
 
@@ -297,7 +297,7 @@ pub(super) async fn connect_http_with_oauth(
     auth_config: &McpAuthConfig,
     transport_config: rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig,
     token_store: Option<&TokenStore>,
-    handler: AgshClientHandler,
+    handler: MekaClientHandler,
 ) -> Result<McpRunningService> {
     let auth_manager = match auth_config {
         McpAuthConfig::ClientCredentials {
@@ -360,7 +360,7 @@ pub(super) async fn connect_http_with_oauth(
     handler
         .serve(transport)
         .await
-        .map_err(|error| AgshError::McpConnection {
+        .map_err(|error| MekaError::McpConnection {
             server_name: server_name.to_string(),
             message: format!("HTTP connection failed: {}", error),
         })
@@ -383,7 +383,7 @@ async fn authenticate_client_credentials(
 
     let mut oauth_state = OAuthState::new(url, None)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("failed to initialize OAuth: {}", error),
         })?;
@@ -391,14 +391,14 @@ async fn authenticate_client_credentials(
     oauth_state
         .authenticate_client_credentials(config)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("client credentials authentication failed: {}", error),
         })?;
 
     oauth_state
         .into_authorization_manager()
-        .ok_or_else(|| AgshError::McpAuth {
+        .ok_or_else(|| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: "unexpected OAuth state after client credentials authentication".to_string(),
         })
@@ -417,7 +417,7 @@ async fn authenticate_client_credentials_jwt(
     // window: a separate `metadata(path)` followed by `read(path)` could land on a different inode
     // if the path was swapped between syscalls. `File::metadata` walks the open descriptor.
     let mut key_file =
-        std::fs::File::open(signing_key_path).map_err(|error| AgshError::McpAuth {
+        std::fs::File::open(signing_key_path).map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!(
                 "failed to open signing key '{}': {}",
@@ -430,7 +430,7 @@ async fn authenticate_client_credentials_jwt(
         use std::io::Read;
         key_file
             .read_to_end(&mut signing_key)
-            .map_err(|error| AgshError::McpAuth {
+            .map_err(|error| MekaError::McpAuth {
                 server_name: server_name.to_string(),
                 message: format!(
                     "failed to read signing key '{}': {}",
@@ -452,7 +452,7 @@ async fn authenticate_client_credentials_jwt(
 
     let mut oauth_state = OAuthState::new(url, None)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("failed to initialize OAuth: {}", error),
         })?;
@@ -460,14 +460,14 @@ async fn authenticate_client_credentials_jwt(
     oauth_state
         .authenticate_client_credentials(config)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("JWT client credentials authentication failed: {}", error),
         })?;
 
     oauth_state
         .into_authorization_manager()
-        .ok_or_else(|| AgshError::McpAuth {
+        .ok_or_else(|| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: "unexpected OAuth state after JWT authentication".to_string(),
         })
@@ -489,13 +489,13 @@ fn require_private_key_permissions_on_fd(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = file.metadata().map_err(|error| AgshError::McpAuth {
+        let metadata = file.metadata().map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("failed to stat signing key '{}': {}", path, error),
         })?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            return Err(AgshError::McpAuth {
+            return Err(MekaError::McpAuth {
                 server_name: server_name.to_string(),
                 message: format!(
                     "signing key '{}' has permissions {:o}; must be 0600 (group/other bits must be clear)",
@@ -523,7 +523,7 @@ fn parse_jwt_signing_algorithm(
         "RS512" => Ok(JwtSigningAlgorithm::RS512),
         "ES256" => Ok(JwtSigningAlgorithm::ES256),
         "ES384" => Ok(JwtSigningAlgorithm::ES384),
-        other => Err(AgshError::McpAuth {
+        other => Err(MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!(
                 "unsupported signing algorithm '{}': expected RS256, RS384, RS512, ES256, or ES384",
@@ -544,12 +544,12 @@ async fn authenticate_oauth_authorization_code(
 ) -> Result<AuthorizationManager> {
     // Bind the callback listener up-front so we can support a random ephemeral port (`redirect_port
     // = None` → bind 0) and learn the actual port before constructing `redirect_uri`. This avoids
-    // the "port 8400 already in use" failure mode and lets multiple concurrent agsh sessions
+    // the "port 8400 already in use" failure mode and lets multiple concurrent meka sessions
     // coexist.
     let bind_port = redirect_port.unwrap_or(0);
     let callback_listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", bind_port))
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!(
                 "failed to bind callback server on port {}: {}",
@@ -558,7 +558,7 @@ async fn authenticate_oauth_authorization_code(
         })?;
     let actual_port = callback_listener
         .local_addr()
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("callback listener local_addr failed: {}", error),
         })?
@@ -568,7 +568,7 @@ async fn authenticate_oauth_authorization_code(
 
     let mut manager = AuthorizationManager::new(url)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("failed to initialize OAuth manager: {}", error),
         })?;
@@ -586,7 +586,7 @@ async fn authenticate_oauth_authorization_code(
         manager
             .initialize_from_store()
             .await
-            .map_err(|error| AgshError::McpAuth {
+            .map_err(|error| MekaError::McpAuth {
                 server_name: server_name.to_string(),
                 message: format!("failed to load stored credentials: {}", error),
             })?;
@@ -617,7 +617,7 @@ async fn authenticate_oauth_authorization_code(
                 manager
                     .discover_metadata()
                     .await
-                    .map_err(|error| AgshError::McpAuth {
+                    .map_err(|error| MekaError::McpAuth {
                         server_name: server_name.to_string(),
                         message: format!("OAuth metadata discovery failed: {}", error),
                     })?;
@@ -633,7 +633,7 @@ async fn authenticate_oauth_authorization_code(
             }
             manager
                 .configure_client(oauth_client_config)
-                .map_err(|error| AgshError::McpAuth {
+                .map_err(|error| MekaError::McpAuth {
                     server_name: server_name.to_string(),
                     message: format!("failed to configure OAuth client: {}", error),
                 })?;
@@ -642,7 +642,7 @@ async fn authenticate_oauth_authorization_code(
             let auth_url = manager
                 .get_authorization_url(&scope_refs)
                 .await
-                .map_err(|error| AgshError::McpAuth {
+                .map_err(|error| MekaError::McpAuth {
                     server_name: server_name.to_string(),
                     message: format!("failed to get authorization URL: {}", error),
                 })?;
@@ -652,7 +652,7 @@ async fn authenticate_oauth_authorization_code(
                     manager,
                     AuthorizationManager::new("http://localhost")
                         .await
-                        .map_err(|error| AgshError::McpAuth {
+                        .map_err(|error| MekaError::McpAuth {
                             server_name: server_name.to_string(),
                             message: format!("internal error: {}", error),
                         })?,
@@ -666,9 +666,9 @@ async fn authenticate_oauth_authorization_code(
         // No client_id configured — use dynamic registration via start_authorization
         let scope_refs: Vec<&str> = scope_strings.iter().map(|s| s.as_str()).collect();
         oauth_state
-            .start_authorization(&scope_refs, &redirect_uri, Some("agsh"))
+            .start_authorization(&scope_refs, &redirect_uri, Some("meka"))
             .await
-            .map_err(|error| AgshError::McpAuth {
+            .map_err(|error| MekaError::McpAuth {
                 server_name: server_name.to_string(),
                 message: format!("failed to start OAuth authorization: {}", error),
             })?;
@@ -678,7 +678,7 @@ async fn authenticate_oauth_authorization_code(
         oauth_state
             .get_authorization_url()
             .await
-            .map_err(|error| AgshError::McpAuth {
+            .map_err(|error| MekaError::McpAuth {
                 server_name: server_name.to_string(),
                 message: format!("failed to get authorization URL: {}", error),
             })?;
@@ -694,7 +694,7 @@ async fn authenticate_oauth_authorization_code(
     // Wait for the authorization code on our pre-bound listener.
     let (code, state) = await_oauth_callback(callback_listener)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("OAuth callback failed: {}", error),
         })?;
@@ -703,14 +703,14 @@ async fn authenticate_oauth_authorization_code(
     oauth_state
         .handle_callback(&code, &state)
         .await
-        .map_err(|error| AgshError::McpAuth {
+        .map_err(|error| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: format!("OAuth token exchange failed: {}", error),
         })?;
 
     oauth_state
         .into_authorization_manager()
-        .ok_or_else(|| AgshError::McpAuth {
+        .ok_or_else(|| MekaError::McpAuth {
             server_name: server_name.to_string(),
             message: "unexpected OAuth state after authorization".to_string(),
         })
@@ -730,7 +730,7 @@ const OAUTH_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Wait for the authorization code.
 ///
 /// The common case is that the OAuth provider redirects the user's browser to our localhost
-/// listener and we pick the code out of the HTTP request. But when agsh runs on a different host
+/// listener and we pick the code out of the HTTP request. But when meka runs on a different host
 /// than the browser — SSH sessions, containers, remote Codespaces — the browser can't reach back,
 /// so we race the TCP accept against a stdin prompt that lets the user paste the full callback URL
 /// (it's visible in the browser's address bar even when the connection is refused). Paste mode is
@@ -841,7 +841,7 @@ async fn accept_http_callback(
             Ok((code, state)) => {
                 let response_body = "<!DOCTYPE html><html><body>\
                     <h1>Authorization successful</h1>\
-                    <p>You can close this tab and return to agsh.</p>\
+                    <p>You can close this tab and return to meka.</p>\
                     </body></html>";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -876,7 +876,7 @@ async fn accept_http_callback(
 
 /// Paste-URL fallback for the OAuth callback: prompt on stderr, read a line from stdin, extract
 /// `code` + `state` from the pasted URL. Used when the browser can't reach back to our bound
-/// listener (e.g. agsh is on an SSH host and the browser is on the user's laptop).
+/// listener (e.g. meka is on an SSH host and the browser is on the user's laptop).
 async fn read_pasted_callback(
     deadline: tokio::time::Instant,
 ) -> std::result::Result<(String, String), String> {

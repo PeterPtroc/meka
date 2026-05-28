@@ -1,6 +1,6 @@
 # Providers Overview
 
-Providers are the LLM inference backends that agsh uses to process your instructions. agsh ships with four built-in providers:
+Providers are the LLM inference backends that meka uses to process your instructions. meka ships with four built-in providers:
 
 | Provider | Auth | API | Notes |
 |----------|------|-----|-------|
@@ -15,12 +15,12 @@ Set the provider via any configuration layer:
 
 ```bash
 # CLI flag
-agsh --provider claude-oauth
+meka --provider claude-oauth
 
 # Environment variable
-export AGSH_PROVIDER=claude-api
+export MEKA_PROVIDER=claude-api
 
-# Config file (~/.config/agsh/config.toml)
+# Config file (~/.config/meka/config.toml)
 [provider]
 name = "openai-api"
 ```
@@ -52,6 +52,6 @@ The two OpenAI-flavoured providers hit different endpoints with different protoc
 
 ## Streaming vs Non-Streaming
 
-By default, agsh uses streaming mode: tokens appear in the terminal as they are generated. Use `--no-stream` to wait for the complete response before displaying it.
+By default, meka uses streaming mode: tokens appear in the terminal as they are generated. Use `--no-stream` to wait for the complete response before displaying it.
 
 Streaming is recommended for interactive use. Non-streaming may be useful for scripting or when the provider does not support SSE.

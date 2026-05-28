@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{ContentBlock, Message, Role},
 };
 
@@ -203,14 +203,14 @@ pub(super) fn patch_request_body(body_json: &str) -> Result<String> {
     const PLACEHOLDER: &str = "cch=00000";
 
     let billing_start = body_json.find(BILLING_PREFIX).ok_or_else(|| {
-        AgshError::Provider("x-anthropic-billing-header not found in request body".into())
+        MekaError::Provider("x-anthropic-billing-header not found in request body".into())
     })?;
 
     let idx = body_json[billing_start..]
         .find(PLACEHOLDER)
         .map(|relative| billing_start + relative)
         .ok_or_else(|| {
-            AgshError::Provider(
+            MekaError::Provider(
                 "cch=00000 attestation placeholder not found in billing header".into(),
             )
         })?;
@@ -474,7 +474,7 @@ mod tests {
             r#":"text","text":"You are Claude Code","cache_control":{"type":"e"#,
             r#"phemeral"}}],"model":"claude-sonnet-4-20250514","messages":[{"r"#,
             r#"ole":"user","content":[{"type":"text","text":"hello"}]}],"max_t"#,
-            r#"okens":8192,"stream":false,"metadata":{"user_id":"agsh"}}"#,
+            r#"okens":8192,"stream":false,"metadata":{"user_id":"meka"}}"#,
         );
 
         let digest = xxh64(body.as_bytes(), CCH_XXH64_SEED);

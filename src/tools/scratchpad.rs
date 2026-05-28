@@ -15,7 +15,7 @@ use super::{
     util::{MAX_SEARCH_MATCHES, search_lines},
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::{ContentBlock, Message, ToolDefinition, ToolResultContent},
     session::{SessionManager, ToolOutputSummary},
@@ -48,7 +48,7 @@ async fn resolve_session_id(
     session_id
         .read()
         .await
-        .ok_or_else(|| AgshError::ToolExecution {
+        .ok_or_else(|| MekaError::ToolExecution {
             tool_name: tool_name.to_string(),
             message: "no active session".to_string(),
         })
@@ -260,13 +260,13 @@ impl Tool for ScratchpadWriteTool {
     ) -> Result<ToolOutput> {
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_write".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
         let content = input["content"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_write".to_string(),
                 message: "missing 'content' parameter".to_string(),
             })?;
@@ -361,7 +361,7 @@ impl Tool for ScratchpadReadTool {
     ) -> Result<ToolOutput> {
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_read".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
@@ -386,7 +386,7 @@ impl Tool for ScratchpadReadTool {
                 .await?;
         }
 
-        let content = content.ok_or_else(|| AgshError::ToolExecution {
+        let content = content.ok_or_else(|| MekaError::ToolExecution {
             tool_name: "scratchpad_read".to_string(),
             message: format!("scratchpad entry \"{}\" not found", name),
         })?;
@@ -484,7 +484,7 @@ impl Tool for ScratchpadEditTool {
     ) -> Result<ToolOutput> {
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_edit".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
@@ -523,7 +523,7 @@ impl Tool for ScratchpadEditTool {
         let old_string = input
             .get("old_string")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_edit".to_string(),
                 message: "provide either 'content' for full overwrite \
                     or 'old_string'/'new_string' for replacement"
@@ -532,7 +532,7 @@ impl Tool for ScratchpadEditTool {
         let new_string = input
             .get("new_string")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_edit".to_string(),
                 message: "missing 'new_string' parameter".to_string(),
             })?;
@@ -542,7 +542,7 @@ impl Tool for ScratchpadEditTool {
             .session_manager
             .load_tool_output(session_id, name)
             .await?
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_edit".to_string(),
                 message: format!("scratchpad entry \"{}\" not found", name),
             })?;
@@ -723,7 +723,7 @@ impl Tool for ScratchpadMergeTool {
     ) -> Result<ToolOutput> {
         let target = input["target"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_merge".to_string(),
                 message: "missing 'target' parameter".to_string(),
             })?;
@@ -734,7 +734,7 @@ impl Tool for ScratchpadMergeTool {
 
         let sources: Vec<String> = input["sources"]
             .as_array()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_merge".to_string(),
                 message: "missing 'sources' parameter (expected non-empty array of strings)"
                     .to_string(),
@@ -775,7 +775,7 @@ impl Tool for ScratchpadMergeTool {
                     .load_tool_output(parent_sid, name)
                     .await?;
             }
-            let content = content.ok_or_else(|| AgshError::ToolExecution {
+            let content = content.ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_merge".to_string(),
                 message: format!("scratchpad entry \"{}\" not found", name),
             })?;
@@ -796,7 +796,7 @@ impl Tool for ScratchpadMergeTool {
                             .unwrap_or_else(|_| serde_json::Value::String(body.clone()))
                     })
                     .collect();
-                serde_json::to_string(&values).map_err(|error| AgshError::ToolExecution {
+                serde_json::to_string(&values).map_err(|error| MekaError::ToolExecution {
                     tool_name: "scratchpad_merge".to_string(),
                     message: format!("failed to serialize merged JSON array: {}", error),
                 })?
@@ -881,7 +881,7 @@ impl Tool for ScratchpadDeleteTool {
     ) -> Result<ToolOutput> {
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_delete".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
@@ -957,13 +957,13 @@ impl Tool for ScratchpadRenameTool {
     ) -> Result<ToolOutput> {
         let old = input["old"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_rename".to_string(),
                 message: "missing 'old' parameter".to_string(),
             })?;
         let new = input["new"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_rename".to_string(),
                 message: "missing 'new' parameter".to_string(),
             })?;
@@ -1064,14 +1064,14 @@ impl Tool for ScratchpadLoadFileTool {
     ) -> Result<ToolOutput> {
         let path = input["path"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_load_file".to_string(),
                 message: "missing 'path' parameter".to_string(),
             })?
             .to_string();
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_load_file".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
@@ -1092,7 +1092,7 @@ impl Tool for ScratchpadLoadFileTool {
         // is meant for (tens of MB), that's negligible.
         let bytes = super::file::read_file_bytes(&canonical)
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "scratchpad_load_file".to_string(),
                 message: format!("failed to read '{}': {}", path, error),
             })?;
@@ -1180,13 +1180,13 @@ impl Tool for ScratchpadSaveFileTool {
     ) -> Result<ToolOutput> {
         let name = input["name"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_save_file".to_string(),
                 message: "missing 'name' parameter".to_string(),
             })?;
         let path = input["path"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_save_file".to_string(),
                 message: "missing 'path' parameter".to_string(),
             })?
@@ -1209,7 +1209,7 @@ impl Tool for ScratchpadSaveFileTool {
                 .load_tool_output(parent_sid, name)
                 .await?;
         }
-        let content = content.ok_or_else(|| AgshError::ToolExecution {
+        let content = content.ok_or_else(|| MekaError::ToolExecution {
             tool_name: "scratchpad_save_file".to_string(),
             message: format!("scratchpad entry \"{}\" not found", name),
         })?;
@@ -1221,11 +1221,11 @@ impl Tool for ScratchpadSaveFileTool {
         let file_path = std::path::PathBuf::from(&path);
         let file_name = file_path
             .file_name()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "scratchpad_save_file".to_string(),
                 message: format!("invalid path (no file name): '{}'", path),
             })?;
-        let parent = file_path.parent().ok_or_else(|| AgshError::ToolExecution {
+        let parent = file_path.parent().ok_or_else(|| MekaError::ToolExecution {
             tool_name: "scratchpad_save_file".to_string(),
             message: format!("invalid path (no parent): '{}'", path),
         })?;
@@ -1236,7 +1236,7 @@ impl Tool for ScratchpadSaveFileTool {
         };
         tokio::fs::create_dir_all(parent_for_create)
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "scratchpad_save_file".to_string(),
                 message: format!("failed to create directories for '{}': {}", path, error),
             })?;
@@ -1248,7 +1248,7 @@ impl Tool for ScratchpadSaveFileTool {
         let byte_count = content.len();
         super::file::write_file_bytes(&target, content.as_bytes())
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "scratchpad_save_file".to_string(),
                 message: format!("failed to write '{}': {}", path, error),
             })?;

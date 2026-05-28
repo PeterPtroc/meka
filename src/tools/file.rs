@@ -18,7 +18,7 @@ use super::{
     util::{MAX_SEARCH_MATCHES, canonicalize_for_tool, require_str, search_lines, truncate_string},
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     image::{ImageHandling, classify_extension, prepare_image_payload},
     permission::Permission,
     provider::{ImageSource, ToolDefinition, ToolResultContent},
@@ -185,7 +185,7 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolOutput> {
         let path = input["path"]
             .as_str()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "read_file".to_string(),
                 message: "missing 'path' parameter".to_string(),
             })?
@@ -210,7 +210,7 @@ impl Tool for ReadFileTool {
             let data =
                 read_file_bytes(&canonical)
                     .await
-                    .map_err(|error| AgshError::ToolExecution {
+                    .map_err(|error| MekaError::ToolExecution {
                         tool_name: "read_file".to_string(),
                         message: format!("failed to read '{}': {}", path, error),
                     })?;
@@ -278,7 +278,7 @@ impl Tool for ReadFileTool {
                 .delegate_fs_read(&canonical, delegate_line, delegate_limit)
                 .await
             {
-                let content = result.map_err(|error| AgshError::ToolExecution {
+                let content = result.map_err(|error| MekaError::ToolExecution {
                     tool_name: "read_file".to_string(),
                     message: format!("failed to read '{}': {}", path, error),
                 })?;
@@ -290,7 +290,7 @@ impl Tool for ReadFileTool {
         let content =
             read_file_to_string(&canonical)
                 .await
-                .map_err(|error| AgshError::ToolExecution {
+                .map_err(|error| MekaError::ToolExecution {
                     tool_name: "read_file".to_string(),
                     message: format!("failed to read '{}': {}", path, error),
                 })?;
@@ -470,13 +470,13 @@ impl Tool for EditFileTool {
             match self.frontend.delegate_fs_read(&canonical, None, None).await {
                 Some(Ok(text)) => text,
                 Some(Err(error)) => {
-                    return Err(AgshError::ToolExecution {
+                    return Err(MekaError::ToolExecution {
                         tool_name: "edit_file".to_string(),
                         message: format!("failed to read '{}': {}", path, error),
                     });
                 }
                 None => read_file_to_string(&canonical).await.map_err(|error| {
-                    AgshError::ToolExecution {
+                    MekaError::ToolExecution {
                         tool_name: "edit_file".to_string(),
                         message: format!("failed to read '{}': {}", path, error),
                     }
@@ -534,7 +534,7 @@ impl Tool for EditFileTool {
         {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                return Err(AgshError::ToolExecution {
+                return Err(MekaError::ToolExecution {
                     tool_name: "edit_file".to_string(),
                     message: format!("failed to write '{}': {}", path, error),
                 });
@@ -542,7 +542,7 @@ impl Tool for EditFileTool {
             None => {
                 write_file_bytes(&canonical, new_content.as_bytes())
                     .await
-                    .map_err(|error| AgshError::ToolExecution {
+                    .map_err(|error| MekaError::ToolExecution {
                         tool_name: "edit_file".to_string(),
                         message: format!("failed to write '{}': {}", path, error),
                     })?;
@@ -657,11 +657,11 @@ impl Tool for WriteFileTool {
         let file_path = crate::agent::resolve_against_cwd(&self.cwd, &path);
         let file_name = file_path
             .file_name()
-            .ok_or_else(|| AgshError::ToolExecution {
+            .ok_or_else(|| MekaError::ToolExecution {
                 tool_name: "write_file".to_string(),
                 message: format!("invalid path (no file name): '{}'", path),
             })?;
-        let parent = file_path.parent().ok_or_else(|| AgshError::ToolExecution {
+        let parent = file_path.parent().ok_or_else(|| MekaError::ToolExecution {
             tool_name: "write_file".to_string(),
             message: format!("invalid path (no parent): '{}'", path),
         })?;
@@ -675,7 +675,7 @@ impl Tool for WriteFileTool {
         };
         tokio::fs::create_dir_all(parent_for_create)
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "write_file".to_string(),
                 message: format!("failed to create directories for '{}': {}", path, error),
             })?;
@@ -729,7 +729,7 @@ impl Tool for WriteFileTool {
         match self.frontend.delegate_fs_write(&target, &content).await {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                return Err(AgshError::ToolExecution {
+                return Err(MekaError::ToolExecution {
                     tool_name: "write_file".to_string(),
                     message: format!("failed to write '{}': {}", path, error),
                 });
@@ -737,7 +737,7 @@ impl Tool for WriteFileTool {
             None => {
                 write_file_bytes(&target, content.as_bytes())
                     .await
-                    .map_err(|error| AgshError::ToolExecution {
+                    .map_err(|error| MekaError::ToolExecution {
                         tool_name: "write_file".to_string(),
                         message: format!("failed to write '{}': {}", path, error),
                     })?;

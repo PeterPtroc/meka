@@ -49,7 +49,7 @@ The sandbox is not an adversarial containment boundary — it's defense-in-depth
 
 #### Environment variable scrubbing
 
-Read-mode sandboxes still permit outbound network (the threat model intentionally keeps `curl http://x | pdftotext`-style pipelines working), so any secret in the parent process's environment — `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, OAuth tokens, etc. — would be a live exfiltration vector under prompt injection. agsh scrubs the child environment at spawn time across every backend (Bubblewrap, Landlock, Seatbelt, Windows Low-integrity).
+Read-mode sandboxes still permit outbound network (the threat model intentionally keeps `curl http://x | pdftotext`-style pipelines working), so any secret in the parent process's environment — `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, OAuth tokens, etc. — would be a live exfiltration vector under prompt injection. meka scrubs the child environment at spawn time across every backend (Bubblewrap, Landlock, Seatbelt, Windows Low-integrity).
 
 - **Unix (Linux + macOS): allow-list.** Only a curated set of vars survives into the read-mode child: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`, `TERM`, `COLORTERM`, `LANG`, `TMPDIR`, `TMP`, `TEMP`, plus everything matching the `LC_*` and `XDG_*` prefixes. Anything else is dropped — including credential-shaped vars (`AWS_*`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, …) and credential-pointer vars (`SSH_AUTH_SOCK`, `KUBECONFIG`, `GNUPGHOME`, `NETRC`, `GIT_ASKPASS`, `GIT_SSH_COMMAND`, etc.) as well as benign-but-unlisted vars like `EDITOR`, `PAGER`, `DISPLAY`, custom toolchain vars, and so on. Unknown vars are dropped by default.
 - **Windows: deny-list.** PowerShell pulls in a long tail of system vars (`PSModulePath`, `APPDATA`, `ProgramFiles`, etc.) that don't fit a tidy allow-list, so the Windows path lets everything through *except* names that match a heuristic deny-list. Dropped names include:
@@ -68,7 +68,7 @@ Linux supports two backends, selected via `[shell].sandbox_backend` in `config.t
 - **Bubblewrap** (`sandbox_backend = "bubblewrap"`, recommended): wraps the command in `bwrap` with `--ro-bind /`, tmpfs masks over `/run`, `/tmp`, `/var/tmp`, and `$XDG_RUNTIME_DIR`, plus `--unshare-user --unshare-pid --unshare-uts --unshare-ipc`. The tmpfs masks make the dbus session bus, systemd-user socket, and other socket-on-disk IPC paths unreachable, so `systemctl --user start <unit>`, `dbus-send`, and similar state-changing calls fail. Network is not unshared. Requires the `bubblewrap` package and a kernel with user-namespace creation enabled.
 - **Landlock** (`sandbox_backend = "landlock"`, legacy / fallback): uses the [Landlock LSM](https://landlock.io/) (kernel 5.13+). Blocks filesystem writes via `landlock_restrict_self`. Does **not** block dbus / systemd-user IPC, so a sandboxed shell can still invoke state-mutating dbus methods.
 
-`sandbox_backend` is unset unless you pin it yourself — `agsh setup` does not write it. When unset, agsh probes Bubblewrap once at startup and prefers it when available, falling back to Landlock with a one-shot warning that points at the install path and the suppress-this-warning escape hatch.
+`sandbox_backend` is unset unless you pin it yourself — `meka setup` does not write it. When unset, meka probes Bubblewrap once at startup and prefers it when available, falling back to Landlock with a one-shot warning that points at the install path and the suppress-this-warning escape hatch.
 
 ```toml
 [shell]

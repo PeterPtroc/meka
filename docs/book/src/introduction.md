@@ -1,9 +1,9 @@
 # Introduction
 
-**agsh** is a general-purpose AI agent runtime that provides LLMs with a rich set of tools — web search, shell execution, file editing, and more — to accomplish complex tasks. Use it as a natural-language shell, a system diagnostic helper, a research or data-analysis assistant, for general Q&A, or to add agentic capabilities to other applications.
+**meka** is a general-purpose AI agent harness that provides LLMs with a rich set of tools — web search, shell execution, file editing, and more — to accomplish complex tasks. Use it as a natural-language shell, a system diagnostic helper, a research or data-analysis assistant, for general Q&A, or to add agentic capabilities to other applications.
 
 ```text
-agsh [r] > find all Rust files in this project and count the lines of code
+meka [r] > find all Rust files in this project and count the lines of code
 ```
 
 Instead of remembering `find . -name '*.rs' | xargs wc -l`, you describe what you want and the agent figures out how to do it.
@@ -25,7 +25,7 @@ Instead of remembering `find . -name '*.rs' | xargs wc -l`, you describe what yo
 ## How It Works
 
 1. You type a natural language instruction
-2. agsh sends it to the configured LLM along with tool definitions and a system prompt
+2. meka sends it to the configured LLM along with tool definitions and a system prompt
 3. The LLM decides which tools to call (if any) and returns text and/or tool calls
-4. agsh executes the tool calls, feeds results back to the LLM, and repeats until the LLM is done
+4. meka executes the tool calls, feeds results back to the LLM, and repeats until the LLM is done
 5. The final response is rendered as Markdown in the terminal

@@ -2,7 +2,7 @@
 //! integration test can drive a multi-round `Agent::run_turn` (tool-use round → tool-result round →
 //! final text round) without touching the network.
 //!
-//! Activated by `agsh acp` only when the `AGSH_ACP_MOCK_PROVIDER` environment variable is set to
+//! Activated by `meka acp` only when the `MEKA_ACP_MOCK_PROVIDER` environment variable is set to
 //! `1`. The variable also names the file containing the JSON-encoded script (see
 //! [`crate::provider::mock::load_script_from_env`]). Anything else (production, REPL, oneshot) is
 //! unaffected — this module is only reachable via the env-gated path.
@@ -60,7 +60,7 @@ pub enum MockEvent {
     Sleep {
         ms: u64,
     },
-    /// Synthetic provider failure. The stream returns `Err(AgshError::Provider(message))`
+    /// Synthetic provider failure. The stream returns `Err(MekaError::Provider(message))`
     /// immediately, exercising the non-Interrupted error arm of `Agent::run_turn` (which the ACP
     /// layer maps to a JSON-RPC `internal_error`).
     Fail {
@@ -122,7 +122,7 @@ impl Provider for MockProvider {
         // Tests only drive the streaming path; `complete` is reached only via auto-compaction,
         // which the ACP test suite doesn't exercise. If a future test needs it, populate the rounds
         // queue the same way and add a matching impl here.
-        Err(crate::error::AgshError::Provider(
+        Err(crate::error::MekaError::Provider(
             "MockProvider::complete is not implemented".to_string(),
         ))
     }
@@ -148,7 +148,7 @@ impl Provider for MockProvider {
             }
             match event {
                 MockEvent::Fail { message } => {
-                    return Err(crate::error::AgshError::Provider(message));
+                    return Err(crate::error::MekaError::Provider(message));
                 }
                 MockEvent::Sleep { ms } => {
                     // Race the sleep against cancellation so a mid-turn `session/cancel` doesn't
@@ -193,22 +193,22 @@ impl Provider for MockProvider {
     }
 }
 
-/// Read the JSON script from the path named in `AGSH_ACP_MOCK_PROVIDER_SCRIPT`. Returns `Ok(None)`
-/// when the env var is unset; `Err` only on actual parse failure (so the agsh startup path can
+/// Read the JSON script from the path named in `MEKA_ACP_MOCK_PROVIDER_SCRIPT`. Returns `Ok(None)`
+/// when the env var is unset; `Err` only on actual parse failure (so the meka startup path can
 /// choose to log+abort vs proceed).
 pub fn load_script_from_env() -> Result<Option<Vec<Vec<MockEvent>>>> {
-    let Ok(path) = std::env::var("AGSH_ACP_MOCK_PROVIDER_SCRIPT") else {
+    let Ok(path) = std::env::var("MEKA_ACP_MOCK_PROVIDER_SCRIPT") else {
         return Ok(None);
     };
     let body = std::fs::read_to_string(&path).map_err(|error| {
-        crate::error::AgshError::Config(format!(
-            "AGSH_ACP_MOCK_PROVIDER_SCRIPT='{}' could not be read: {}",
+        crate::error::MekaError::Config(format!(
+            "MEKA_ACP_MOCK_PROVIDER_SCRIPT='{}' could not be read: {}",
             path, error,
         ))
     })?;
     let rounds: Vec<Vec<MockEvent>> = serde_json::from_str(&body).map_err(|error| {
-        crate::error::AgshError::Config(format!(
-            "AGSH_ACP_MOCK_PROVIDER_SCRIPT='{}' is not valid JSON: {}",
+        crate::error::MekaError::Config(format!(
+            "MEKA_ACP_MOCK_PROVIDER_SCRIPT='{}' is not valid JSON: {}",
             path, error,
         ))
     })?;
@@ -273,7 +273,7 @@ mod tests {
         assert!(rx.recv().await.is_none(), "exhausted script emits nothing");
     }
 
-    /// `Fail` returns `Err(AgshError::Provider(_))` from [`Provider::stream`] without emitting any
+    /// `Fail` returns `Err(MekaError::Provider(_))` from [`Provider::stream`] without emitting any
     /// events. The agent loop turns that into a non-Interrupted `run_turn` error, which the ACP
     /// layer maps to a JSON-RPC `internal_error` response.
     #[tokio::test]
@@ -287,7 +287,7 @@ mod tests {
             .await;
         let error = result.expect_err("Fail must propagate as Err");
         assert!(
-            matches!(&error, crate::error::AgshError::Provider(message) if message == "boom"),
+            matches!(&error, crate::error::MekaError::Provider(message) if message == "boom"),
             "unexpected error: {:?}",
             error
         );

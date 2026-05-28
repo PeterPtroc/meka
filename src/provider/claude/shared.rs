@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{
         ContentBlock, Message, Role, StopReason, StreamEvent, TokenUsage, ToolDefinition,
         ToolResultContent,
@@ -134,7 +134,7 @@ pub(super) fn model_supports_modern_features(model: &str) -> bool {
 
 /// Mirrors Claude Code's `modelSupportsEffort` (`utils/effort.ts:23-49`):
 /// `opus-4-6` / `sonnet-4-6` allowlist, explicit deny for other named
-/// opus/sonnet/haiku, default-true for unknown model strings (agsh is 1P).
+/// opus/sonnet/haiku, default-true for unknown model strings (meka is 1P).
 pub(super) fn model_supports_effort(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     if lower.contains("opus-4-6") || lower.contains("sonnet-4-6") {
@@ -311,7 +311,7 @@ pub(super) fn parse_non_streaming_response(
     let content_array = response
         .get("content")
         .and_then(|content| content.as_array())
-        .ok_or_else(|| AgshError::Provider("no content array in response".to_string()))?;
+        .ok_or_else(|| MekaError::Provider("no content array in response".to_string()))?;
 
     let mut content_blocks = Vec::new();
 
@@ -334,14 +334,14 @@ pub(super) fn parse_non_streaming_response(
                     .get("id")
                     .and_then(|id| id.as_str())
                     .ok_or_else(|| {
-                        AgshError::Provider("tool_use block missing 'id' field".to_string())
+                        MekaError::Provider("tool_use block missing 'id' field".to_string())
                     })?
                     .to_string();
                 let name = block
                     .get("name")
                     .and_then(|name| name.as_str())
                     .ok_or_else(|| {
-                        AgshError::Provider("tool_use block missing 'name' field".to_string())
+                        MekaError::Provider("tool_use block missing 'name' field".to_string())
                     })?
                     .to_string();
                 let input = block.get("input").cloned().unwrap_or_else(|| {
@@ -400,7 +400,7 @@ pub(super) async fn drive_claude_sse_stream(
             tracing::warn!("failed to read Claude error response body: {}", error);
             String::new()
         });
-        return Err(AgshError::Provider(format!(
+        return Err(MekaError::Provider(format!(
             "API returned status {}: {}",
             status, response_text
         )));
@@ -416,7 +416,7 @@ pub(super) async fn drive_claude_sse_stream(
     loop {
         tokio::select! {
             _ = cancellation.cancelled() => {
-                return Err(AgshError::Interrupted);
+                return Err(MekaError::Interrupted);
             }
             event = event_stream.next() => {
                 let Some(event) = event else {
@@ -465,7 +465,7 @@ pub(super) async fn drive_claude_sse_stream(
                                         .get("id")
                                         .and_then(|id| id.as_str())
                                         .ok_or_else(|| {
-                                            AgshError::Provider(
+                                            MekaError::Provider(
                                                 "tool_use block missing 'id' field".to_string(),
                                             )
                                         })?
@@ -474,7 +474,7 @@ pub(super) async fn drive_claude_sse_stream(
                                         .get("name")
                                         .and_then(|name| name.as_str())
                                         .ok_or_else(|| {
-                                            AgshError::Provider(
+                                            MekaError::Provider(
                                                 "tool_use block missing 'name' field"
                                                     .to_string(),
                                             )
@@ -646,7 +646,7 @@ pub(super) async fn drive_claude_sse_stream(
                         {
                             tracing::trace!("stream event receiver dropped");
                         }
-                        return Err(AgshError::StreamError(error.to_string()));
+                        return Err(MekaError::StreamError(error.to_string()));
                     }
                 }
             }
@@ -834,7 +834,7 @@ where
     let body_json = build(redacted.as_ref())?;
 
     if body_json.len() > MAX_REQUEST_BYTES {
-        return Err(AgshError::Provider(format!(
+        return Err(MekaError::Provider(format!(
             "request body is {} MiB after redacting old tool-result images; \
              Anthropic's limit is 32 MiB. Run /compact, remove large attachments \
              from the most recent turn, or split the work across smaller turns.",

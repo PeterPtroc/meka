@@ -14,10 +14,10 @@ The `openai-api` provider uses the [Chat Completions API](https://platform.opena
 ### Minimal Setup
 
 ```bash
-export AGSH_PROVIDER=openai-api
-export AGSH_MODEL=gpt-4o
+export MEKA_PROVIDER=openai-api
+export MEKA_MODEL=gpt-4o
 export OPENAI_API_KEY=sk-...
-agsh
+meka
 ```
 
 ### Config File
@@ -43,10 +43,10 @@ To use an OpenAI-compatible endpoint, set the base URL:
 
 ```bash
 # Ollama
-agsh --provider openai-api --model llama3 --base-url http://localhost:11434/v1
+meka --provider openai-api --model llama3 --base-url http://localhost:11434/v1
 
 # OpenRouter
-agsh --provider openai-api --model anthropic/claude-sonnet-4-20250514 --base-url https://openrouter.ai/api/v1
+meka --provider openai-api --model anthropic/claude-sonnet-4-20250514 --base-url https://openrouter.ai/api/v1
 ```
 
 Or in the config file:

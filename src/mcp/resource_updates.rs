@@ -40,7 +40,7 @@ pub fn snapshot() -> Vec<(String, String, u64)> {
     out
 }
 
-/// Drop every entry for a given server — used when the server is disconnected or removed via `agsh
+/// Drop every entry for a given server — used when the server is disconnected or removed via `meka
 /// mcp remove`.
 pub fn clear_for_server(server_name: &str) {
     if let Ok(mut state) = ledger().lock() {

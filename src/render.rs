@@ -617,7 +617,7 @@ pub fn render_session_id(label: &str, id: &str) {
     eprintln!("{}", format!("{}: {}", label, id).with(Color::DarkGrey));
 }
 
-/// Format `rows` into a left-aligned, space-padded column layout — the shared renderer for agsh's
+/// Format `rows` into a left-aligned, space-padded column layout — the shared renderer for meka's
 /// CLI list tables (`skill list`, `mcp list`, `list`, `scratchpad_list`).
 ///
 /// Each column is widened to its longest cell, the matching header included. Columns are separated
@@ -629,7 +629,7 @@ pub fn render_session_id(label: &str, id: &str) {
 /// (Distinct from the private `format_table`, which lays out *markdown* pipe tables for the
 /// streaming renderer.)
 ///
-/// Width is measured in `char`s, which is correct for the ASCII-dominated data agsh tabulates
+/// Width is measured in `char`s, which is correct for the ASCII-dominated data meka tabulates
 /// (names, versions, UUIDs, timestamps); a CJK-heavy cell would pad slightly short — no caller hits
 /// that today.
 pub fn format_columns(headers: &[&str], rows: &[Vec<String>]) -> String {
@@ -748,9 +748,9 @@ pub fn render_error(error: &dyn std::fmt::Display) {
 /// Print the "no provider configured" hint shown when the agent fails to initialize. Centralized so
 /// the wording stays in sync everywhere.
 pub fn render_provider_setup_hint() {
-    eprintln!("Configure a provider and model to use agsh.");
-    eprintln!("Example: agsh --provider openai-api --model gpt-4o \"hello\"");
-    eprintln!("Or set AGSH_PROVIDER, AGSH_MODEL, and OPENAI_API_KEY environment variables.");
+    eprintln!("Configure a provider and model to use meka.");
+    eprintln!("Example: meka --provider openai-api --model gpt-4o \"hello\"");
+    eprintln!("Or set MEKA_PROVIDER, MEKA_MODEL, and OPENAI_API_KEY environment variables.");
 }
 
 /// Walk backwards through `messages` and return the suffix that starts at the `n`th most recent

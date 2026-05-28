@@ -38,7 +38,7 @@ pub enum SandboxCapability {
 }
 
 /// Result of probing a specific sandbox backend at config-resolution time. The probe is run once
-/// per agsh launch (twice when the resolver needs to consider both Landlock and Bubblewrap for
+/// per meka launch (twice when the resolver needs to consider both Landlock and Bubblewrap for
 /// auto-pick) and cached on `ResolvedConfig.backend_probe`.
 #[derive(Debug, Clone)]
 pub enum BackendProbe {
@@ -93,7 +93,7 @@ impl SandboxState {
     }
 }
 
-/// Where in the agsh lifecycle the sandbox-state check is happening. The "stronger sandbox
+/// Where in the meka lifecycle the sandbox-state check is happening. The "stronger sandbox
 /// available" nudge (Warn 2) only fires at startup; "backend unavailable" (Warn 1) fires at every
 /// relevant boundary because the user needs to know read-mode shell is broken right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,7 @@ pub enum WarnContext {
     /// Once-per-launch warn during `ResolvedConfig` construction or agent setup. Both Warn 1 and
     /// Warn 2 fire here.
     Startup,
-    /// Initial permission mode was `Read` at `agsh --permission read` launch. Only Warn 1 fires.
+    /// Initial permission mode was `Read` at `meka --permission read` launch. Only Warn 1 fires.
     InitialReadMode,
     /// User pressed Shift+Tab and cycled into `Read`. Only Warn 1 fires.
     ReadModeEntry,
@@ -135,11 +135,11 @@ pub fn warn_if_sandbox_issues(state: &SandboxState, context: WarnContext) {
         if let Some(reason) = backend_unavailable_reason(&state.probe) {
             // We deliberately don't suggest a specific alternative backend here — the "other"
             // backend might also be unavailable on this host (kernel without Landlock, bwrap not
-            // installed, etc.), and `agsh setup` is the path that probes both and resolves it
+            // installed, etc.), and `meka setup` is the path that probes both and resolves it
             // correctly.
             tracing::warn!(
                 "read-mode sandbox: {} (configured: {}). Read-mode shell commands will fail \
-                 until this is fixed. Run `agsh setup` to reconfigure, or update \
+                 until this is fixed. Run `meka setup` to reconfigure, or update \
                  [shell].sandbox_backend in config.toml.",
                 reason,
                 state.backend,
@@ -977,7 +977,7 @@ pub(crate) fn is_sensitive_env_name(name: &str) -> bool {
         "ANTHROPIC_",
         "OPENAI_",
         "CLAUDE_",
-        "AGSH_",
+        "MEKA_",
         // Major clouds.
         "AWS_",
         "GCP_",
@@ -1867,7 +1867,7 @@ mod tests {
     /// strip it.
     #[test]
     fn test_sandbox_child_env_drops_token_sentinel() {
-        const NAME: &str = "AGSH_TEST_SCRUB_TOKEN_PROBE";
+        const NAME: &str = "MEKA_TEST_SCRUB_TOKEN_PROBE";
         // SAFETY: `set_var`/`remove_var` are process-global and `cargo test` runs in-process tests
         // in parallel. The variable name is long and test-specific so it can't collide with another
         // test or the real environment.
@@ -1890,7 +1890,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_sandbox_child_env_drops_unknown_var() {
-        const NAME: &str = "AGSH_TEST_SCRUB_UNKNOWN_PROBE";
+        const NAME: &str = "MEKA_TEST_SCRUB_UNKNOWN_PROBE";
         unsafe {
             std::env::set_var(NAME, "should-be-dropped");
         }
@@ -1906,7 +1906,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_sandbox_child_env_keeps_lc_prefix() {
-        const NAME: &str = "LC_AGSH_TEST_PROBE";
+        const NAME: &str = "LC_MEKA_TEST_PROBE";
         unsafe {
             std::env::set_var(NAME, "en_US.UTF-8");
         }
@@ -1922,9 +1922,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_sandbox_child_env_keeps_xdg_prefix() {
-        const NAME: &str = "XDG_AGSH_TEST_PROBE";
+        const NAME: &str = "XDG_MEKA_TEST_PROBE";
         unsafe {
-            std::env::set_var(NAME, "/tmp/agsh-probe");
+            std::env::set_var(NAME, "/tmp/meka-probe");
         }
         let env = sandbox_child_env();
         let kept = env.iter().any(|(name, _)| name.to_string_lossy() == NAME);

@@ -1,18 +1,18 @@
-# agsh
+# meka
 
-A general-purpose AI agent runtime.
+A general-purpose AI agent harness.
 
 > [!CAUTION]
-> Agents can perform potentially destructive actions. Exercise caution when granting write permissions. It is not recommended to run agsh on important systems with write permissions enabled.
+> Agents can perform potentially destructive actions. Exercise caution when granting write permissions. It is not recommended to run meka on important systems with write permissions enabled.
 
 > [!WARNING]
 > Agents can consume a large number of tokens on complex tasks. If you're on a subscription, be prepared for quota exhaustion; if you are billed per token, it is recommended that you set a spending limit on the API key.
 
-![agsh Screenshot](https://github.com/user-attachments/assets/e94c40ee-76ae-4b00-bcfe-1c1d9d075a2b)
+![meka Screenshot](https://github.com/user-attachments/assets/e94c40ee-76ae-4b00-bcfe-1c1d9d075a2b)
 
 ## Overview
 
-agsh is a general-purpose AI agent runtime that provides LLMs with a rich set of tools — web search, shell execution, file editing, and more — to accomplish complex tasks. Use it as a natural-language shell, a system diagnostic helper, a research or data-analysis assistant, for general Q&A, or to add agentic capabilities to other applications.
+meka is a general-purpose AI agent harness that provides LLMs with a rich set of tools — web search, shell execution, file editing, and more — to accomplish complex tasks. Use it as a natural-language shell, a system diagnostic helper, a research or data-analysis assistant, for general Q&A, or to add agentic capabilities to other applications.
 
 Supported providers:
 
@@ -23,17 +23,17 @@ Supported providers:
 
 ## Installation
 
-Download a pre-built binary from [GitHub Releases](https://github.com/k4yt3x/agsh/releases/latest), or install with Cargo:
+Download a pre-built binary from [GitHub Releases](https://github.com/k4yt3x/meka/releases/latest), or install with Cargo:
 
 ```bash
-cargo install --locked --git https://github.com/k4yt3x/agsh.git
+cargo install --locked --git https://github.com/k4yt3x/meka.git
 ```
 
 ## Quick Start
 
-Run `agsh setup` for an interactive wizard that picks a provider, runs the OAuth login if applicable, and writes the config for you.
+Run `meka setup` for an interactive wizard that picks a provider, runs the OAuth login if applicable, and writes the config for you.
 
-To configure manually, create `~/.config/agsh/config.toml`. For example, to use OpenRouter with a Claude model:
+To configure manually, create `~/.config/meka/config.toml`. For example, to use OpenRouter with a Claude model:
 
 ```toml
 [provider]
@@ -43,14 +43,14 @@ api_key = "sk-or-v1-..."
 model = "anthropic/claude-opus-4.6"
 ```
 
-Run `agsh` and start typing. Press Shift+Tab to cycle permissions (none, read, ask, write):
+Run `meka` and start typing. Press Shift+Tab to cycle permissions (none, read, ask, write):
 
 ```
-agsh [r] > find all TODO comments in this project
-agsh [w] > install and start nginx
+meka [r] > find all TODO comments in this project
+meka [w] > install and start nginx
 ```
 
-See the [documentation](https://k4yt3x.github.io/agsh) for the full usage guide.
+See the [documentation](https://docs.meka.so) for the full usage guide.
 
 ## Tools
 
@@ -84,10 +84,10 @@ The prompt indicator shows the current permission mode. Press **Shift+Tab** to c
 
 Conversations are persisted in a local SQLite database and can be resumed:
 
-- `agsh -c` continues the last session
-- `agsh -c <UUID>` resumes a specific session by ID
-- `agsh list` lists past sessions
-- `agsh export <UUID>` exports a session as Markdown
+- `meka -c` continues the last session
+- `meka -c <UUID>` resumes a specific session by ID
+- `meka list` lists past sessions
+- `meka export <UUID>` exports a session as Markdown
 - `/export` exports the current session from within the shell
 - `/compact` summarizes and compacts the session history
 
@@ -97,15 +97,15 @@ Conversations are persisted in a local SQLite database and can be resumed:
 - **Syntax-highlighted output**: bat-powered markdown rendering with code block highlighting
 - **Auto-compact**: automatically compacts the conversation when approaching the context limit
 - **MCP support**: extend the agent with tools from external MCP servers
-- **Skills**: load reusable prompt templates from `~/.config/agsh/skills/`
+- **Skills**: load reusable prompt templates from `~/.config/meka/skills/`
 
 ## Shell Escape
 
 Prefix input with `!` to execute a command directly, bypassing the LLM:
 
 ```
-agsh [r] > !uname -a
-agsh [r] > !docker ps
+meka [r] > !uname -a
+meka [r] > !docker ps
 ```
 
 Type `exit`, `quit`, or press **Ctrl+D** to leave the shell.

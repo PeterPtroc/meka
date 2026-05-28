@@ -1,4 +1,4 @@
-//! Configuration: parses `~/.config/agsh/config.toml`, layers CLI overrides and environment
+//! Configuration: parses `~/.config/meka/config.toml`, layers CLI overrides and environment
 //! variables on top, and produces a [`ResolvedConfig`] that the rest of the binary consumes.
 
 use std::{
@@ -33,7 +33,7 @@ pub struct ConfigFile {
     pub serve: Option<ServeConfig>,
 }
 
-/// `[serve]` table: HTTP server config for `agsh serve`. All fields optional with sensible
+/// `[serve]` table: HTTP server config for `meka serve`. All fields optional with sensible
 /// defaults, but at least one `[[serve.tokens]]` entry is required — the server refuses to
 /// start without one.
 #[derive(Debug, Deserialize, Default)]
@@ -144,8 +144,8 @@ pub struct McpServerConfig {
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// Optional path to an executable that, when run, prints dynamic HTTP headers to stdout in
     /// `Name: Value\n` form. Merged over [`Self::headers`] (dynamic wins). Useful for SSO flows
-    /// where bearer tokens rotate. The script is spawned with `AGSH_MCP_SERVER_NAME` and
-    /// `AGSH_MCP_SERVER_URL` in its environment so one helper can drive multiple servers. Non-zero
+    /// where bearer tokens rotate. The script is spawned with `MEKA_MCP_SERVER_NAME` and
+    /// `MEKA_MCP_SERVER_URL` in its environment so one helper can drive multiple servers. Non-zero
     /// exit fails the connect.
     pub headers_helper: Option<String>,
     pub auth: Option<McpAuthConfig>,
@@ -171,7 +171,7 @@ pub struct McpServerConfig {
     /// server inject arbitrary messages into your LLM context and spend your provider quota.
     #[serde(default)]
     pub sampling: bool,
-    /// Cap on the number of sampling calls this server may issue per agsh session. Only meaningful
+    /// Cap on the number of sampling calls this server may issue per meka session. Only meaningful
     /// when `sampling = true`. Default: 10.
     pub sampling_limit: Option<u32>,
     /// When true, this server is skipped at startup — no process is spawned, no HTTP connect
@@ -375,7 +375,7 @@ impl WebClientConfig {
 }
 
 /// Default UA for the web tools when `[web].user_agent` is unset. Kept in sync with what real
-/// Chrome emits so anti-bot filters don't single out agsh by default.
+/// Chrome emits so anti-bot filters don't single out meka by default.
 pub const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
 /// Max conversation messages kept in the per-turn API window by default.
@@ -447,7 +447,7 @@ pub struct ProviderConfig {
     /// knob — see `temp/claude-code/src/utils/effort.ts`. Accepted values: `"low" | "medium" |
     /// "high"`. Defaults to `"high"`.
     pub effort: Option<String>,
-    /// `claude-oauth` only: when true, agsh sends the `redact-thinking-2026-02-12` beta header so
+    /// `claude-oauth` only: when true, meka sends the `redact-thinking-2026-02-12` beta header so
     /// the server returns `redacted_thinking` blocks instead of full thinking summaries (saves
     /// bandwidth, but the redacted payloads can't be replayed back to the server in multi-turn
     /// conversations). Defaults to false.
@@ -528,10 +528,10 @@ pub struct ResolvedConfig {
     /// Per-server connect+initialize timeout.
     pub mcp_connect_timeout: std::time::Duration,
     /// Raw `[serve]` section. Resolved (defaults filled, env vars substituted, token files
-    /// read) at `agsh serve` startup by [`ResolvedServeConfig::resolve`], not here, so
+    /// read) at `meka serve` startup by [`ResolvedServeConfig::resolve`], not here, so
     /// `from_cli` can stay infallible.
     pub serve: Option<ServeConfig>,
-    /// CLI-flag override for `[serve].bind` (`agsh serve --bind ...`). Wins over the config
+    /// CLI-flag override for `[serve].bind` (`meka serve --bind ...`). Wins over the config
     /// file when set.
     pub serve_bind_override: Option<String>,
 }
@@ -580,7 +580,7 @@ impl std::fmt::Debug for ResolvedServeToken {
     }
 }
 
-/// Provenance of a configured token. Determines whether `agsh serve` emits a `warn!` at startup
+/// Provenance of a configured token. Determines whether `meka serve` emits a `warn!` at startup
 /// (inline plaintext) or file-backed.
 #[derive(Debug, Clone)]
 pub enum TokenSource {
@@ -819,20 +819,20 @@ pub fn parse_input_style(raw: &str) -> nu_ansi_term::Style {
     }
 }
 
-/// Returns the agsh config directory (the directory that contains `config.toml` and `skills/`).
-/// Honours the `AGSH_CONFIG_DIR` env var — used by tests for per-run isolation and by power users
+/// Returns the meka config directory (the directory that contains `config.toml` and `skills/`).
+/// Honours the `MEKA_CONFIG_DIR` env var — used by tests for per-run isolation and by power users
 /// who want a non-standard location — before falling back to the platform-native
-/// `dirs::config_dir().join("agsh")`. The env-var route is the only reliable way to isolate state
+/// `dirs::config_dir().join("meka")`. The env-var route is the only reliable way to isolate state
 /// on macOS and Windows, where `dirs::config_dir()` doesn't honour `XDG_CONFIG_HOME`.
-pub fn agsh_config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("AGSH_CONFIG_DIR") {
+pub fn meka_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MEKA_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }
-    dirs::config_dir().map(|directory| directory.join("agsh"))
+    dirs::config_dir().map(|directory| directory.join("meka"))
 }
 
 pub(crate) fn config_file_path() -> Option<PathBuf> {
-    agsh_config_dir().map(|dir| dir.join("config.toml"))
+    meka_config_dir().map(|dir| dir.join("config.toml"))
 }
 
 pub(crate) fn config_file_exists() -> bool {
@@ -1052,7 +1052,7 @@ fn resolve_permission(
         Ok(mode) => Some(mode),
         Err(_) => {
             tracing::warn!(
-                "ignoring invalid AGSH_PERMISSION='{}' (expected none, read, ask, or \
+                "ignoring invalid MEKA_PERMISSION='{}' (expected none, read, ask, or \
                  write)",
                 raw
             );
@@ -1083,7 +1083,7 @@ fn resolve_permission(
 /// — no silent fallback at runtime; an unavailable explicit backend surfaces at use time via the
 /// `BackendProbe::Missing` / `UserNamespaceDenied` variants.
 ///
-/// When the value is unset (`None`), agsh probes bubblewrap and picks it if available, falling back
+/// When the value is unset (`None`), meka probes bubblewrap and picks it if available, falling back
 /// to landlock otherwise. The `auto_resolved` flag is propagated so the startup warn helper can
 /// nudge the user once toward installing bwrap (without nagging users who explicitly pinned
 /// landlock).
@@ -1096,7 +1096,7 @@ fn resolve_sandbox_backend(
     // Probe Bubblewrap only when its result is load-bearing for the resolution: either the user
     // pinned it explicitly, or no value was configured (so we need the probe to decide whether to
     // auto-pick it). When the user pinned Landlock, the Bubblewrap smoke test would be pure waste
-    // (~500 ms on every agsh start).
+    // (~500 ms on every meka start).
     let (backend, auto_resolved, cached_bubblewrap_probe) = match configured {
         Some(explicit) => (explicit, false, None),
         None => {
@@ -1242,7 +1242,7 @@ impl ResolvedConfig {
         let user_instructions = cli
             .instructions
             .clone()
-            .or_else(|| std::env::var("AGSH_INSTRUCTIONS").ok())
+            .or_else(|| std::env::var("MEKA_INSTRUCTIONS").ok())
             .or(file_prompt.instructions)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
@@ -1285,13 +1285,13 @@ impl ResolvedConfig {
         let provider_name = cli
             .provider
             .clone()
-            .or_else(|| std::env::var("AGSH_PROVIDER").ok())
+            .or_else(|| std::env::var("MEKA_PROVIDER").ok())
             .or_else(|| file_provider.name.clone());
 
         let model = cli
             .model
             .clone()
-            .or_else(|| std::env::var("AGSH_MODEL").ok())
+            .or_else(|| std::env::var("MEKA_MODEL").ok())
             .or_else(|| file_provider.model.clone());
 
         let auth_credential = credential::resolve(provider_name.as_deref(), &file_provider);
@@ -1305,7 +1305,7 @@ impl ResolvedConfig {
         let file_permissions = config_file.permissions.unwrap_or_default();
         let (permission, enabled_permissions) = resolve_permission(
             cli.permission,
-            std::env::var("AGSH_PERMISSION").ok().as_deref(),
+            std::env::var("MEKA_PERMISSION").ok().as_deref(),
             file_permissions.default.as_deref(),
             file_permissions.enabled.as_deref(),
         );
@@ -1319,7 +1319,7 @@ impl ResolvedConfig {
 
         // Only probe the sandbox backend when sandboxing is actually enabled. Skipping the probe
         // for `sandbox = false` saves the smoke-test cost on every invocation of subcommands that
-        // don't touch the shell (`agsh list`, `agsh export`, `agsh mcp list`, etc.) when the user
+        // don't touch the shell (`meka list`, `meka export`, `meka mcp list`, etc.) when the user
         // has disabled sandboxing globally. The placeholder probe is never consulted in that state
         // — the shell tool short-circuits on `sandbox_enabled = false`, and the warn helper early-
         // returns on `!state.enabled`.
@@ -1411,15 +1411,15 @@ impl ResolvedConfig {
     pub fn validate(&self) -> crate::error::Result<()> {
         match self.provider_name.as_deref() {
             None => {
-                return Err(crate::error::AgshError::Config(format!(
-                    "no provider configured. Set --provider, AGSH_PROVIDER env var, or \
-                     provider.name in config file (~/.config/agsh/config.toml). Supported \
+                return Err(crate::error::MekaError::Config(format!(
+                    "no provider configured. Set --provider, MEKA_PROVIDER env var, or \
+                     provider.name in config file (~/.config/meka/config.toml). Supported \
                      providers: {}",
                     crate::provider::SUPPORTED_PROVIDERS.join(", "),
                 )));
             }
             Some(name) if !crate::provider::SUPPORTED_PROVIDERS.contains(&name) => {
-                return Err(crate::error::AgshError::Config(format!(
+                return Err(crate::error::MekaError::Config(format!(
                     "'{}' is not a valid provider. Supported providers: {}",
                     name,
                     crate::provider::SUPPORTED_PROVIDERS.join(", "),
@@ -1428,9 +1428,9 @@ impl ResolvedConfig {
             Some(_) => {}
         }
         if self.model.is_none() {
-            return Err(crate::error::AgshError::Config(
-                "no model configured. Set --model, AGSH_MODEL env var, \
-                 or provider.model in config file (~/.config/agsh/config.toml)"
+            return Err(crate::error::MekaError::Config(
+                "no model configured. Set --model, MEKA_MODEL env var, \
+                 or provider.model in config file (~/.config/meka/config.toml)"
                     .to_string(),
             ));
         }
@@ -1460,7 +1460,7 @@ mod device_id {
     use super::{config_file_path, write_config_atomic};
 
     /// Lookup order: configured → persisted → Claude Code's `~/.claude.json` userID → freshly
-    /// generated. The claude.json fallback lets agsh and Claude Code on the same machine share a
+    /// generated. The claude.json fallback lets meka and Claude Code on the same machine share a
     /// device identity.
     pub(super) fn resolve(provider_name: Option<&str>, configured: Option<&str>) -> String {
         if provider_name != Some("claude-oauth") {
@@ -1747,7 +1747,7 @@ mod tests {
     fn test_web_config_all_fields_parse() {
         let toml_str = r#"
 [web]
-user_agent = "agsh-test"
+user_agent = "meka-test"
 request_timeout_seconds = 60
 connect_timeout_seconds = 5
 read_timeout_seconds = 10
@@ -1761,7 +1761,7 @@ danger_accept_invalid_hostnames = true
 "#;
         let config: ConfigFile = toml::from_str(toml_str).expect("parse toml");
         let web = config.web.expect("web present");
-        assert_eq!(web.user_agent.as_deref(), Some("agsh-test"));
+        assert_eq!(web.user_agent.as_deref(), Some("meka-test"));
         assert_eq!(web.request_timeout_seconds, Some(60));
         assert_eq!(web.connect_timeout_seconds, Some(5));
         assert_eq!(web.read_timeout_seconds, Some(10));
@@ -2036,7 +2036,7 @@ name = "claude-oauth"
 
     #[test]
     fn test_read_user_id_from_empty_string_returns_none() {
-        // An empty `userID` in claude.json shouldn't override agsh's own random-generation fallback
+        // An empty `userID` in claude.json shouldn't override meka's own random-generation fallback
         // — treat it as "not configured".
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("claude.json");
@@ -2527,7 +2527,7 @@ Rule 2.
         assert_eq!(resolved.as_deref(), Some("from config"));
     }
 
-    /// End-to-end check that AGSH_INSTRUCTIONS overrides `[prompt].instructions` when
+    /// End-to-end check that MEKA_INSTRUCTIONS overrides `[prompt].instructions` when
     /// `--instructions` is not on the CLI. Drives the actual `from_cli` path against a
     /// tempdir-backed config to catch any regression where the env-var read silently no-ops.
     ///
@@ -2551,24 +2551,24 @@ Rule 2.
 
         // SAFETY: ENV_LOCK serializes this with any other env-var test.
         unsafe {
-            std::env::set_var("AGSH_CONFIG_DIR", dir.path());
-            std::env::set_var("AGSH_INSTRUCTIONS", "FROM ENV VAR");
+            std::env::set_var("MEKA_CONFIG_DIR", dir.path());
+            std::env::set_var("MEKA_INSTRUCTIONS", "FROM ENV VAR");
         }
 
         use clap::Parser;
-        let cli = crate::cli::Cli::parse_from(["agsh"]);
+        let cli = crate::cli::Cli::parse_from(["meka"]);
         let resolved = ResolvedConfig::from_cli(&cli);
 
         // SAFETY: same as above — ENV_LOCK held for the full set→read→clear cycle.
         unsafe {
-            std::env::remove_var("AGSH_CONFIG_DIR");
-            std::env::remove_var("AGSH_INSTRUCTIONS");
+            std::env::remove_var("MEKA_CONFIG_DIR");
+            std::env::remove_var("MEKA_INSTRUCTIONS");
         }
 
         assert_eq!(
             resolved.user_instructions.as_deref(),
             Some("FROM ENV VAR"),
-            "AGSH_INSTRUCTIONS should override [prompt].instructions in the config file",
+            "MEKA_INSTRUCTIONS should override [prompt].instructions in the config file",
         );
     }
 
@@ -2600,7 +2600,7 @@ Rule 2.
     fn test_write_config_atomic_sets_unix_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let parent = dir.path().join("agsh");
+        let parent = dir.path().join("meka");
         let path = parent.join("config.toml");
         write_config_atomic(&path, "x = 1\n").expect("atomic write");
 
@@ -2747,7 +2747,7 @@ enabled = ["read", "write"]
 
     /// `sandbox_backend = "bubblewrap"` and `"landlock"` deserialize cleanly. Any other value,
     /// including the prior internal alias `"bwrap"`, must be rejected — we don't want alias creep
-    /// that would silently desync `agsh setup`-generated configs from hand-edited ones.
+    /// that would silently desync `meka setup`-generated configs from hand-edited ones.
     #[test]
     fn test_sandbox_backend_deserializes_strict_values() {
         let bubblewrap: ShellConfig =

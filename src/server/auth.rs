@@ -1,4 +1,4 @@
-//! Bearer-token authentication for `agsh serve`. Reads `Authorization: Bearer <token>` from each
+//! Bearer-token authentication for `meka serve`. Reads `Authorization: Bearer <token>` from each
 //! incoming request, matches against the configured token list using constant-time comparison
 //! (so a near-miss can't be distinguished from an early mismatch via timing), and attaches the
 //! matched principal to the request extensions for downstream handlers to consult.

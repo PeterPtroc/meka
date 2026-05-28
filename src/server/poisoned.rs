@@ -1,4 +1,4 @@
-//! Logs `std::sync::Mutex` / `RwLock` poisoning instead of silently recovering. agsh's server
+//! Logs `std::sync::Mutex` / `RwLock` poisoning instead of silently recovering. meka's server
 //! code holds these synchronous locks for microsecond-scale critical sections that never
 //! `.await` (poisoning requires a panic while holding the guard, which we don't expect), but
 //! "shouldn't happen" isn't "won't happen". If a panic does poison a lock the recovered guard

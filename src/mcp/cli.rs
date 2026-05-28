@@ -1,22 +1,22 @@
-//! `agsh mcp …` management subcommands.
+//! `meka mcp …` management subcommands.
 
 use std::sync::Arc;
 
 use crate::{
     config::{McpAuthConfig, McpServerConfig, McpTransport},
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     mcp::{McpClientContext, McpClientManager},
     session::TokenStore,
 };
 
-fn config_err(message: impl Into<String>) -> AgshError {
-    AgshError::Config(message.into())
+fn config_err(message: impl Into<String>) -> MekaError {
+    MekaError::Config(message.into())
 }
 
-/// Run `agsh mcp list` — print configured servers + their transport/URL.
+/// Run `meka mcp list` — print configured servers + their transport/URL.
 ///
 /// When `manager` is `Some`, the output also carries a `state` column showing each server's live
-/// lifecycle state (`pending` / `connected` / `failed` / `disabled`). The out-of-band `agsh mcp
+/// lifecycle state (`pending` / `connected` / `failed` / `disabled`). The out-of-band `meka mcp
 /// list` CLI doesn't have a running manager and gets the no-state view; the REPL's `/mcp list`
 /// passes the live manager for the richer output.
 pub async fn run_list(
@@ -95,7 +95,7 @@ pub async fn run_list(
     Ok(())
 }
 
-/// Run `agsh mcp get <name>` — print a single server config in detail.
+/// Run `meka mcp get <name>` — print a single server config in detail.
 pub async fn run_get(servers: &[McpServerConfig], name: &str) -> Result<()> {
     let config = servers
         .iter()
@@ -154,8 +154,8 @@ pub async fn run_get(servers: &[McpServerConfig], name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `agsh mcp reconnect <name>` — connect once as a smoke test, print `ok` on success and the
-/// error otherwise. Does not mutate config. Run `agsh mcp tools <name>` — connect to the server,
+/// Run `meka mcp reconnect <name>` — connect once as a smoke test, print `ok` on success and the
+/// error otherwise. Does not mutate config. Run `meka mcp tools <name>` — connect to the server,
 /// list every advertised tool, resolve permissions, and print a column-aligned table.
 /// Disabled-by-allow/block tools are still shown (marked `blocked`) so users can edit their config
 /// without leaving the CLI to discover names.
@@ -322,7 +322,7 @@ pub async fn run_reconnect(
     }
 }
 
-/// Run `agsh mcp logout <name>` — clear any stored OAuth credentials for the given server, and
+/// Run `meka mcp logout <name>` — clear any stored OAuth credentials for the given server, and
 /// clear the auth-probe cache entry (if any).
 pub async fn run_logout(
     servers: &[McpServerConfig],
@@ -348,7 +348,7 @@ pub async fn run_logout(
     Ok(())
 }
 
-/// Run `agsh mcp login <name>` — drive an interactive OAuth flow.
+/// Run `meka mcp login <name>` — drive an interactive OAuth flow.
 ///
 /// If the config has an explicit `[auth]` block, it's honoured as-is. If the server is HTTP with no
 /// `auth` set, we assume `type = "oauth"` (authorization-code grant with dynamic client
@@ -493,7 +493,7 @@ fn persist_auth_block_for(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Inputs for `agsh mcp add`. Parsed into a [`ResolvedAddArgs`] by [`resolve_add_args`] which is
+/// Inputs for `meka mcp add`. Parsed into a [`ResolvedAddArgs`] by [`resolve_add_args`] which is
 /// where transport auto-detection, flag compatibility, and the `McpAuthKind` → `McpAuthConfig`
 /// mapping live. Keep this struct plain-data so the clap layer in `cli.rs` and the CLI integration
 /// tests can both build one.
@@ -529,7 +529,7 @@ pub struct AddArgs {
     /// Raw `NAME=LEVEL` pairs for per-tool permission overrides.
     pub tool_permission: Vec<String>,
     /// Persist with `disabled = true` so the server is skipped at startup until the user runs
-    /// `agsh mcp enable <name>`.
+    /// `meka mcp enable <name>`.
     pub disabled: bool,
 }
 
@@ -563,7 +563,7 @@ struct ResolvedAddArgs {
     disabled: bool,
 }
 
-/// Run `agsh mcp add …`.
+/// Run `meka mcp add …`.
 ///
 /// Persists the server into `config.toml`, then for HTTP servers:
 ///   1. Probes the endpoint (RFC 6750 / RFC 9728) to see if auth is required.
@@ -661,13 +661,13 @@ pub async fn run_add(args: AddArgs, token_store: &TokenStore) -> Result<()> {
     // an interrupted user ends up in exactly the same place as a clean `mcp remove`.
     let result: Result<()> = tokio::select! {
         biased;
-        _ = tokio::signal::ctrl_c() => Err(AgshError::Interrupted),
+        _ = tokio::signal::ctrl_c() => Err(MekaError::Interrupted),
         r = probe_then_login(&resolved, token_store) => r,
     };
 
     if let Err(error) = result {
         match &error {
-            AgshError::Interrupted => {
+            MekaError::Interrupted => {
                 tracing::warn!("interrupted — rolling back '{}'.", resolved.name);
             }
             other => tracing::warn!(
@@ -714,7 +714,7 @@ async fn probe_then_login(resolved: &ResolvedAddArgs, token_store: &TokenStore) 
     }
     if resolved.no_login {
         tracing::info!(
-            "skipping auto-login (--no-login). Run `agsh mcp login {}` when ready.",
+            "skipping auto-login (--no-login). Run `meka mcp login {}` when ready.",
             resolved.name
         );
         return Ok(());
@@ -1368,7 +1368,7 @@ async fn purge_server(name: &str, token_store: &TokenStore) -> Result<std::path:
     Ok(path)
 }
 
-/// Run `agsh mcp remove <name>` — delete the entry from config.toml, best-effort revoke OAuth
+/// Run `meka mcp remove <name>` — delete the entry from config.toml, best-effort revoke OAuth
 /// tokens at the provider, clear local state.
 pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
     let path = purge_server(name, token_store).await?;
@@ -1377,7 +1377,7 @@ pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
 }
 
 /// Set `disabled = <value>` on a server entry in config.toml, preserving other fields and
-/// formatting. Backs `agsh mcp disable|enable`. Writes atomically via
+/// formatting. Backs `meka mcp disable|enable`. Writes atomically via
 /// [`crate::config::write_config_atomic`].
 async fn set_server_disabled(name: &str, disabled: bool) -> Result<std::path::PathBuf> {
     let path = crate::config::config_file_path()
@@ -1413,7 +1413,7 @@ async fn set_server_disabled(name: &str, disabled: bool) -> Result<std::path::Pa
     Ok(path)
 }
 
-/// Run `agsh mcp disable <name>` — set `disabled = true` in config.toml. The currently-running agsh
+/// Run `meka mcp disable <name>` — set `disabled = true` in config.toml. The currently-running meka
 /// session (if any) keeps its state; the change takes effect on the next start.
 pub async fn run_disable(name: &str) -> Result<()> {
     let path = set_server_disabled(name, true).await?;
@@ -1421,7 +1421,7 @@ pub async fn run_disable(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `agsh mcp enable <name>` — clear `disabled` from the server entry in config.toml.
+/// Run `meka mcp enable <name>` — clear `disabled` from the server entry in config.toml.
 pub async fn run_enable(name: &str) -> Result<()> {
     let path = set_server_disabled(name, false).await?;
     tracing::info!("enabled '{}' in {}", name, path.display());

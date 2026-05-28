@@ -15,10 +15,10 @@ The `claude-api` provider talks to the [Claude Messages API](https://docs.anthro
 ### Minimal Setup
 
 ```bash
-export AGSH_PROVIDER=claude-api
-export AGSH_MODEL=claude-opus-4-6
+export MEKA_PROVIDER=claude-api
+export MEKA_MODEL=claude-opus-4-6
 export CLAUDE_API_KEY=sk-ant-api03-...
-agsh
+meka
 ```
 
 ### Config File
@@ -46,7 +46,7 @@ Older but still available: `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-
 To use a Claude-API-compatible proxy or gateway:
 
 ```bash
-agsh --provider claude-api --model claude-opus-4-6 --base-url https://my-proxy.example.com
+meka --provider claude-api --model claude-opus-4-6 --base-url https://my-proxy.example.com
 ```
 
 ## API Details

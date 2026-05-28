@@ -9,7 +9,7 @@ fn main() {
     #[cfg(windows)]
     {
         let mut resource = winres::WindowsResource::new();
-        resource.set_icon("assets/agsh.ico");
+        resource.set_icon("assets/meka.ico");
         resource.compile().expect("failed to compile resources");
     }
 }

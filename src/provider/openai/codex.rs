@@ -19,7 +19,7 @@ use self::{
     responses::{build_request_body, drive_responses_sse_stream},
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{
         AuthCredential, DEFAULT_OPENAI_CODEX_CLIENT_ID, Message, Provider, StopReason, StreamEvent,
         TokenUsage, ToolDefinition,
@@ -39,7 +39,7 @@ const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
 /// `originator` request header value. Mirrors Codex's `codex_cli_rs` slot — flagged as the calling
 /// tool so OpenAI can attribute traffic.
-const ORIGINATOR: &str = "agsh_cli";
+const ORIGINATOR: &str = "meka_cli";
 
 fn now_epoch_millis() -> i64 {
     std::time::SystemTime::now()
@@ -78,7 +78,7 @@ impl OpenAiCodexProvider {
             .cookie_store(true)
             .build()
             .map_err(|error| {
-                AgshError::Provider(format!(
+                MekaError::Provider(format!(
                     "failed to build openai-codex HTTP client: {}",
                     error
                 ))
@@ -94,7 +94,7 @@ impl OpenAiCodexProvider {
             token_store,
             reasoning_effort,
             user_agent: format!(
-                "agsh/{} ({}; {})",
+                "meka/{} ({}; {})",
                 env!("CARGO_PKG_VERSION"),
                 std::env::consts::OS,
                 std::env::consts::ARCH
@@ -128,7 +128,7 @@ impl OpenAiCodexProvider {
                 ..
             } = &*credential
             else {
-                return Err(AgshError::Provider(
+                return Err(MekaError::Provider(
                     "openai-codex requires an OAuth token, not an API key".to_string(),
                 ));
             };
@@ -142,7 +142,7 @@ impl OpenAiCodexProvider {
         let mut credential = self.credential.write().await;
 
         // Re-read the latest credential from the DB. Refresh tokens rotate on each successful
-        // refresh, and a sibling agsh process may have rotated ours since startup. Without this
+        // refresh, and a sibling meka process may have rotated ours since startup. Without this
         // re-read we'd POST a stale refresh_token and the OAuth provider would reject it with
         // `invalid_grant`.
         if let Some(store) = &self.token_store {
@@ -158,7 +158,7 @@ impl OpenAiCodexProvider {
             }
         }
 
-        // Double-check after the DB re-read: another caller (in this process or a sibling agsh) may
+        // Double-check after the DB re-read: another caller (in this process or a sibling meka) may
         // already have rotated to a still-valid access token.
         if let AuthCredential::OAuthToken {
             access_token,
@@ -178,7 +178,7 @@ impl OpenAiCodexProvider {
             _ => None,
         };
         let Some(refresh_token) = refresh_token else {
-            return Err(AgshError::Provider(
+            return Err(MekaError::Provider(
                 "OAuth access token expired and no refresh token available".to_string(),
             ));
         };
@@ -217,7 +217,7 @@ impl OpenAiCodexProvider {
             .send()
             .await
             .map_err(|error| {
-                AgshError::Provider(format!(
+                MekaError::Provider(format!(
                     "Codex OAuth token refresh request failed: {}",
                     crate::error::format_reqwest_error(&error)
                 ))
@@ -229,7 +229,7 @@ impl OpenAiCodexProvider {
                 tracing::warn!("failed to read Codex OAuth refresh error body: {}", error);
                 String::new()
             });
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "Codex OAuth token refresh failed ({}): {}",
                 status, body
             )));
@@ -243,11 +243,11 @@ impl OpenAiCodexProvider {
         }
 
         let data: RefreshResponse = response.json().await.map_err(|error| {
-            AgshError::Provider(format!("failed to parse Codex refresh response: {}", error))
+            MekaError::Provider(format!("failed to parse Codex refresh response: {}", error))
         })?;
 
         let access_token = data.access_token.ok_or_else(|| {
-            AgshError::Provider("Codex refresh response missing access_token".to_string())
+            MekaError::Provider("Codex refresh response missing access_token".to_string())
         })?;
 
         // Re-extract `chatgpt_account_id` from the new id_token if the server returned one — the
@@ -307,7 +307,7 @@ impl Provider for OpenAiCodexProvider {
     )> {
         // The Responses API on chatgpt.com only ever returns SSE; there is no non-streaming JSON
         // response shape to parse. The agent layer calls `stream` for openai-codex.
-        Err(AgshError::Provider(
+        Err(MekaError::Provider(
             "openai-codex does not support non-streaming completion; use streaming mode"
                 .to_string(),
         ))
@@ -341,7 +341,7 @@ impl Provider for OpenAiCodexProvider {
             .json(&body);
 
         let response = request.send().await.map_err(|error| {
-            AgshError::Provider(format!(
+            MekaError::Provider(format!(
                 "Codex HTTP request failed: {}",
                 crate::error::format_reqwest_error(&error)
             ))
@@ -456,7 +456,7 @@ mod tests {
         )
         .expect("provider");
         let result = provider.ensure_valid_credential().await;
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 
     #[tokio::test]
@@ -478,7 +478,7 @@ mod tests {
         )
         .expect("provider");
         let result = provider.ensure_valid_credential().await;
-        assert!(matches!(result, Err(AgshError::Provider(ref m)) if m.contains("expired")));
+        assert!(matches!(result, Err(MekaError::Provider(ref m)) if m.contains("expired")));
     }
 
     #[tokio::test]
@@ -487,6 +487,6 @@ mod tests {
         // fall back to a non-streaming code path that doesn't exist for this endpoint.
         let provider = test_provider();
         let result = provider.complete("", &[], &[]).await;
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 }

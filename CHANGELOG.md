@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `agsh acp` subcommand for editors that speak the Agent Client Protocol.
-- `agsh serve` subcommand exposes the agent over HTTP+JSON.
+- `meka acp` subcommand for editors that speak the Agent Client Protocol.
+- `meka serve` subcommand exposes the agent over HTTP+JSON.
 
 ### Changed
 
+- Renamed the project `agsh` → `meka`: binary, `~/.config/meka` config dir, `MEKA_*` env vars.
 - `serde_yaml` (unmaintained) replaced with the maintained `serde_norway` fork.
 - `edit_file` now rejects an ambiguous `old_string` (multiple matches without `replace_all`).
 

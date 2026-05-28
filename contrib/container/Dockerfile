@@ -14,6 +14,6 @@ RUN pacman -Syu --noconfirm \
     && cargo build --release --locked
 
 FROM archlinux:latest
-COPY --from=builder /src/target/release/agsh /usr/local/bin/agsh
+COPY --from=builder /src/target/release/meka /usr/local/bin/meka
 WORKDIR /root
-ENTRYPOINT ["/usr/local/bin/agsh"]
+ENTRYPOINT ["/usr/local/bin/meka"]

@@ -197,13 +197,13 @@ pub fn build_system_prompt(
     let mut prompt = String::new();
 
     prompt.push_str(
-        "You are agsh, an agentic shell assistant. The user communicates with you \
+        "You are meka, a general-purpose AI agent. The user communicates with you \
          in natural language, and you execute their requests using the available tools.\n\n",
     );
 
     prompt.push_str("## Permission Model\n\n");
     prompt.push_str(
-        "agsh runs at a graduated permission level that the user can change mid-session \
+        "meka runs at a graduated permission level that the user can change mid-session \
          by pressing Shift+Tab or typing `/permission <level>`. Levels, from least to \
          most powerful:\n\n",
     );

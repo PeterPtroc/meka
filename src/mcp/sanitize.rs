@@ -3,9 +3,9 @@
 //! C0/C1 controls) and normalises MCP server names to the alphabet accepted by provider tool
 //! schemas.
 
-/// Reserved server names that collide with agsh internals or with the tool namespace separator.
+/// Reserved server names that collide with meka internals or with the tool namespace separator.
 /// Connection requests for these names are rejected.
-pub const RESERVED_SERVER_NAMES: &[&str] = &["agsh", "ide"];
+pub const RESERVED_SERVER_NAMES: &[&str] = &["meka", "ide"];
 
 /// Strip control + format characters that could hijack the terminal or be
 /// used as homograph-style attacks on users reviewing tool output:
@@ -117,7 +117,7 @@ pub fn normalize_server_name(input: &str) -> String {
 }
 
 /// Returns true when the given name is reserved (either an explicit entry in
-/// [`RESERVED_SERVER_NAMES`] or starts with the `mcp_` prefix that agsh uses for internal tools).
+/// [`RESERVED_SERVER_NAMES`] or starts with the `mcp_` prefix that meka uses for internal tools).
 pub fn is_reserved_server_name(name: &str) -> bool {
     if RESERVED_SERVER_NAMES
         .iter()
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn reserved_names_blocked() {
-        assert!(is_reserved_server_name("agsh"));
+        assert!(is_reserved_server_name("meka"));
         assert!(is_reserved_server_name("IDE"));
         assert!(is_reserved_server_name("mcp_resources"));
         assert!(!is_reserved_server_name("postgres"));

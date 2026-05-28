@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput};
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
 };
@@ -87,14 +87,14 @@ impl Tool for TodoWriteTool {
         input: serde_json::Value,
         _cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
-        let tasks_value = input.get("tasks").ok_or_else(|| AgshError::ToolExecution {
+        let tasks_value = input.get("tasks").ok_or_else(|| MekaError::ToolExecution {
             tool_name: "todo_write".to_string(),
             message: "missing 'tasks' parameter".to_string(),
         })?;
 
         let tasks: Vec<TodoItem> =
             serde_json::from_value(tasks_value.clone()).map_err(|error| {
-                AgshError::ToolExecution {
+                MekaError::ToolExecution {
                     tool_name: "todo_write".to_string(),
                     message: format!("invalid tasks format: {}", error),
                 }

@@ -1,18 +1,18 @@
 # HTTP API
 
-`agsh serve` exposes agsh as an HTTP API server so other programs can drive agent turns programmatically. Where [Interactive Mode](./interactive-mode.md) is for humans at a terminal and [ACP](./acp.md) is for editor integrations over stdio, the HTTP API is for **service-to-service** use cases:
+`meka serve` exposes meka as an HTTP API server so other programs can drive agent turns programmatically. Where [Interactive Mode](./interactive-mode.md) is for humans at a terminal and [ACP](./acp.md) is for editor integrations over stdio, the HTTP API is for **service-to-service** use cases:
 
 - A Telegram or Discord bridge that connects a chat bot to an agent.
 - A web or mobile UI that streams assistant responses in real time.
-- A script or orchestrator that embeds agsh as a sub-agent backend.
+- A script or orchestrator that embeds meka as a sub-agent backend.
 - Any cross-language client that speaks HTTP+JSON.
 
-All three entry points (`agsh`, `agsh acp`, `agsh serve`) drive the same agent core — same tools, same providers, same session persistence. The HTTP API is a transport layer on top.
+All three entry points (`meka`, `meka acp`, `meka serve`) drive the same agent core — same tools, same providers, same session persistence. The HTTP API is a transport layer on top.
 
 ## Starting the server
 
 ```bash
-agsh serve
+meka serve
 ```
 
 The server reads the `[serve]` section from your `config.toml` (see [Configuration](#configuration) below). At minimum you need a bind address and at least one bearer token:
@@ -22,13 +22,13 @@ The server reads the `[serve]` section from your `config.toml` (see [Configurati
 bind = "127.0.0.1:8080"
 
 [[serve.tokens]]
-token = "${AGSH_API_TOKEN}"
+token = "${MEKA_API_TOKEN}"
 scopes = ["sessions:r", "sessions:w"]
 ```
 
 On startup the server logs the bind address and begins accepting requests. All endpoints (except health probes and OpenAPI docs) require a valid `Authorization: Bearer <token>` header.
 
-> **TLS**: `agsh serve` speaks plain HTTP. For production, front it with a TLS-terminating reverse proxy (nginx, Caddy, Cloudflare Tunnel).
+> **TLS**: `meka serve` speaks plain HTTP. For production, front it with a TLS-terminating reverse proxy (nginx, Caddy, Cloudflare Tunnel).
 
 ## Quick example
 
@@ -247,7 +247,7 @@ A `: keep-alive` comment is sent every 20 seconds. SSE clients ignore these auto
 The server buffers up to 256 events per SSE stream. If a consumer reads too slowly and falls behind, the server:
 
 1. **Cancels the in-flight turn** to stop burning provider tokens.
-2. **Emits a terminal `turn.failed`** event with error type `https://agsh.dev/errors/sse-lag`.
+2. **Emits a terminal `turn.failed`** event with error type `https://meka.so/errors/sse-lag`.
 3. **Closes the stream.**
 
 The client should retry by submitting a new turn. Use `GET /messages` to inspect what the agent completed before the lag occurred.
@@ -319,13 +319,13 @@ scopes = ["sessions:r", "sessions:w"]
 
 # Environment variable substitution — recommended for CI/containers
 [[serve.tokens]]
-token = "${AGSH_BRIDGE_TOKEN}"
+token = "${MEKA_BRIDGE_TOKEN}"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 
 # File-based — recommended for production (chmod 0600)
 [[serve.tokens]]
-token_file = "/etc/agsh/bridge.token"
+token_file = "/etc/meka/bridge.token"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 ```
@@ -354,7 +354,7 @@ All HTTP error responses use [RFC 9457 Problem Details](https://www.rfc-editor.o
 
 ```json
 {
-  "type": "https://agsh.dev/errors/session-not-found",
+  "type": "https://meka.so/errors/session-not-found",
   "title": "Session not found",
   "status": 404,
   "detail": "Session 's_xyz' does not exist.",
@@ -373,7 +373,7 @@ The `type` URI is the stable, machine-readable error code. Route error handling 
 | `/errors/auth` | 401 | Missing or invalid bearer token |
 | `/errors/auth-scope` | 403 | Token lacks the required scope |
 | `/errors/session-not-found` | 404 | Unknown session ID |
-| `/errors/session-locked` | 409 | Another agsh process holds the session's DB lock (e.g. two `agsh serve` instances sharing one DB) — wait or restart the other process |
+| `/errors/session-locked` | 409 | Another meka process holds the session's DB lock (e.g. two `meka serve` instances sharing one DB) — wait or restart the other process |
 | `/errors/turn-in-flight` | 409 | A turn is already running on this session within *this* process — cancel it via `POST /cancel` first |
 | `/errors/turn-cancelled` | 409 | Turn was cancelled |
 | `/errors/request-not-found` | 404 | Unknown or expired `request_id` |
@@ -426,7 +426,7 @@ Sessions with an in-flight turn are never evicted.
 
 ### Graceful shutdown
 
-`agsh serve` handles `SIGTERM` / `SIGINT` with a controlled drain:
+`meka serve` handles `SIGTERM` / `SIGINT` with a controlled drain:
 
 1. Stop accepting new connections.
 2. Cancel all in-flight turns (same mechanism as `POST /cancel`).
@@ -456,7 +456,7 @@ Minimal example:
 bind = "127.0.0.1:8080"
 
 [[serve.tokens]]
-token = "${AGSH_API_TOKEN}"
+token = "${MEKA_API_TOKEN}"
 scopes = ["sessions:r", "sessions:w"]
 ```
 
@@ -480,7 +480,7 @@ scopes = ["sessions:r", "sessions:w"]
 
 # Admin token — file-based
 [[serve.tokens]]
-token_file = "/etc/agsh/admin.token"
+token_file = "/etc/meka/admin.token"
 description = "operator debugging"
 scopes = ["sessions:r", "sessions:w", "mcp:r", "skills:r"]
 ```
@@ -492,15 +492,15 @@ scopes = ["sessions:r", "sessions:w", "mcp:r", "skills:r"]
 ```python
 import httpx
 
-AGSH_URL = "http://localhost:8080"
-AGSH_TOKEN = os.environ["AGSH_TOKEN"]
+MEKA_URL = "http://localhost:8080"
+MEKA_TOKEN = os.environ["MEKA_TOKEN"]
 
 async def handle_message(chat_id: str, text: str):
     session_id = await get_or_create_session(chat_id)
 
     resp = await httpx.AsyncClient().post(
-        f"{AGSH_URL}/v1/sessions/{session_id}/turn",
-        headers={"Authorization": f"Bearer {AGSH_TOKEN}"},
+        f"{MEKA_URL}/v1/sessions/{session_id}/turn",
+        headers={"Authorization": f"Bearer {MEKA_TOKEN}"},
         json={"message": text},
         timeout=httpx.Timeout(600.0, connect=5.0),
     )
@@ -511,7 +511,7 @@ async def handle_message(chat_id: str, text: str):
 ### Web UI (TypeScript, streaming)
 
 ```typescript
-const resp = await fetch(`${AGSH_URL}/v1/sessions/${sessionId}/turn`, {
+const resp = await fetch(`${MEKA_URL}/v1/sessions/${sessionId}/turn`, {
   method: "POST",
   headers: {
     Authorization: `Bearer ${token}`,

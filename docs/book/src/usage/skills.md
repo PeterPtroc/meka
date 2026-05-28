@@ -4,20 +4,20 @@ Skills are user-defined knowledge packages that give the agent non-standard know
 
 ## How Skills Work
 
-- Skills live in `~/.config/agsh/skills/` (platform-specific config dir).
+- Skills live in `~/.config/meka/skills/` (platform-specific config dir).
 - Each skill is a directory: `skills/<name>/SKILL.md`.
 - Any entry whose name begins with `.` is skipped at discovery. This covers VCS metadata (`.git`), editor/IDE state (`.vscode`, `.idea`), filesystem artifacts (`.DS_Store`, `.Trash`), and any other dotfile or dotdir that may sit alongside your skills.
 - `SKILL.md` starts with a YAML frontmatter block declaring the skill's metadata, followed by Markdown body content.
-- On every prompt, agsh discovers all valid skills and lists them in the system prompt with their `description`.
+- On every prompt, meka discovers all valid skills and lists them in the system prompt with their `description`.
 - The agent invokes a skill by calling the `skill` tool with the skill name. The tool returns the full body, which the agent follows.
 - Skills are available in **read**, **ask**, and **write** permission modes (not in **none**).
 
 ## File Format
 
-A skill is a directory under `~/.config/agsh/skills/` containing a `SKILL.md` file:
+A skill is a directory under `~/.config/meka/skills/` containing a `SKILL.md` file:
 
 ```
-~/.config/agsh/skills/
+~/.config/meka/skills/
 └── download-videos/
     └── SKILL.md
 ```
@@ -65,22 +65,22 @@ Skills missing `description` are skipped at discovery with a warning log. Unknow
 |-------|---------|-------------|
 | `version` | none | Free-form version label (e.g. `"1.0"`, `"2024-03-14"`). |
 | `author` | none | Attribution, conventionally `Name <email>` (e.g. `John Doe <john.doe@example.com>`). Informational only. |
-| `source_url` | none | An `https://` URL the skill's `SKILL.md` can be re-fetched from. Enables [`agsh skill update`](#updating-skills). |
+| `source_url` | none | An `https://` URL the skill's `SKILL.md` can be re-fetched from. Enables [`meka skill update`](#updating-skills). |
 
 ### Variable Substitution
 
 The skill body may reference these variables, which are expanded when the skill is loaded:
 
-- `${AGSH_SKILL_DIR}` -- the absolute path to the skill's directory. Use this to reference bundled helper files (e.g. `${AGSH_SKILL_DIR}/helper.sh`).
-- `${AGSH_SESSION_ID}` -- the current session UUID.
+- `${MEKA_SKILL_DIR}` -- the absolute path to the skill's directory. Use this to reference bundled helper files (e.g. `${MEKA_SKILL_DIR}/helper.sh`).
+- `${MEKA_SESSION_ID}` -- the current session UUID.
 
 ## Storage Location
 
 | Platform | Path |
 |----------|------|
-| Linux | `~/.config/agsh/skills/<name>/SKILL.md` (`$XDG_CONFIG_HOME/agsh/skills/`) |
-| macOS | `~/Library/Application Support/agsh/skills/<name>/SKILL.md` |
-| Windows | `%APPDATA%\agsh\skills\<name>\SKILL.md` |
+| Linux | `~/.config/meka/skills/<name>/SKILL.md` (`$XDG_CONFIG_HOME/meka/skills/`) |
+| macOS | `~/Library/Application Support/meka/skills/<name>/SKILL.md` |
+| Windows | `%APPDATA%\meka\skills\<name>\SKILL.md` |
 
 ## How the Agent Uses Skills
 
@@ -101,13 +101,13 @@ skill(name: "download-videos")
 
 The tool returns the full body of `SKILL.md` (with variables expanded) as its output. The agent then follows the instructions.
 
-Whenever a skill body is loaded — by the `skill` tool, `--skill`, `/skill`, `spawn_agent`, or `agsh skill show` — it is prefixed with a one-line header naming the skill's directory:
+Whenever a skill body is loaded — by the `skill` tool, `--skill`, `/skill`, `spawn_agent`, or `meka skill show` — it is prefixed with a one-line header naming the skill's directory:
 
 ```
-Base directory for this skill and its bundled files: /home/user/.config/agsh/skills/download-videos
+Base directory for this skill and its bundled files: /home/user/.config/meka/skills/download-videos
 ```
 
-This lets the agent locate files bundled alongside `SKILL.md` even when the body refers to them by bare name (e.g. `helper.sh`) rather than via `${AGSH_SKILL_DIR}`.
+This lets the agent locate files bundled alongside `SKILL.md` even when the body refers to them by bare name (e.g. `helper.sh`) rather than via `${MEKA_SKILL_DIR}`.
 
 ## Running a Skill in a Sub-Agent
 
@@ -118,14 +118,14 @@ spawn_agent(skill: "summarize-financial-news")
 spawn_agent(skill: "summarize-financial-news", prompt: "focus on UK markets")
 ```
 
-`prompt` is optional when `skill` is given; if both are supplied, `prompt` is prepended to the skill body as extra direction — the same ordering as `agsh --skill <name> [prompt]`.
+`prompt` is optional when `skill` is given; if both are supplied, `prompt` is prepended to the skill body as extra direction — the same ordering as `meka --skill <name> [prompt]`.
 
 ## Invoking a Skill from the CLI
 
-Any skill can be triggered directly from the command line with `--skill <name>`. The rendered body becomes the first user turn, and agsh drops into the interactive REPL after the turn finishes:
+Any skill can be triggered directly from the command line with `--skill <name>`. The rendered body becomes the first user turn, and meka drops into the interactive REPL after the turn finishes:
 
 ```bash
-agsh --skill download-videos "https://example.com/video"
+meka --skill download-videos "https://example.com/video"
 ```
 
 The positional `[PROMPT]` argument, if given, is prepended to the skill body as extra context — equivalent to typing `/skill download-videos https://example.com/video` in the REPL.
@@ -133,7 +133,7 @@ The positional `[PROMPT]` argument, if given, is prepended to the skill body as 
 To run the skill and exit immediately (useful for scripts), pair with `--oneshot`:
 
 ```bash
-agsh --oneshot --skill download-videos "https://example.com/video"
+meka --oneshot --skill download-videos "https://example.com/video"
 ```
 
 To invoke a skill mid-session inside the REPL, use the slash command instead:
@@ -145,26 +145,26 @@ To invoke a skill mid-session inside the REPL, use the slash command instead:
 
 ## Updating Skills
 
-A skill that declares a `source_url` can be re-fetched and replaced on disk with `agsh skill update`:
+A skill that declares a `source_url` can be re-fetched and replaced on disk with `meka skill update`:
 
 ```bash
-agsh skill update download-videos   # update one skill
-agsh skill update --all             # dry run: lists what would update
-agsh skill update --all --yes       # apply the updates
+meka skill update download-videos   # update one skill
+meka skill update --all             # dry run: lists what would update
+meka skill update --all --yes       # apply the updates
 ```
 
 `source_url` should be an `https://` link to a raw `SKILL.md` (e.g. a GitHub raw URL or a gist raw URL). The fetch is validated — the response must parse as a valid skill — before the on-disk file is atomically replaced, so a 404 page or a malformed file leaves the existing skill untouched. If the fetched content is byte-identical to what's on disk, nothing is written.
 
-`agsh skill update --all` without `--yes` is a dry run: it lists every skill that would be updated and applies nothing. This is the confirmation gate for a bulk remote fetch — re-run with `--yes` to apply.
+`meka skill update --all` without `--yes` is a dry run: it lists every skill that would be updated and applies nothing. This is the confirmation gate for a bulk remote fetch — re-run with `--yes` to apply.
 
 Only the `SKILL.md` file is fetched. Helper scripts bundled alongside it in the skill directory are **not** updated this way — `source_url`-based update is for single-file skills.
 
-> **Trust note.** A skill body is instructions the agent follows. `agsh skill update` replaces that content with whatever the `source_url` currently serves — review the source you point it at, and prefer `--all` (with its dry-run default) over blind updates.
+> **Trust note.** A skill body is instructions the agent follows. `meka skill update` replaces that content with whatever the `source_url` currently serves — review the source you point it at, and prefer `--all` (with its dry-run default) over blind updates.
 
 ## Tips
 
 - Use short, unambiguous skill names (e.g. `setup-postgres`, not `pg`). The name is what the agent sees and calls.
 - Write `description` concisely, and fold the "use when..." trigger into it -- it goes into every system prompt and consumes tokens.
 - Keep each skill focused on a single topic or procedure. Spawn multiple skills rather than one giant one.
-- Bundle supporting files in the skill directory and reference them with `${AGSH_SKILL_DIR}/file.ext`.
-- Skills are re-discovered on every prompt, so you can add, edit, or remove skills mid-session without restarting agsh.
+- Bundle supporting files in the skill directory and reference them with `${MEKA_SKILL_DIR}/file.ext`.
+- Skills are re-discovered on every prompt, so you can add, edit, or remove skills mid-session without restarting meka.

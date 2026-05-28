@@ -1,16 +1,16 @@
 # Config File
 
-agsh looks for a TOML configuration file at a platform-specific location:
+meka looks for a TOML configuration file at a platform-specific location:
 
 | Platform | Path |
 |----------|------|
-| Linux | `~/.config/agsh/config.toml` (`$XDG_CONFIG_HOME/agsh/config.toml`) |
-| macOS | `~/Library/Application Support/agsh/config.toml` |
-| Windows | `%APPDATA%\agsh\config.toml` |
+| Linux | `~/.config/meka/config.toml` (`$XDG_CONFIG_HOME/meka/config.toml`) |
+| macOS | `~/Library/Application Support/meka/config.toml` |
+| Windows | `%APPDATA%\meka\config.toml` |
 
-The config file is optional. If it does not exist, agsh silently skips it.
+The config file is optional. If it does not exist, meka silently skips it.
 
-Set the `AGSH_CONFIG_DIR` environment variable to override the default location entirely — the value points at the `agsh` directory itself (contains `config.toml` and `skills/`). Useful for tests, portable installs, and isolating a per-project config from your global one.
+Set the `MEKA_CONFIG_DIR` environment variable to override the default location entirely — the value points at the `meka` directory itself (contains `config.toml` and `skills/`). Useful for tests, portable installs, and isolating a per-project config from your global one.
 
 ## Format
 
@@ -51,7 +51,7 @@ The API key for authentication. It is recommended to use environment variables (
 
 ### `provider.oauth_token`
 
-OAuth access token for the `claude-oauth` and `openai-codex` providers. Equivalent env vars: `CLAUDE_OAUTH_TOKEN` (claude-oauth) or `OPENAI_CODEX_TOKEN` (openai-codex). Run `agsh setup` to obtain one interactively. The token is saved to the database on first use and loaded automatically on subsequent launches.
+OAuth access token for the `claude-oauth` and `openai-codex` providers. Equivalent env vars: `CLAUDE_OAUTH_TOKEN` (claude-oauth) or `OPENAI_CODEX_TOKEN` (openai-codex). Run `meka setup` to obtain one interactively. The token is saved to the database on first use and loaded automatically on subsequent launches.
 
 ### `provider.oauth_token_url`
 
@@ -98,9 +98,9 @@ effort = "medium"
 
 ### `provider.redact_thinking`
 
-`claude-oauth` only. When `true`, agsh sends the `redact-thinking-2026-02-12` beta header so the API returns `redacted_thinking` blocks instead of full thinking summaries — useful when you don't render thinking in the UI and want the smaller response. Defaults to `false` (full thinking summaries).
+`claude-oauth` only. When `true`, meka sends the `redact-thinking-2026-02-12` beta header so the API returns `redacted_thinking` blocks instead of full thinking summaries — useful when you don't render thinking in the UI and want the smaller response. Defaults to `false` (full thinking summaries).
 
-Caveat: `redacted_thinking` blocks carry a signed payload that must be replayed verbatim on subsequent turns; agsh currently flattens them to `[redacted]` text on receipt, which means multi-turn conversations after enabling this flag may be rejected by the server. Treat as experimental.
+Caveat: `redacted_thinking` blocks carry a signed payload that must be replayed verbatim on subsequent turns; meka currently flattens them to `[redacted]` text on receipt, which means multi-turn conversations after enabling this flag may be rejected by the server. Treat as experimental.
 
 ```toml
 [provider]
@@ -111,7 +111,7 @@ redact_thinking = true
 
 `claude-oauth` only. Stable per-device identifier embedded in `metadata.user_id` to mirror Claude Code's `~/.claude.json` device ID (`getOrCreateUserID` in `utils/config.ts`).
 
-If unset, agsh first tries to adopt `userID` from `~/.claude.json` (so agsh and Claude Code on the same machine look like the same device). If that file is missing or has no `userID`, agsh generates a 64-character hex string. Either way, the resolved value is persisted back to this same config file under `[provider].device_id`. This file write only happens for the `claude-oauth` provider — other providers don't need a device ID.
+If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine look like the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way, the resolved value is persisted back to this same config file under `[provider].device_id`. This file write only happens for the `claude-oauth` provider — other providers don't need a device ID.
 
 You can supply your own value if you want to control attribution explicitly:
 
@@ -146,7 +146,7 @@ model = "claude-opus-4-6"
 [provider]
 name = "claude-oauth"
 model = "claude-opus-4-6"
-# Run `agsh setup` to perform the OAuth login, or:
+# Run `meka setup` to perform the OAuth login, or:
 # export CLAUDE_OAUTH_TOKEN=sk-ant-oat01-...
 ```
 
@@ -156,7 +156,7 @@ model = "claude-opus-4-6"
 [provider]
 name = "openai-codex"
 model = "gpt-5"
-# Run `agsh setup` to perform the OAuth login, or:
+# Run `meka setup` to perform the OAuth login, or:
 # export OPENAI_CODEX_TOKEN=...
 ```
 
@@ -209,7 +209,7 @@ Default: `false`
 
 ### `display.show_session_id_on_exit`
 
-Whether to display the session ID when agsh exits.
+Whether to display the session ID when meka exits.
 
 Default: `true`
 
@@ -239,7 +239,7 @@ Default: `true`
 
 ### `display.show_token_usage`
 
-When `true`, agsh prints a one-line per-turn token-usage summary to stderr after each turn:
+When `true`, meka prints a one-line per-turn token-usage summary to stderr after each turn:
 
 ```
 [in 12.3k / cache hit 96% / out 1.2k]
@@ -356,7 +356,7 @@ Linux-only choice between `"landlock"` and `"bubblewrap"`:
 - **Bubblewrap** (`"bubblewrap"`) — wraps the command in `bwrap` with read-only bind of `/`, tmpfs masks over `/run` / `/tmp` / `/var/tmp` / `$XDG_RUNTIME_DIR`, and `--unshare-user --unshare-pid --unshare-uts --unshare-ipc`. The tmpfs masks hide the dbus session bus and the systemd-user socket, so state-changing IPC calls like `systemctl --user start` and `dbus-send` fail. Network is intentionally not unshared so `curl http://x | pdftotext` still works. Requires the `bubblewrap` package and a kernel with user-namespace creation enabled.
 - **Landlock** (`"landlock"`) — uses the Landlock LSM (kernel 5.13+) to block filesystem writes. Does **not** block dbus / systemd-user IPC; a sandboxed shell can still invoke state-mutating dbus methods. Kept as the lighter-weight fallback for hosts without Bubblewrap.
 
-When omitted, agsh probes Bubblewrap once at startup. If Bubblewrap is available it auto-picks it; otherwise it auto-picks Landlock and emits a one-shot warning nudging you to install `bubblewrap` for stronger protection. Set the field explicitly to either value (including `"landlock"`) to suppress that warning. `agsh setup` does not write this field — leave it unset to keep auto-detection.
+When omitted, meka probes Bubblewrap once at startup. If Bubblewrap is available it auto-picks it; otherwise it auto-picks Landlock and emits a one-shot warning nudging you to install `bubblewrap` for stronger protection. Set the field explicitly to either value (including `"landlock"`) to suppress that warning. `meka setup` does not write this field — leave it unset to keep auto-detection.
 
 If the configured backend can't be used at runtime (bwrap not installed, user namespaces denied, etc.), `execute_command` in read mode hard-errors with a message naming the configured backend and the specific failure reason. Read mode is not blocked for other tools — only `execute_command` requires a usable sandbox.
 
@@ -374,10 +374,10 @@ Controls which permission modes are reachable at runtime and which mode the sess
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `default` | No | Mode the session starts in. One of `"none"`, `"read"`, `"ask"`, `"write"`. Default `"read"`. Overridden by `--permission` and `AGSH_PERMISSION`. |
+| `default` | No | Mode the session starts in. One of `"none"`, `"read"`, `"ask"`, `"write"`. Default `"read"`. Overridden by `--permission` and `MEKA_PERMISSION`. |
 | `enabled` | No | List of modes that can be reached at runtime via `/permission` and Shift+Tab. Default `["none", "read", "write"]` — `"ask"` is opt-in. Disabled modes are skipped during Shift+Tab cycling and rejected by `/permission` with an error. |
 
-If `default` is not in `enabled`, agsh logs a warning and falls back to `read` if it's enabled, otherwise the lowest-discriminant enabled mode (in `none → read → ask → write` order). Same behavior if `--permission` or `AGSH_PERMISSION` selects a disabled mode — agsh warns and starts in the configured default rather than refusing to launch.
+If `default` is not in `enabled`, meka logs a warning and falls back to `read` if it's enabled, otherwise the lowest-discriminant enabled mode (in `none → read → ask → write` order). Same behavior if `--permission` or `MEKA_PERMISSION` selects a disabled mode — meka warns and starts in the configured default rather than refusing to launch.
 
 ```toml
 [permissions]
@@ -435,7 +435,7 @@ auto_compact = false
 
 ### `session.context_window`
 
-Override the model's context window size (in tokens). Used for auto-compact threshold calculation. If not set, agsh infers the context window from the model name.
+Override the model's context window size (in tokens). Used for auto-compact threshold calculation. If not set, meka infers the context window from the model name.
 
 ```toml
 [session]
@@ -477,7 +477,7 @@ Settings for injecting custom instructions into the system prompt. Use this to s
 
 ### `prompt.instructions`
 
-A string of custom instructions that agsh will include in every system prompt, under a `## User Instructions` section. The model is told to treat them as hard constraints unless they conflict with safety requirements.
+A string of custom instructions that meka will include in every system prompt, under a `## User Instructions` section. The model is told to treat them as hard constraints unless they conflict with safety requirements.
 
 Suitable use cases:
 
@@ -502,11 +502,11 @@ Notes:
 - Empty or whitespace-only strings are treated as unset.
 - Instructions apply to sub-agents spawned via `spawn_agent` too.
 - Instructions are included at all permission levels (including `none`) because they are authored by you.
-- Per-run override: [`--instructions`](./cli-options.md#instructions-string) (or `AGSH_INSTRUCTIONS`) replaces this value for a single invocation.
+- Per-run override: [`--instructions`](./cli-options.md#instructions-string) (or `MEKA_INSTRUCTIONS`) replaces this value for a single invocation.
 
 ## `[mcp]`
 
-Settings for MCP (Model Context Protocol) tool servers. MCP allows agsh to discover and use tools provided by external servers.
+Settings for MCP (Model Context Protocol) tool servers. MCP allows meka to discover and use tools provided by external servers.
 
 ### `[[mcp.servers]]`
 
@@ -514,7 +514,7 @@ An array of MCP server configurations. Each entry defines a server to connect to
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Unique name for this server. Used as namespace prefix for tools (`name__tool`). Must match `[A-Za-z0-9_-]+`, must not contain `__`, and must not be `agsh`, `ide`, or start with `mcp_`. |
+| `name` | Yes | Unique name for this server. Used as namespace prefix for tools (`name__tool`). Must match `[A-Za-z0-9_-]+`, must not contain `__`, and must not be `meka`, `ide`, or start with `mcp_`. |
 | `transport` | Yes | Transport type: `"stdio"` (spawn subprocess) or `"http"` (streamable HTTP). |
 | `command` | Stdio only | Path or name of the executable to spawn. On Windows, `npx` / `.cmd` / `.bat` / `.ps1` are auto-wrapped in `cmd /c`. |
 | `args` | No | Arguments to pass to the command. |
@@ -523,15 +523,15 @@ An array of MCP server configurations. Each entry defines a server to connect to
 | `auth_token` | No | Bearer token for HTTP authentication (sent as `Authorization: Bearer <token>`). |
 | `auth` | No | OAuth authentication configuration (see below). Mutually exclusive with `auth_token`. |
 | `headers` | No | Custom HTTP headers to include with every request (HTTP only). |
-| `headers_helper` | No | Path to an executable whose stdout (`Name: Value\n` lines) is merged over `headers` at connect-time (HTTP only). Executed with `AGSH_MCP_SERVER_NAME` / `AGSH_MCP_SERVER_URL` in env; 15 s timeout. |
+| `headers_helper` | No | Path to an executable whose stdout (`Name: Value\n` lines) is merged over `headers` at connect-time (HTTP only). Executed with `MEKA_MCP_SERVER_NAME` / `MEKA_MCP_SERVER_URL` in env; 15 s timeout. |
 | `permission` | No | Server-wide permission override. Applies to every tool on this server, beating the `readOnlyHint` the server advertises and the `[mcp].default_permission` global fallback. See *Permission resolution* below. |
 | `allowed_tools` | No | Optional allow-list of raw tool names (the form the server advertises, not the `server__tool` namespaced form). When set and non-empty, only these tools are registered; all others from this server are ignored. |
 | `disabled_tools` | No | Optional block-list of raw tool names. Applied **after** `allowed_tools` — tools listed here are never registered. Both lists can coexist; the net set is `allowed_tools \ disabled_tools`. |
 | `eager_load_tools` | No | Raw tool names that should ship **eager-loaded** instead of deferred. Listed tools skip the `load_tool` round-trip and sit in the cacheable tools-array prefix from turn 1. Use this for tools the agent invokes constantly (search, fetch, …); leave others deferred so the tools array stays lean. |
 | `tool_permissions` | No | Per-tool permission overrides keyed by raw tool name. Beats the server-level `permission` and the server's `readOnlyHint` when resolving a tool's required permission. |
 | `sampling` | No | Allow this server to call `sampling/createMessage` against your configured LLM provider. Default `false` (reject). Enabling this lets a compromised server inject arbitrary messages into your LLM context and burn your provider quota — opt in per-server, deliberately. |
-| `sampling_limit` | No | Cap on sampling calls per agsh session from this server when `sampling = true`. Default `10`. Requests beyond the limit return an `INTERNAL_ERROR` to the server. |
-| `disabled` | No | When `true`, the server is skipped entirely at startup — no process is spawned, no HTTP connect is attempted. Flip it back with `agsh mcp enable <name>` or by editing the config. Defaults to `false`. |
+| `sampling_limit` | No | Cap on sampling calls per meka session from this server when `sampling = true`. Default `10`. Requests beyond the limit return an `INTERNAL_ERROR` to the server. |
+| `disabled` | No | When `true`, the server is skipped entirely at startup — no process is spawned, no HTTP connect is attempted. Flip it back with `meka mcp enable <name>` or by editing the config. Defaults to `false`. |
 
 ### `[mcp]` top-level table
 
@@ -546,8 +546,8 @@ An array of MCP server configurations. Each entry defines a server to connect to
 
 MCP servers connect in parallel at startup, partitioned by transport so a fleet of stdio servers (process-spawn bound) doesn't fight a fleet of HTTP servers (network bound):
 
-- stdio: `AGSH_MCP_STDIO_CONCURRENCY` (default `3`)
-- http: `AGSH_MCP_HTTP_CONCURRENCY` (default `20`)
+- stdio: `MEKA_MCP_STDIO_CONCURRENCY` (default `3`)
+- http: `MEKA_MCP_HTTP_CONCURRENCY` (default `20`)
 
 These env vars are tuning knobs — rarely needed, but useful if you're running ~30 stdio servers on a constrained box (lower it) or ~50 HTTP servers (raise it).
 
@@ -574,11 +574,11 @@ User-supplied config (1, 2, 4) always beats the server's self-classification —
 **Exa** — reliable web search when the built-in DuckDuckGo scraper gets CAPTCHA'd. The free tier works without an API key; paste a key into the `headers` table for the paid tier:
 ```bash
 # Free tier — no key required
-agsh mcp add exa https://mcp.exa.ai/mcp
+meka mcp add exa https://mcp.exa.ai/mcp
 ```
 ```bash
 # Paid tier — expands from EXA_API_KEY at connect time
-agsh mcp add exa https://mcp.exa.ai/mcp --header "x-api-key=${EXA_API_KEY}"
+meka mcp add exa https://mcp.exa.ai/mcp --header "x-api-key=${EXA_API_KEY}"
 ```
 
 Well-annotated server — no config needed. Every tool is classified by its own `readOnlyHint` (read tools Read, write tools Write):
@@ -650,26 +650,26 @@ auth_token = "${GITHUB_MCP_TOKEN}"
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AGSH_MCP_TOOL_TIMEOUT` | `600000` ms (600 s) | Per-call timeout for MCP tools. Triggers `notifications/cancelled` on expiry. |
+| `MEKA_MCP_TOOL_TIMEOUT` | `600000` ms (600 s) | Per-call timeout for MCP tools. Triggers `notifications/cancelled` on expiry. |
 
-### `agsh mcp` CLI
+### `meka mcp` CLI
 
 Manage configured servers without editing `config.toml` by hand:
 
 | Command | Action |
 |---|---|
-| `agsh mcp list` | Print all configured servers. |
-| `agsh mcp get <name>` | Print full details for one server. |
-| `agsh mcp add <name> <url-or-command> [args...] [flags]` | Persist a server. Transport is auto-detected: a URL starting with `http[s]://` means HTTP, anything else means stdio. Preserves existing formatting/comments via `toml_edit`. |
-| `agsh mcp remove <name>` | Best-effort revoke stored OAuth tokens (RFC 7009) at the provider, then delete the server entry, clear stored credentials, and drop any resource-update ledger entries. |
-| `agsh mcp disable <name>` | Set `disabled = true` on the server entry. The next `agsh` start skips it entirely. |
-| `agsh mcp enable <name>` | Clear the `disabled` flag, so the server connects on the next start. |
-| `agsh mcp reconnect <name>` | Smoke-test a connect; prints `ok` or the error. |
-| `agsh mcp tools <name>` | Connect and list every advertised tool with its resolved permission, the chain step that decided it, and whether the current config allows it. Useful for populating `--allow-tool`, `--disable-tool`, or `--tool-permission` overrides without leaving the CLI. |
-| `agsh mcp login <name>` | Drive interactive OAuth. If the server has no `[auth]` block and uses HTTP, assumes `type = "oauth"` and persists the block on success. |
-| `agsh mcp logout <name>` | Call the provider's `revocation_endpoint` (RFC 7009) best-effort, then clear stored credentials + auth-probe cache. |
+| `meka mcp list` | Print all configured servers. |
+| `meka mcp get <name>` | Print full details for one server. |
+| `meka mcp add <name> <url-or-command> [args...] [flags]` | Persist a server. Transport is auto-detected: a URL starting with `http[s]://` means HTTP, anything else means stdio. Preserves existing formatting/comments via `toml_edit`. |
+| `meka mcp remove <name>` | Best-effort revoke stored OAuth tokens (RFC 7009) at the provider, then delete the server entry, clear stored credentials, and drop any resource-update ledger entries. |
+| `meka mcp disable <name>` | Set `disabled = true` on the server entry. The next `meka` start skips it entirely. |
+| `meka mcp enable <name>` | Clear the `disabled` flag, so the server connects on the next start. |
+| `meka mcp reconnect <name>` | Smoke-test a connect; prints `ok` or the error. |
+| `meka mcp tools <name>` | Connect and list every advertised tool with its resolved permission, the chain step that decided it, and whether the current config allows it. Useful for populating `--allow-tool`, `--disable-tool`, or `--tool-permission` overrides without leaving the CLI. |
+| `meka mcp login <name>` | Drive interactive OAuth. If the server has no `[auth]` block and uses HTTP, assumes `type = "oauth"` and persists the block on success. |
+| `meka mcp logout <name>` | Call the provider's `revocation_endpoint` (RFC 7009) best-effort, then clear stored credentials + auth-probe cache. |
 
-#### `agsh mcp add` flags
+#### `meka mcp add` flags
 
 | Flag | Purpose |
 |------|---------|
@@ -692,8 +692,8 @@ Manage configured servers without editing `config.toml` by hand:
 #### Example: Notion
 
 ```console
-$ agsh mcp add notion https://mcp.notion.com/mcp
-ok: added 'notion' to ~/.config/agsh/config.toml
+$ meka mcp add notion https://mcp.notion.com/mcp
+ok: added 'notion' to ~/.config/meka/config.toml
 probe: server requires OAuth.
 running OAuth authorisation for 'notion' (use --no-login to skip).
 no [auth] block for 'notion' — assuming OAuth authorization_code.
@@ -701,7 +701,7 @@ no [auth] block for 'notion' — assuming OAuth authorization_code.
 ok: authorized 'notion'
 ```
 
-`agsh mcp add` on an HTTP endpoint:
+`meka mcp add` on an HTTP endpoint:
 
 1. **Probe** — issues an unauthenticated `GET` (3 s timeout, redirects off) and classifies the response per the MCP authorization spec + RFC 6750 + RFC 9728:
 
@@ -710,24 +710,24 @@ ok: authorized 'notion'
    - Any other status → couldn't infer, prints the status code.
    - Network failure → prints the error.
 
-2. **Auto-login** — if the probe says OAuth is required (or `--auth oauth` was explicitly set), the OAuth authorization_code flow runs immediately as though the user had chained `agsh mcp login <name>` themselves. The synthesised `[auth] = oauth` block is written back to `config.toml` on success.
+2. **Auto-login** — if the probe says OAuth is required (or `--auth oauth` was explicitly set), the OAuth authorization_code flow runs immediately as though the user had chained `meka mcp login <name>` themselves. The synthesised `[auth] = oauth` block is written back to `config.toml` on success.
 
 3. **Rollback on failure** — if the OAuth flow errors out, the entry we just wrote is purged from `config.toml` (alongside any partial credentials + probe cache), leaving the user's config clean. The command exits non-zero.
 
-4. **`--no-login`** — skips step 2. The entry is still persisted and the probe's hint is still printed; run `agsh mcp login <name>` when ready. Useful for scripted setup or when you expect to edit `[auth]` by hand.
+4. **`--no-login`** — skips step 2. The entry is still persisted and the probe's hint is still printed; run `meka mcp login <name>` when ready. Useful for scripted setup or when you expect to edit `[auth]` by hand.
 
 The probe and the auto-login only run for HTTP servers, and only when the user didn't provide `--auth-token` (static bearer) or `--auth` (other than `oauth`). Stdio servers skip both.
 
 #### Remote hosts / SSH sessions
 
-The OAuth flow redirects the browser to `http://127.0.0.1:<port>/callback`. When agsh is running on a different host than the browser (SSH session, container, Codespace, WSL), the browser can't reach back and shows a "connection refused" error page. agsh handles this automatically:
+The OAuth flow redirects the browser to `http://127.0.0.1:<port>/callback`. When meka is running on a different host than the browser (SSH session, container, Codespace, WSL), the browser can't reach back and shows a "connection refused" error page. meka handles this automatically:
 
-- While `agsh mcp login <name>` waits for the callback it also watches stdin.
-- The browser's address bar still contains the full callback URL (including `code` and `state`) even when the connection fails. Copy it, paste it into the agsh prompt, and press Enter.
+- While `meka mcp login <name>` waits for the callback it also watches stdin.
+- The browser's address bar still contains the full callback URL (including `code` and `state`) even when the connection fails. Copy it, paste it into the meka prompt, and press Enter.
 - Whichever completes first — the TCP callback or the pasted URL — wins.
 
 ```console
-$ agsh mcp login notion
+$ meka mcp login notion
 server 'notion' has no [auth] block; assuming OAuth authorization_code.
 Opening browser for MCP server 'notion' OAuth authorization...
 If the browser didn't open, visit:
@@ -749,7 +749,7 @@ Inside the REPL:
 
 ### Resources and prompts
 
-In addition to tools, agsh exposes MCP resources and prompts through several builtin tools (deferred — the agent calls `load_tool` first to fetch the schema, then invokes them):
+In addition to tools, meka exposes MCP resources and prompts through several builtin tools (deferred — the agent calls `load_tool` first to fetch the schema, then invokes them):
 
 | Builtin | Purpose |
 |---------|---------|
@@ -764,18 +764,18 @@ In addition to tools, agsh exposes MCP resources and prompts through several bui
 ### Connection lifecycle
 
 - **Reconnection** is automatic for all transports (stdio, plain HTTP, OAuth-authenticated HTTP) when the transport closes mid-session. HTTP transports use exponential backoff (1s, 2s, 4s, 8s, 16s, capped 30s, max 5 attempts); stdio gets one immediate retry. The reconnect runs on a blocking thread to work around an upstream rmcp bug where the auth future is `!Send`.
-- **Session-expired recovery**: rmcp 1.5 transparently re-initialises HTTP sessions on 404 / JSON-RPC `-32001`. agsh relies on this; no per-call handling is required.
-- **Cancellation**: when the agent cancels a tool call (e.g. Ctrl-C), agsh sends `notifications/cancelled` to the server with the in-flight request id so the server can stop work.
-- **Timeouts**: tool calls default to 600 s; override with `AGSH_MCP_TOOL_TIMEOUT` in ms.
-- **Tool list refresh**: on `tools/list_changed`, agsh re-discovers the server's tools and hot-swaps them in the registry — no restart needed.
+- **Session-expired recovery**: rmcp 1.5 transparently re-initialises HTTP sessions on 404 / JSON-RPC `-32001`. meka relies on this; no per-call handling is required.
+- **Cancellation**: when the agent cancels a tool call (e.g. Ctrl-C), meka sends `notifications/cancelled` to the server with the in-flight request id so the server can stop work.
+- **Timeouts**: tool calls default to 600 s; override with `MEKA_MCP_TOOL_TIMEOUT` in ms.
+- **Tool list refresh**: on `tools/list_changed`, meka re-discovers the server's tools and hot-swaps them in the registry — no restart needed.
 - **Progress notifications**: MCP tool calls attach a per-request `progressToken`; incoming `notifications/progress` render as a live status line under the tool invocation.
 - **Server instructions**: `InitializeResult.instructions` is captured once per connection and spliced into the system prompt (sanitised + truncated to 2048 chars) under `## MCP Server Instructions`.
-- **Auth-probe cache**: 401 responses are cached for 15 minutes so a restart after a failed auth flow skips the unauthenticated probe and goes straight to OAuth. Cleared by `agsh mcp logout`.
+- **Auth-probe cache**: 401 responses are cached for 15 minutes so a restart after a failed auth flow skips the unauthenticated probe and goes straight to OAuth. Cleared by `meka mcp logout`.
 - `resources/list_changed`, `prompts/list_changed`, and `resources/updated` notifications are logged at `info`/`debug` level.
 
 ### Server-to-client features
 
-| Feature | agsh behaviour |
+| Feature | meka behaviour |
 |---------|----------------|
 | `roots/list` | Returns a single root: `file://<current-working-directory>` with the directory basename as the name. |
 | `elicitation/create` | Always responds with `Decline` and logs a warning — interactive form/URL input is not wired into the REPL. |
@@ -794,7 +794,7 @@ OAuth authentication for HTTP MCP servers. Set `type` to choose the authenticati
 | `resource` | No | Resource parameter ([RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707)), client_credentials only |
 | `signing_key_path` | JWT only | Path to PEM private key file |
 | `signing_algorithm` | No | JWT signing algorithm: `RS256` (default), `RS384`, `RS512`, `ES256`, `ES384` |
-| `redirect_port` | No | Local port for OAuth authorization code callback. When omitted, agsh binds to a random ephemeral port (recommended). `oauth` only. |
+| `redirect_port` | No | Local port for OAuth authorization code callback. When omitted, meka binds to a random ephemeral port (recommended). `oauth` only. |
 
 ### Examples
 
@@ -899,7 +899,7 @@ scopes = ["admin"]
 
 #### HTTP server with OAuth authorization code flow
 
-On first connection, agsh opens a browser for authorization and stores the token for future use.
+On first connection, meka opens a browser for authorization and stores the token for future use.
 
 ```toml
 [[mcp.servers]]
@@ -914,19 +914,19 @@ scopes = ["repo", "user"]
 redirect_port = 8400
 ```
 
-If `client_id` is omitted, agsh attempts [dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591) with the server.
+If `client_id` is omitted, meka attempts [dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591) with the server.
 
 ## `[tools]` — built-in tool filters
 
-The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to agsh's built-in tools (`read_file`, `write_file`, `execute_command`, `web_search`, etc.) via a top-level `[tools]` table. MCP per-server filtering is separate from this and keeps its own namespaces — this block only affects the built-ins.
+The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to meka's built-in tools (`read_file`, `write_file`, `execute_command`, `web_search`, etc.) via a top-level `[tools]` table. MCP per-server filtering is separate from this and keeps its own namespaces — this block only affects the built-ins.
 
 | Key | Purpose |
 |---|---|
-| `allowed_tools` | Optional allow-list of built-in tool names. When set and non-empty, only these built-ins register. Use `agsh tools list` to see the canonical names. |
+| `allowed_tools` | Optional allow-list of built-in tool names. When set and non-empty, only these built-ins register. Use `meka tools list` to see the canonical names. |
 | `disabled_tools` | Block-list of built-in tool names. Applied **after** `allowed_tools`; a tool here is never registered even if it also appears in the allow-list. |
 | `tool_permissions` | Per-tool required-permission override keyed by built-in name. Beats the hardcoded required level from the tool's impl. Levels: `none`, `read`, `ask`, `write`. |
 
-Stale entries (a name that doesn't match any built-in) emit a `warn!` at startup. agsh still starts — the warning just flags a likely typo or a tool the binary renamed.
+Stale entries (a name that doesn't match any built-in) emit a `warn!` at startup. meka still starts — the warning just flags a likely typo or a tool the binary renamed.
 
 Restrict a session to read-only inspection:
 ```toml
@@ -946,11 +946,11 @@ Disable web access entirely in a locked-down environment:
 disabled_tools = ["web_search", "fetch_url"]
 ```
 
-Sub-agents spawned via `spawn_agent` inherit the same filter — a disabled built-in is disabled everywhere. Run `agsh tools list` to see every built-in's effective required permission, whether a `[tools.tool_permissions]` override is in effect, and whether the current config enables it.
+Sub-agents spawned via `spawn_agent` inherit the same filter — a disabled built-in is disabled everywhere. Run `meka tools list` to see every built-in's effective required permission, whether a `[tools.tool_permissions]` override is in effect, and whether the current config enables it.
 
 ## `[serve]`
 
-Configuration for `agsh serve`, the HTTP API server. See the [HTTP API](../usage/http-api.md) usage guide for a full walkthrough.
+Configuration for `meka serve`, the HTTP API server. See the [HTTP API](../usage/http-api.md) usage guide for a full walkthrough.
 
 ### `serve.bind`
 
@@ -1046,7 +1046,7 @@ Production token (environment variable):
 
 ```toml
 [[serve.tokens]]
-token = "${AGSH_BRIDGE_TOKEN}"
+token = "${MEKA_BRIDGE_TOKEN}"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 ```
@@ -1055,7 +1055,7 @@ Production token (file-based):
 
 ```toml
 [[serve.tokens]]
-token_file = "/etc/agsh/bridge.token"
+token_file = "/etc/meka/bridge.token"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 ```
@@ -1064,7 +1064,7 @@ Admin token with all read scopes:
 
 ```toml
 [[serve.tokens]]
-token = "${AGSH_ADMIN_TOKEN}"
+token = "${MEKA_ADMIN_TOKEN}"
 description = "operator"
 scopes = ["sessions:r", "sessions:w", "mcp:r", "skills:r"]
 ```

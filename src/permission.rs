@@ -110,7 +110,7 @@ impl EnabledPermissions {
     };
 
     /// Build an `EnabledPermissions` from any iterable of [`Permission`]s. Returns `None` if the
-    /// iterator yields no items — an empty enabled set is meaningless (agsh would have no level to
+    /// iterator yields no items — an empty enabled set is meaningless (meka would have no level to
     /// start in), so the caller has to handle that case explicitly (typically by falling back to
     /// [`Self::DEFAULT`]).
     pub fn from_modes<I: IntoIterator<Item = Permission>>(iter: I) -> Option<Self> {

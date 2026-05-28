@@ -1,6 +1,6 @@
 //! First-launch interactive configuration wizard. Walks the user through provider selection, runs
 //! the Claude OAuth/PKCE flow when applicable, and writes the resulting
-//! `~/.config/agsh/config.toml`.
+//! `~/.config/meka/config.toml`.
 
 use std::io::{self, Write};
 
@@ -155,7 +155,7 @@ fn prompt_choice(prompt: &str, options: &[&str]) -> io::Result<usize> {
 }
 
 pub async fn run_setup(token_store: &TokenStore) -> anyhow::Result<()> {
-    eprintln!("Welcome to agsh! Let's set up your configuration.\n");
+    eprintln!("Welcome to meka! Let's set up your configuration.\n");
 
     let provider_index = prompt_choice("Select a provider:", &[
         "claude-oauth (Claude Code OAuth login)",
@@ -277,7 +277,7 @@ async fn run_codex_oauth_login(token_store: &TokenStore) -> anyhow::Result<()> {
         .map_err(|error| {
             anyhow::anyhow!(
                 "failed to bind callback listener on 127.0.0.1:{}: {}. \
-                 Is another agsh / codex login already running?",
+                 Is another meka / codex login already running?",
                 CODEX_REDIRECT_PORT,
                 error
             )
@@ -334,7 +334,7 @@ fn build_codex_authorize_url(
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("state", state)
-        .append_pair("originator", "agsh_cli");
+        .append_pair("originator", "meka_cli");
     Ok(url.to_string())
 }
 
@@ -395,7 +395,7 @@ async fn accept_codex_callback(
             CodexCallback::Match { code, state } => {
                 let body = b"<!DOCTYPE html><html><body>\
                     <h1>Codex authorization successful</h1>\
-                    <p>You can close this tab and return to agsh.</p>\
+                    <p>You can close this tab and return to meka.</p>\
                     </body></html>";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -624,7 +624,7 @@ mod tests {
         // Codex-specific knobs that distinguish this from Claude's flow.
         assert!(url.contains("id_token_add_organizations=true"));
         assert!(url.contains("codex_cli_simplified_flow=true"));
-        assert!(url.contains("originator=agsh_cli"));
+        assert!(url.contains("originator=meka_cli"));
         // Scope is space-separated and percent-encoded with `+` for spaces.
         assert!(url.contains("openid"));
         assert!(url.contains("offline_access"));

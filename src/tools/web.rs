@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     config::{MinTlsVersion, WebClientConfig},
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     image::{ImageHandling, build_image_tool_output, classify_content_type},
     permission::Permission,
     provider::ToolDefinition,
@@ -62,14 +62,14 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
                 "socks4://",
             ];
             if !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) {
-                return Err(AgshError::Config(format!(
+                return Err(MekaError::Config(format!(
                     "[web].proxy: invalid URL '{}': expected one of {}",
                     url,
                     ALLOWED_SCHEMES.join(", ")
                 )));
             }
             let proxy = reqwest::Proxy::all(url).map_err(|error| {
-                AgshError::Config(format!("[web].proxy: invalid URL '{}': {}", url, error))
+                MekaError::Config(format!("[web].proxy: invalid URL '{}': {}", url, error))
             })?;
             builder = builder.proxy(proxy);
         }
@@ -77,7 +77,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
 
     if let Some(path) = &cfg.ca_cert_file {
         let bytes = std::fs::read(path).map_err(|error| {
-            AgshError::Config(format!(
+            MekaError::Config(format!(
                 "[web].ca_cert_file '{}': {}",
                 path.display(),
                 error
@@ -86,7 +86,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
         // Handles both single-cert and bundle PEM files (multiple concatenated `-----BEGIN/END
         // CERTIFICATE-----` blocks).
         let certs = reqwest::Certificate::from_pem_bundle(&bytes).map_err(|error| {
-            AgshError::Config(format!(
+            MekaError::Config(format!(
                 "[web].ca_cert_file '{}': not a valid PEM: {}",
                 path.display(),
                 error
@@ -96,7 +96,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
         // that's not what the user asked for. Reject explicitly so typos don't ship a client with
         // zero added CAs.
         if certs.is_empty() {
-            return Err(AgshError::Config(format!(
+            return Err(MekaError::Config(format!(
                 "[web].ca_cert_file '{}': no PEM certificates found in file",
                 path.display()
             )));
@@ -137,7 +137,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
 
     builder
         .build()
-        .map_err(|error| AgshError::Config(format!("failed to build web client: {}", error)))
+        .map_err(|error| MekaError::Config(format!("failed to build web client: {}", error)))
 }
 
 // Static CSS selectors for search result parsing (parsed once, reused on every call).
@@ -258,7 +258,7 @@ impl Tool for FetchUrlTool {
         let response = request
             .send()
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "fetch_url".to_string(),
                 message: format!(
                     "failed to fetch '{}': {}",
@@ -289,7 +289,7 @@ impl Tool for FetchUrlTool {
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|error| AgshError::ToolExecution {
+                .map_err(|error| MekaError::ToolExecution {
                     tool_name: "fetch_url".to_string(),
                     message: format!("failed to read image bytes: {}", error),
                 })?;
@@ -306,7 +306,7 @@ impl Tool for FetchUrlTool {
         if let Some(len) = response.content_length()
             && len as usize > MAX_RESPONSE_BYTES
         {
-            return Err(AgshError::ToolExecution {
+            return Err(MekaError::ToolExecution {
                 tool_name: "fetch_url".to_string(),
                 message: format!(
                     "response Content-Length {} exceeds cap {} bytes",
@@ -318,12 +318,12 @@ impl Tool for FetchUrlTool {
         let mut body_bytes: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| AgshError::ToolExecution {
+            let chunk = chunk.map_err(|error| MekaError::ToolExecution {
                 tool_name: "fetch_url".to_string(),
                 message: format!("failed to read response body: {}", error),
             })?;
             if body_bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(AgshError::ToolExecution {
+                return Err(MekaError::ToolExecution {
                     tool_name: "fetch_url".to_string(),
                     message: format!(
                         "response body exceeded {} bytes during streaming \
@@ -435,7 +435,7 @@ impl Tool for WebSearchTool {
         let response = request
             .send()
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "web_search".to_string(),
                 message: format!(
                     "search request failed: {}",
@@ -446,7 +446,7 @@ impl Tool for WebSearchTool {
         let html = response
             .text()
             .await
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "web_search".to_string(),
                 message: format!("failed to read search response: {}", error),
             })?;
@@ -457,7 +457,7 @@ impl Tool for WebSearchTool {
                 "No search results found.".to_string(),
                 false,
             )),
-            DdgOutcome::Captcha => Err(AgshError::ToolExecution {
+            DdgOutcome::Captcha => Err(MekaError::ToolExecution {
                 tool_name: "web_search".to_string(),
                 message: "DuckDuckGo served a CAPTCHA challenge (bot detection / rate limit). \
                           Retry later."

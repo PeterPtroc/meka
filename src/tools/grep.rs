@@ -9,7 +9,7 @@ use super::{
     util::{redirects_to_scratchpad, require_str},
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
 };
@@ -98,7 +98,7 @@ impl Tool for SearchContentsTool {
             search_with_grep(&pattern, &search_path, file_glob.as_deref(), max_results)
         })
         .await
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: "search_contents".to_string(),
             message: format!("task join error: {}", error),
         })??;
@@ -128,7 +128,7 @@ fn search_with_grep(
         .size_limit(PATTERN_SIZE_LIMIT)
         .dfa_size_limit(DFA_SIZE_LIMIT)
         .build(pattern)
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: "search_contents".to_string(),
             message: format!("invalid or oversized regex '{}': {}", pattern, error),
         })?;
@@ -141,7 +141,7 @@ fn search_with_grep(
     } else if path.is_dir() {
         let glob_pattern = match file_glob {
             Some(g) => Some(
-                glob::Pattern::new(g).map_err(|error| AgshError::ToolExecution {
+                glob::Pattern::new(g).map_err(|error| MekaError::ToolExecution {
                     tool_name: "search_contents".to_string(),
                     message: format!("invalid glob pattern '{}': {}", g, error),
                 })?,
@@ -151,7 +151,7 @@ fn search_with_grep(
 
         walk_directory(path, &matcher, &glob_pattern, &mut results)?;
     } else {
-        return Err(AgshError::ToolExecution {
+        return Err(MekaError::ToolExecution {
             tool_name: "search_contents".to_string(),
             message: format!("path '{}' does not exist", search_path),
         });

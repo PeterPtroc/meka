@@ -8,7 +8,7 @@ use super::{
     util::{redirects_to_scratchpad, require_str},
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
 };
@@ -134,7 +134,7 @@ impl Tool for FindFilesTool {
                     }
                 }
                 Err(error) => {
-                    return Err(AgshError::ToolExecution {
+                    return Err(MekaError::ToolExecution {
                         tool_name: "find_files".to_string(),
                         message: format!("invalid glob pattern '{}': {}", full_pattern, error),
                     });
@@ -143,7 +143,7 @@ impl Tool for FindFilesTool {
             Ok((matches, total, cap))
         })
         .await
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: "find_files".to_string(),
             message: format!("task join error: {}", error),
         })??;

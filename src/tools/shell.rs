@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput, util::require_str};
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
 };
@@ -125,7 +125,7 @@ impl Tool for ExecuteCommandTool {
                      (Shift+Tab) to run shell commands without a sandbox.",
                     reason
                 );
-                return Err(AgshError::ToolExecution {
+                return Err(MekaError::ToolExecution {
                     tool_name: "execute_command".to_string(),
                     message,
                 });
@@ -146,7 +146,7 @@ impl Tool for ExecuteCommandTool {
                 cancellation: cancellation.clone(),
             };
             if let Some(result) = self.frontend.delegate_execute(spec).await {
-                let output = result.map_err(|error| AgshError::ToolExecution {
+                let output = result.map_err(|error| MekaError::ToolExecution {
                     tool_name: "execute_command".to_string(),
                     message: format!("delegated execute failed: {}", error),
                 })?;
@@ -309,7 +309,7 @@ impl Tool for ExecuteCommandTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|error| AgshError::ToolExecution {
+            .map_err(|error| MekaError::ToolExecution {
                 tool_name: "execute_command".to_string(),
                 message: format!("failed to spawn command: {}", error),
             })?;
@@ -333,7 +333,7 @@ impl Tool for ExecuteCommandTool {
                 kill_child_tree(&mut child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                Err(AgshError::Interrupted)
+                Err(MekaError::Interrupted)
             }
             _ = tokio::time::sleep(timeout_duration) => {
                 kill_child_tree(&mut child).await;
@@ -345,7 +345,7 @@ impl Tool for ExecuteCommandTool {
                 ))
             }
             status = child.wait() => {
-                let status = status.map_err(|error| AgshError::ToolExecution {
+                let status = status.map_err(|error| MekaError::ToolExecution {
                     tool_name: "execute_command".to_string(),
                     message: format!("failed to wait for command: {}", error),
                 })?;
@@ -490,7 +490,7 @@ async fn run_windows_low_integrity(
     const POST_KILL_TIMEOUT: Duration = Duration::from_secs(2);
 
     let mut sandboxed = crate::sandbox::spawn_low_integrity_command(command).map_err(|error| {
-        AgshError::ToolExecution {
+        MekaError::ToolExecution {
             tool_name: "execute_command".to_string(),
             message: format!("failed to spawn sandboxed command: {}", error),
         }
@@ -521,7 +521,7 @@ async fn run_windows_low_integrity(
             abort_after_timeout(wait_handle, POST_KILL_TIMEOUT).await;
             abort_after_timeout(stdout_task, POST_KILL_TIMEOUT).await;
             abort_after_timeout(stderr_task, POST_KILL_TIMEOUT).await;
-            Err(AgshError::Interrupted)
+            Err(MekaError::Interrupted)
         }
         _ = tokio::time::sleep(timeout_duration) => {
             if let Err(error) = child.kill() {
@@ -537,11 +537,11 @@ async fn run_windows_low_integrity(
         }
         join = &mut wait_handle => {
             let status = join
-                .map_err(|error| AgshError::ToolExecution {
+                .map_err(|error| MekaError::ToolExecution {
                     tool_name: "execute_command".to_string(),
                     message: format!("wait task panicked: {}", error),
                 })?
-                .map_err(|error| AgshError::ToolExecution {
+                .map_err(|error| MekaError::ToolExecution {
                     tool_name: "execute_command".to_string(),
                     message: format!("failed to wait for command: {}", error),
                 })?;
@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// When the configured sandbox backend isn't usable, read-mode `execute_command` must return
-    /// `Err(AgshError::ToolExecution)` — *not* `Ok(ToolOutput { is_error: true })`. The hard error
+    /// `Err(MekaError::ToolExecution)` — *not* `Ok(ToolOutput { is_error: true })`. The hard error
     /// path is how the model is forced to surface the failure to the user rather than just retrying
     /// or describing it as a tool result.
     #[tokio::test]
@@ -817,7 +817,7 @@ mod tests {
             )
             .await;
         match result {
-            Err(AgshError::ToolExecution { tool_name, message }) => {
+            Err(MekaError::ToolExecution { tool_name, message }) => {
                 assert_eq!(tool_name, "execute_command");
                 // The Linux error path splices in the configured backend's display name
                 // (`Bubblewrap`); the non-Linux variant drops the Linux-specific config reference
@@ -973,7 +973,7 @@ mod tests {
         #[tokio::test]
         async fn test_windows_sandbox_blocks_write_to_userprofile() {
             let probe_path = format!(
-                "{}\\agsh-sandbox-probe.txt",
+                "{}\\meka-sandbox-probe.txt",
                 std::env::var("USERPROFILE").expect("USERPROFILE must be set on Windows")
             );
             // Clean any stray file from an earlier failed run before starting.

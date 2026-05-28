@@ -7,14 +7,14 @@ use std::sync::Arc;
 use super::{
     MAX_MCP_DESCRIPTION_LENGTH, McpClientContext, McpClientManager, McpRunningService,
     McpRuntimeConfig, ServerEntry, ServerState,
-    handler::{AgshClientHandler, McpToolAdapter, SamplingPolicy},
+    handler::{McpToolAdapter, MekaClientHandler, SamplingPolicy},
     resolve_tool_permission, tool_is_allowed,
     transport::{build_http_transport_config, build_stdio_command},
     truncate, warn_on_stale_tool_config,
 };
 use crate::{
     config::{McpServerConfig, McpTransport},
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     session::TokenStore,
 };
@@ -232,7 +232,7 @@ async fn build_mcp_adapters(
     let tools = peer
         .list_all_tools()
         .await
-        .map_err(|error| AgshError::McpConnection {
+        .map_err(|error| MekaError::McpConnection {
             server_name: server_name.clone(),
             message: format!("list_tools failed: {}", error),
         })?;
@@ -349,7 +349,7 @@ pub(super) async fn connect_server(
 ) -> Result<McpRunningService> {
     use rmcp::ServiceExt;
 
-    let handler = AgshClientHandler::new(
+    let handler = MekaClientHandler::new(
         server_name.to_string(),
         SamplingPolicy::from_config(config),
         Arc::clone(client_context),
@@ -361,7 +361,7 @@ pub(super) async fn connect_server(
                 config
                     .command
                     .as_deref()
-                    .ok_or_else(|| AgshError::McpConnection {
+                    .ok_or_else(|| MekaError::McpConnection {
                         server_name: server_name.to_string(),
                         message: "stdio transport requires 'command' field".to_string(),
                     })?;
@@ -374,7 +374,7 @@ pub(super) async fn connect_server(
             }
 
             let transport = rmcp::transport::TokioChildProcess::new(command).map_err(|error| {
-                AgshError::McpConnection {
+                MekaError::McpConnection {
                     server_name: server_name.to_string(),
                     message: format!("failed to spawn process: {}", error),
                 }
@@ -383,7 +383,7 @@ pub(super) async fn connect_server(
             handler
                 .serve(transport)
                 .await
-                .map_err(|error| AgshError::McpConnection {
+                .map_err(|error| MekaError::McpConnection {
                     server_name: server_name.to_string(),
                     message: format!("handshake failed: {}", error),
                 })
@@ -392,7 +392,7 @@ pub(super) async fn connect_server(
             let url = config
                 .url
                 .as_deref()
-                .ok_or_else(|| AgshError::McpConnection {
+                .ok_or_else(|| MekaError::McpConnection {
                     server_name: server_name.to_string(),
                     message: "http transport requires 'url' field".to_string(),
                 })?;
@@ -442,7 +442,7 @@ pub(super) async fn connect_server(
                 handler
                     .serve(transport)
                     .await
-                    .map_err(|error| AgshError::McpConnection {
+                    .map_err(|error| MekaError::McpConnection {
                         server_name: server_name.to_string(),
                         message: format!("HTTP connection failed: {}", error),
                     })

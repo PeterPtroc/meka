@@ -84,7 +84,7 @@ pub trait Frontend: Send + Sync {
     /// Returns `true` if the frontend has observed that its client is no longer reachable (e.g. an
     /// ACP client has closed its stdio connection, so every `session/update` notification returns
     /// an error). The agent loop checks this at every loop iteration and short-circuits with
-    /// [`crate::error::AgshError::Interrupted`] so it doesn't keep burning provider / MCP cycles
+    /// [`crate::error::MekaError::Interrupted`] so it doesn't keep burning provider / MCP cycles
     /// for an audience that's gone away.
     ///
     /// REPL and silent frontends never disconnect in this sense, so the default `false` is correct
@@ -137,16 +137,16 @@ impl std::error::Error for FrontendError {}
 /// assembled output via [`DelegatedExecOutput`].
 #[derive(Debug, Clone)]
 pub struct DelegatedExecSpec {
-    /// The executable to run. agsh always picks a shell (e.g. `sh` / `powershell.exe`) and passes
+    /// The executable to run. meka always picks a shell (e.g. `sh` / `powershell.exe`) and passes
     /// the user-supplied command as an argument, so the frontend doesn't need to do its own shell-
     /// quoting.
     pub command: String,
     pub args: Vec<String>,
     /// Process environment to set in addition to whatever the frontend supplies as its baseline.
-    /// agsh forwards a filtered subset of the agent's env so things like `PATH` / `LANG` are
+    /// meka forwards a filtered subset of the agent's env so things like `PATH` / `LANG` are
     /// preserved.
     pub env: Vec<(String, String)>,
-    /// Working directory for the spawned process. Almost always `Some(_)` — agsh's per-session cwd
+    /// Working directory for the spawned process. Almost always `Some(_)` — meka's per-session cwd
     /// snapshot at the call site.
     pub cwd: Option<PathBuf>,
     /// Hard timeout. The frontend should attempt to kill the process and return whatever output
@@ -161,7 +161,7 @@ pub struct DelegatedExecSpec {
 }
 
 /// Output of a delegated execute_command. ACP's `terminal/*` returns one combined output stream; we
-/// flatten any stdout/stderr separation into the single [`Self::output`] field. agsh's local
+/// flatten any stdout/stderr separation into the single [`Self::output`] field. meka's local
 /// execute_command renders the same way (stderr is appended to stdout with a separator), so this
 /// matches.
 #[derive(Debug, Clone)]
@@ -231,7 +231,7 @@ pub enum FrontendEvent {
     TokenUsage(TokenUsage),
     /// User-visible advisory surfaced by the provider layer (e.g. image redaction when the request
     /// body would exceed the API limit). `ReplFrontend` renders via [`crate::render::render_hint`];
-    /// `AcpFrontend` forwards as an `AgentMessageChunk` with a `[agsh] ` prefix so the editor's
+    /// `AcpFrontend` forwards as an `AgentMessageChunk` with a `[meka] ` prefix so the editor's
     /// transcript records the side-effect. `SilentFrontend` drops them.
     Notice(crate::provider::Notice),
     /// Incremental progress from an in-flight MCP tool (`notifications/progress`). Routed
@@ -347,7 +347,7 @@ impl Frontend for PermissionForwardingFrontend {
 }
 
 /// Fully-silent frontend: drops every emit and denies every permission request. Used by tests and
-/// `agsh tools list`'s reference registry — both want a frontend that never reaches out to a user.
+/// `meka tools list`'s reference registry — both want a frontend that never reaches out to a user.
 /// Sub-agents use [`PermissionForwardingFrontend`] instead so their permission prompts surface in
 /// the parent's UI.
 pub struct SilentFrontend;

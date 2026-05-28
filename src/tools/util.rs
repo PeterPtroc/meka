@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::ToolOutput;
-use crate::error::{AgshError, Result};
+use crate::error::{MekaError, Result};
 
 /// Default cap for regex-search-mode hits; shared by `read_file` and `scratchpad_read`.
 pub(super) const MAX_SEARCH_MATCHES: usize = 100;
@@ -16,7 +16,7 @@ pub(super) fn require_str(
     input[field]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| AgshError::ToolExecution {
+        .ok_or_else(|| MekaError::ToolExecution {
             tool_name: tool_name.to_string(),
             message: format!("missing '{}' parameter", field),
         })
@@ -34,7 +34,7 @@ pub(super) fn compile_user_regex(pattern: &str, tool_name: &str) -> Result<regex
         .size_limit(PATTERN_SIZE_LIMIT)
         .dfa_size_limit(DFA_SIZE_LIMIT)
         .build()
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: tool_name.to_string(),
             message: format!("invalid or oversized regex '{}': {}", pattern, error),
         })
@@ -54,7 +54,7 @@ pub(super) fn compile_user_regex(pattern: &str, tool_name: &str) -> Result<regex
 pub(super) async fn canonicalize_for_tool(tool_name: &str, path: &Path) -> Result<PathBuf> {
     tokio::fs::canonicalize(path)
         .await
-        .map_err(|error| AgshError::ToolExecution {
+        .map_err(|error| MekaError::ToolExecution {
             tool_name: tool_name.to_string(),
             message: format!("failed to resolve path '{}': {}", path.display(), error),
         })

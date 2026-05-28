@@ -1,4 +1,4 @@
-//! `HttpFrontend` — the `agsh serve` impl of [`crate::frontend::Frontend`].
+//! `HttpFrontend` — the `meka serve` impl of [`crate::frontend::Frontend`].
 //!
 //! Blocking mode buffers every emitted event into the turn's recorder; mid-turn pause primitives
 //! (permission approval, MCP elicitation) short-circuit to their safe defaults (`Deny`,

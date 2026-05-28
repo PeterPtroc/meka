@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     config::McpServerConfig,
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     permission::Permission,
     provider::ToolDefinition,
     tools::{Tool, ToolOutput},
@@ -57,13 +57,13 @@ impl SamplingPolicy {
 /// `roots/list`, `elicitation/create`) and notifications (`tools/list_changed`, etc.) to the rest
 /// of the agent via the shared [`McpClientContext`].
 #[derive(Clone)]
-pub struct AgshClientHandler {
+pub struct MekaClientHandler {
     server_name: Arc<str>,
     sampling: SamplingPolicy,
     context: Arc<McpClientContext>,
 }
 
-impl AgshClientHandler {
+impl MekaClientHandler {
     pub fn new(
         server_name: String,
         sampling: SamplingPolicy,
@@ -77,7 +77,7 @@ impl AgshClientHandler {
     }
 }
 
-impl ClientHandler for AgshClientHandler {
+impl ClientHandler for MekaClientHandler {
     fn on_tool_list_changed(
         &self,
         _context: NotificationContext<RoleClient>,
@@ -325,7 +325,7 @@ impl ClientHandler for AgshClientHandler {
                 );
                 return Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
-                    "sampling is not enabled for this MCP server in agsh's config",
+                    "sampling is not enabled for this MCP server in meka's config",
                     None,
                 ));
             }
@@ -422,7 +422,7 @@ impl ClientHandler for AgshClientHandler {
 
 /// Convert MCP `CreateMessageRequestParams` into the provider's `(system_prompt, Vec<Message>)`
 /// shape, flattening text content. Non-text sampling content (image, audio, tool_use, tool_result)
-/// is replaced with a placeholder string — none of agsh's providers accept these inside sampling
+/// is replaced with a placeholder string — none of meka's providers accept these inside sampling
 /// calls.
 fn convert_sampling_params(
     params: &CreateMessageRequestParams,
@@ -523,11 +523,11 @@ impl McpToolAdapter {
         &self.entry.config
     }
 
-    /// Resolves a per-call tool-call timeout. Respects `AGSH_MCP_TOOL_TIMEOUT` (milliseconds) when
+    /// Resolves a per-call tool-call timeout. Respects `MEKA_MCP_TOOL_TIMEOUT` (milliseconds) when
     /// set, otherwise falls back to 600 seconds — long enough for a database index rebuild but
     /// short enough that a hung server isn't invisible.
     fn tool_call_timeout() -> std::time::Duration {
-        std::env::var("AGSH_MCP_TOOL_TIMEOUT")
+        std::env::var("MEKA_MCP_TOOL_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .map(std::time::Duration::from_millis)
@@ -557,7 +557,7 @@ impl McpToolAdapter {
         meta.set_progress_token(progress_token);
         if let Some(id) = &tool_use_id {
             meta.0
-                .insert("agsh/toolUseId".to_string(), serde_json::json!(id));
+                .insert("meka/toolUseId".to_string(), serde_json::json!(id));
         }
         params.meta = Some(meta);
 
@@ -671,10 +671,10 @@ impl Tool for McpToolAdapter {
             Err(ServiceError::Cancelled { reason })
                 if reason.as_deref() == Some("user interrupt") =>
             {
-                return Err(AgshError::Interrupted);
+                return Err(MekaError::Interrupted);
             }
             Err(error) if is_timeout(&error) => {
-                return Err(AgshError::McpToolExecution {
+                return Err(MekaError::McpToolExecution {
                     server_name: self.entry.server_name().to_string(),
                     tool_name: self.remote_tool_name.clone(),
                     message: error.to_string(),
@@ -687,10 +687,10 @@ impl Tool for McpToolAdapter {
                     Err(ServiceError::Cancelled { reason })
                         if reason.as_deref() == Some("user interrupt") =>
                     {
-                        return Err(AgshError::Interrupted);
+                        return Err(MekaError::Interrupted);
                     }
                     Err(error) => {
-                        return Err(AgshError::McpToolExecution {
+                        return Err(MekaError::McpToolExecution {
                             server_name: self.entry.server_name().to_string(),
                             tool_name: self.remote_tool_name.clone(),
                             message: error.to_string(),
@@ -701,7 +701,7 @@ impl Tool for McpToolAdapter {
             Err(error) => {
                 // If the server rejected us with a 401/Unauthorized, persist the `needs-auth`
                 // verdict so the next startup skips the unauthenticated probe and goes straight to
-                // OAuth. The user must re-authenticate via `agsh mcp login <name>`.
+                // OAuth. The user must re-authenticate via `meka mcp login <name>`.
                 let text = error.to_string().to_ascii_lowercase();
                 if (text.contains("401") || text.contains("unauthorized"))
                     && let Some(store) = self.entry.token_store()
@@ -716,13 +716,13 @@ impl Tool for McpToolAdapter {
                         );
                     } else {
                         tracing::warn!(
-                            "MCP server '{}' returned 401 — marked as needing auth. Run 'agsh mcp login {}' to re-authenticate.",
+                            "MCP server '{}' returned 401 — marked as needing auth. Run 'meka mcp login {}' to re-authenticate.",
                             self.entry.server_name(),
                             self.entry.server_name()
                         );
                     }
                 }
-                return Err(AgshError::McpToolExecution {
+                return Err(MekaError::McpToolExecution {
                     server_name: self.entry.server_name().to_string(),
                     tool_name: self.remote_tool_name.clone(),
                     message: error.to_string(),
@@ -765,7 +765,7 @@ impl Tool for McpToolAdapter {
     }
 }
 
-/// Map MCP `CallToolResult.content` items to agsh's provider-layer `ToolResultContent` blocks. Text
+/// Map MCP `CallToolResult.content` items to meka's provider-layer `ToolResultContent` blocks. Text
 /// stays text; images pass through as multimodal blocks so providers like Claude and GPT-4o can see
 /// them; audio, embedded resources, and resource links collapse to informative text placeholders
 /// (no provider accepts them as tool-result blocks yet).
@@ -831,7 +831,7 @@ fn convert_tool_result_content(
                     text_buf.push('\n');
                 }
                 text_buf.push_str(&format!(
-                    "[audio content: {}, {} base64 bytes — agsh does not yet pass audio to the provider]",
+                    "[audio content: {}, {} base64 bytes — meka does not yet pass audio to the provider]",
                     audio.mime_type,
                     audio.data.len()
                 ));

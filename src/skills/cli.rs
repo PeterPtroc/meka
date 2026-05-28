@@ -1,4 +1,4 @@
-//! Handlers for the `agsh skill <subcommand>` CLI: list, get, show, add, remove, update. Mirrors
+//! Handlers for the `meka skill <subcommand>` CLI: list, get, show, add, remove, update. Mirrors
 //! the structure of [`crate::mcp::cli`]: each handler returns `Result<()>`, prints parseable data
 //! to stdout (the user requested it; pipes / scripts read from there) and lifecycle / diagnostic
 //! messages via `tracing` per the project's logging guidelines.
@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     skills,
 };
 
@@ -25,7 +25,7 @@ pub struct AddArgs<'a> {
     pub edit: bool,
 }
 
-/// `agsh skill list` — print a tab-separated table of every installed skill. Empty case prints `(no
+/// `meka skill list` — print a tab-separated table of every installed skill. Empty case prints `(no
 /// skills installed)` so scripts grepping the output don't get a confusing zero-byte result.
 pub async fn run_list() -> Result<()> {
     let skills = skills::discover_skills();
@@ -57,7 +57,7 @@ fn print_list(skills: &[skills::Skill]) {
     );
 }
 
-/// `agsh skill get <name>` — dump frontmatter as `key: value` lines.
+/// `meka skill get <name>` — dump frontmatter as `key: value` lines.
 pub async fn run_get(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
     let body_bytes = std::fs::metadata(&skill.body_path)
@@ -77,41 +77,41 @@ pub async fn run_get(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `agsh skill show <name>` — print the rendered body with `${AGSH_SKILL_DIR}` substituted.
-/// `${AGSH_SESSION_ID}` stays literal because there's no active session in the CLI context.
+/// `meka skill show <name>` — print the rendered body with `${MEKA_SKILL_DIR}` substituted.
+/// `${MEKA_SESSION_ID}` stays literal because there's no active session in the CLI context.
 pub async fn run_show(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
     let body = skills::load_skill_body(&skill, None)
         .await
-        .map_err(|error| AgshError::Config(format!("failed to load skill body: {}", error)))?;
+        .map_err(|error| MekaError::Config(format!("failed to load skill body: {}", error)))?;
     print!("{}", body);
     Ok(())
 }
 
-/// `agsh skill add <name> [flags]` — scaffold a new skill directory.
+/// `meka skill add <name> [flags]` — scaffold a new skill directory.
 pub async fn run_add(args: AddArgs<'_>) -> Result<()> {
-    skills::validate_skill_name(args.name).map_err(AgshError::Config)?;
+    skills::validate_skill_name(args.name).map_err(MekaError::Config)?;
 
     let dir = skills::skill_dir_for(args.name)
-        .ok_or_else(|| AgshError::Config("could not resolve agsh config directory".to_string()))?;
+        .ok_or_else(|| MekaError::Config("could not resolve meka config directory".to_string()))?;
 
     if dir.exists() {
         if !args.force {
-            return Err(AgshError::Config(format!(
+            return Err(MekaError::Config(format!(
                 "skill '{}' already exists at {}; pass --force to overwrite",
                 args.name,
                 dir.display()
             )));
         }
         tokio::fs::remove_dir_all(&dir).await.map_err(|error| {
-            AgshError::Config(format!("failed to remove {}: {}", dir.display(), error))
+            MekaError::Config(format!("failed to remove {}: {}", dir.display(), error))
         })?;
     }
 
     let body = build_skill_body(&args)?;
 
     tokio::fs::create_dir_all(&dir).await.map_err(|error| {
-        AgshError::Config(format!(
+        MekaError::Config(format!(
             "failed to create skill dir {}: {}",
             dir.display(),
             error
@@ -120,7 +120,7 @@ pub async fn run_add(args: AddArgs<'_>) -> Result<()> {
 
     let skill_md = dir.join("SKILL.md");
     tokio::fs::write(&skill_md, &body).await.map_err(|error| {
-        AgshError::Config(format!("failed to write {}: {}", skill_md.display(), error))
+        MekaError::Config(format!("failed to write {}: {}", skill_md.display(), error))
     })?;
 
     tracing::info!("created skill '{}' at {}", args.name, skill_md.display());
@@ -134,7 +134,7 @@ pub async fn run_add(args: AddArgs<'_>) -> Result<()> {
                 .arg(&skill_md)
                 .status()
                 .map_err(|error| {
-                    AgshError::Config(format!("failed to launch $EDITOR: {}", error))
+                    MekaError::Config(format!("failed to launch $EDITOR: {}", error))
                 })?;
             if !status.success() {
                 tracing::warn!("$EDITOR exited with non-zero status: {:?}", status.code());
@@ -150,17 +150,17 @@ pub async fn run_add(args: AddArgs<'_>) -> Result<()> {
 fn build_skill_body(args: &AddArgs<'_>) -> Result<String> {
     if let Some(path) = args.from_file {
         if args.description.is_some() {
-            return Err(AgshError::Config(
+            return Err(MekaError::Config(
                 "--from-file is mutually exclusive with --description".to_string(),
             ));
         }
         let content = std::fs::read_to_string(path).map_err(|error| {
-            AgshError::Config(format!("failed to read {}: {}", path.display(), error))
+            MekaError::Config(format!("failed to read {}: {}", path.display(), error))
         })?;
         Ok(content)
     } else {
         let description = args.description.ok_or_else(|| {
-            AgshError::Config(
+            MekaError::Config(
                 "--description is required (or pass --from-file to copy a template)".to_string(),
             )
         })?;
@@ -174,21 +174,21 @@ fn build_skill_body(args: &AddArgs<'_>) -> Result<String> {
     }
 }
 
-/// `agsh skill remove <name>` — delete the skill directory. No prompt; matches `agsh mcp remove`'s
+/// `meka skill remove <name>` — delete the skill directory. No prompt; matches `meka mcp remove`'s
 /// convention.
 pub async fn run_remove(name: &str) -> Result<()> {
-    skills::validate_skill_name(name).map_err(AgshError::Config)?;
+    skills::validate_skill_name(name).map_err(MekaError::Config)?;
     let dir = skills::skill_dir_for(name)
-        .ok_or_else(|| AgshError::Config("could not resolve agsh config directory".to_string()))?;
+        .ok_or_else(|| MekaError::Config("could not resolve meka config directory".to_string()))?;
     if !dir.exists() {
-        return Err(AgshError::Config(format!(
+        return Err(MekaError::Config(format!(
             "skill '{}' not found at {}",
             name,
             dir.display()
         )));
     }
     tokio::fs::remove_dir_all(&dir).await.map_err(|error| {
-        AgshError::Config(format!("failed to remove {}: {}", dir.display(), error))
+        MekaError::Config(format!("failed to remove {}: {}", dir.display(), error))
     })?;
     tracing::info!("removed skill '{}'", name);
     Ok(())
@@ -210,14 +210,14 @@ fn version_label(version: &Option<String>) -> &str {
     version.as_deref().unwrap_or("unversioned")
 }
 
-/// `agsh skill update [<name>] [--all] [--yes]` — re-fetch skills that declare a `source_url` and
+/// `meka skill update [<name>] [--all] [--yes]` — re-fetch skills that declare a `source_url` and
 /// replace them on disk.
 pub async fn run_update(name: Option<&str>, all: bool, yes: bool) -> Result<()> {
     match (name, all) {
-        (Some(_), true) => Err(AgshError::Config(
+        (Some(_), true) => Err(MekaError::Config(
             "pass either a skill name or --all, not both".to_string(),
         )),
-        (None, false) => Err(AgshError::Config(
+        (None, false) => Err(MekaError::Config(
             "specify a skill name, or pass --all to update every skill".to_string(),
         )),
         (Some(name), false) => update_one(name).await,
@@ -228,7 +228,7 @@ pub async fn run_update(name: Option<&str>, all: bool, yes: bool) -> Result<()> 
 async fn update_one(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
     if skill.source_url.is_none() {
-        return Err(AgshError::Config(format!(
+        return Err(MekaError::Config(format!(
             "skill '{}' has no source_url; nothing to update",
             name
         )));
@@ -294,12 +294,12 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
     let url = skill
         .source_url
         .as_deref()
-        .ok_or_else(|| AgshError::Config(format!("skill '{}' has no source_url", skill.name)))?;
+        .ok_or_else(|| MekaError::Config(format!("skill '{}' has no source_url", skill.name)))?;
 
     // Explicit scheme check for a clear error; `https_only(true)` below is the defense-in-depth
     // that also blocks an http downgrade on a redirect (GitHub-raw / gist URLs do redirect).
     if !url.starts_with("https://") {
-        return Err(AgshError::Config(format!(
+        return Err(MekaError::Config(format!(
             "skill '{}' source_url must be https://, got: {}",
             skill.name, url
         )));
@@ -310,23 +310,23 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(crate::config::DEFAULT_WEB_USER_AGENT)
         .build()
-        .map_err(|error| AgshError::Config(format!("failed to build HTTP client: {}", error)))?;
+        .map_err(|error| MekaError::Config(format!("failed to build HTTP client: {}", error)))?;
 
     let fetched = client
         .get(url)
         .send()
         .await
         .map_err(|error| {
-            AgshError::Config(format!("fetch failed for '{}': {}", skill.name, error))
+            MekaError::Config(format!("fetch failed for '{}': {}", skill.name, error))
         })?
         .error_for_status()
         .map_err(|error| {
-            AgshError::Config(format!("fetch failed for '{}': {}", skill.name, error))
+            MekaError::Config(format!("fetch failed for '{}': {}", skill.name, error))
         })?
         .text()
         .await
         .map_err(|error| {
-            AgshError::Config(format!(
+            MekaError::Config(format!(
                 "failed to read response body for '{}': {}",
                 skill.name, error
             ))
@@ -337,7 +337,7 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
     let parsed =
         skills::parse_skill_definition(&skill.name, &skill.source_dir, &skill.body_path, &fetched)
             .map_err(|error| {
-                AgshError::Config(format!(
+                MekaError::Config(format!(
                     "fetched content for '{}' is not a valid skill: {}",
                     skill.name, error
                 ))
@@ -358,7 +358,7 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
     }
 
     crate::config::write_config_atomic(&skill.body_path, &fetched).map_err(|error| {
-        AgshError::Config(format!(
+        MekaError::Config(format!(
             "failed to write {}: {}",
             skill.body_path.display(),
             error
@@ -376,7 +376,7 @@ pub(crate) fn require_skill(name: &str) -> Result<skills::Skill> {
     skills
         .into_iter()
         .find(|skill| skill.name == name)
-        .ok_or_else(|| AgshError::Config(format!("no skill named '{}'", name)))
+        .ok_or_else(|| MekaError::Config(format!("no skill named '{}'", name)))
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -393,13 +393,13 @@ fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Serializes tests that mutate the global `AGSH_CONFIG_DIR` env var. Without this, tokio's
+    /// Serializes tests that mutate the global `MEKA_CONFIG_DIR` env var. Without this, tokio's
     /// parallel test runner causes one test's tempdir to be observed by another test's
     /// `discover_skills()`. `tokio::sync::Mutex` (rather than `std::sync::Mutex`) so the guard is
     /// awaitable — tests must hold it across `.await` calls.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// Acquire the env-lock and point `AGSH_CONFIG_DIR` at `temp`. The returned guard must be held
+    /// Acquire the env-lock and point `MEKA_CONFIG_DIR` at `temp`. The returned guard must be held
     /// by the caller for the lifetime of the test; dropping it releases the lock so the next test
     /// can run.
     async fn isolate_config_dir(temp: &tempfile::TempDir) -> tokio::sync::MutexGuard<'static, ()> {
@@ -407,7 +407,7 @@ mod tests {
         // SAFETY: the mutex makes this access exclusive across tests in this process; no other code
         // reads the var while the lock is held. Matches the env-var override at
         // `src/config.rs:462-467`.
-        unsafe { std::env::set_var("AGSH_CONFIG_DIR", temp.path()) };
+        unsafe { std::env::set_var("MEKA_CONFIG_DIR", temp.path()) };
         guard
     }
 
@@ -643,7 +643,7 @@ mod tests {
 
         // Inject a marker into the skill body that references the dir.
         let dir = skills::skill_dir_for("subst").expect("dir resolves");
-        let body = "---\ndescription: x\n---\nDir is ${AGSH_SKILL_DIR}\n";
+        let body = "---\ndescription: x\n---\nDir is ${MEKA_SKILL_DIR}\n";
         std::fs::write(dir.join("SKILL.md"), body).expect("rewrite");
 
         // run_show prints to stdout; we exercise the loader directly to assert the substitution
@@ -651,7 +651,7 @@ mod tests {
         let skill = require_skill("subst").expect("found");
         let rendered = skills::load_skill_body(&skill, None).await.expect("load");
         assert!(rendered.contains(&dir.display().to_string()));
-        assert!(!rendered.contains("${AGSH_SKILL_DIR}"));
+        assert!(!rendered.contains("${MEKA_SKILL_DIR}"));
     }
 
     #[test]

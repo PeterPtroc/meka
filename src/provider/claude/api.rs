@@ -16,7 +16,7 @@ use super::shared::{
     drive_claude_sse_stream, parse_non_streaming_response,
 };
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{Message, Notice, Provider, StopReason, StreamEvent, TokenUsage, ToolDefinition},
 };
 
@@ -127,7 +127,7 @@ impl Provider for ClaudeApiProvider {
             shared::build_body_within_budget(messages, self.session_stats.as_ref(), |msgs| {
                 serde_json::to_string(&self.build_request_body(system_prompt, msgs, tools, false))
                     .map_err(|error| {
-                        AgshError::Provider(format!("failed to serialize body: {}", error))
+                        MekaError::Provider(format!("failed to serialize body: {}", error))
                     })
             })?;
         let body_size_mib = body_json.len() / 1_048_576;
@@ -136,7 +136,7 @@ impl Provider for ClaudeApiProvider {
             .body(body_json);
 
         let response = request.send().await.map_err(|error| {
-            AgshError::Provider(format!(
+            MekaError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
                 body_size_mib,
                 crate::error::format_reqwest_error(&error),
@@ -147,17 +147,17 @@ impl Provider for ClaudeApiProvider {
         let response_text = response
             .text()
             .await
-            .map_err(|error| AgshError::Provider(format!("failed to read response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("failed to read response: {}", error)))?;
 
         if !status.is_success() {
-            return Err(AgshError::Provider(format!(
+            return Err(MekaError::Provider(format!(
                 "API returned status {}: {}",
                 status, response_text
             )));
         }
 
         let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|error| AgshError::Provider(format!("invalid JSON response: {}", error)))?;
+            .map_err(|error| MekaError::Provider(format!("invalid JSON response: {}", error)))?;
 
         let (message, stop_reason, usage) = parse_non_streaming_response(&response_json)?;
         let notices = redaction_notice.into_iter().collect();
@@ -176,7 +176,7 @@ impl Provider for ClaudeApiProvider {
             shared::build_body_within_budget(messages, self.session_stats.as_ref(), |msgs| {
                 serde_json::to_string(&self.build_request_body(system_prompt, msgs, tools, true))
                     .map_err(|error| {
-                        AgshError::Provider(format!("failed to serialize body: {}", error))
+                        MekaError::Provider(format!("failed to serialize body: {}", error))
                     })
             })?;
         // Surface the redaction notice as the first stream event so the frontend renders it before
@@ -198,7 +198,7 @@ impl Provider for ClaudeApiProvider {
             .body(body_json);
 
         let response = request.send().await.map_err(|error| {
-            AgshError::Provider(format!(
+            MekaError::Provider(format!(
                 "HTTP request failed (body {} MiB): {}",
                 body_size_mib,
                 crate::error::format_reqwest_error(&error),

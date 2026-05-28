@@ -55,14 +55,14 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// Run agsh as an ACP (Agent Client Protocol) agent over stdio.
+    /// Run meka as an ACP (Agent Client Protocol) agent over stdio.
     ///
     /// Speaks newline-framed JSON-RPC on stdin/stdout so ACP clients (Zed, JetBrains, Neovim, VS
-    /// Code via the ACP extension, etc.) can drive agsh turns directly. Diagnostic output stays on
+    /// Code via the ACP extension, etc.) can drive meka turns directly. Diagnostic output stays on
     /// stderr; stdout is reserved for the protocol.
     #[command(verbatim_doc_comment)]
     Acp,
-    /// Run agsh as a long-lived HTTP service.
+    /// Run meka as a long-lived HTTP service.
     ///
     /// Exposes the agent over HTTP+JSON for programmatic clients (bots, scripts, web UIs).
     /// See the HTTP API docs for the full spec. Auth, session GC, and SSE streaming are configured
@@ -92,11 +92,11 @@ pub enum SkillAction {
     Get { name: String },
     /// Print the rendered skill body
     Show { name: String },
-    /// Scaffold a new skill at `~/.config/agsh/skills/<name>/SKILL.md`.
+    /// Scaffold a new skill at `~/.config/meka/skills/<name>/SKILL.md`.
     ///
     /// Examples:
-    ///   agsh skill add demo --description "X"
-    ///   agsh skill add custom --from-file ./template.md
+    ///   meka skill add demo --description "X"
+    ///   meka skill add custom --from-file ./template.md
     #[command(verbatim_doc_comment)]
     Add {
         /// Unique skill name (alphanumerics, `-`, `_` only)
@@ -135,9 +135,9 @@ pub enum SkillAction {
     /// Re-fetch skills from their `source_url` and replace them on disk.
     ///
     /// Examples:
-    ///   agsh skill update my-skill
-    ///   agsh skill update --all          # dry run: lists what would update
-    ///   agsh skill update --all --yes    # applies the updates
+    ///   meka skill update my-skill
+    ///   meka skill update --all          # dry run: lists what would update
+    ///   meka skill update --all --yes    # applies the updates
     #[command(verbatim_doc_comment)]
     Update {
         /// Skill name to update. Omit and pass --all to update every skill.
@@ -173,12 +173,12 @@ pub enum McpAction {
     /// Add a server to config.toml.
     ///
     /// Examples:
-    ///   agsh mcp add pg npx -y @modelcontextprotocol/server-postgres
-    ///   agsh mcp add notion https://mcp.notion.com/mcp
-    ///   agsh mcp add api https://api.example.com/mcp --auth-token $API_TOKEN
-    ///   agsh mcp add notion https://mcp.notion.com/mcp --auth oauth
+    ///   meka mcp add pg npx -y @modelcontextprotocol/server-postgres
+    ///   meka mcp add notion https://mcp.notion.com/mcp
+    ///   meka mcp add api https://api.example.com/mcp --auth-token $API_TOKEN
+    ///   meka mcp add notion https://mcp.notion.com/mcp --auth oauth
     // `rustdoc::bare_urls` normally turns URLs like https://example into auto-links, but these doc
-    // lines are ALSO the text clap prints for `agsh mcp add --help`. Angle-brackets would leak into
+    // lines are ALSO the text clap prints for `meka mcp add --help`. Angle-brackets would leak into
     // the CLI help. Allow bare URLs just on this variant.
     #[allow(rustdoc::bare_urls)]
     // Preserve line breaks in the `Examples:` block; clap's default joins consecutive `///` lines
@@ -245,7 +245,7 @@ pub enum McpAction {
         #[arg(long)]
         sampling: bool,
 
-        /// Max sampling calls per agsh session (default 10)
+        /// Max sampling calls per meka session (default 10)
         #[arg(long)]
         sampling_limit: Option<u32>,
 
@@ -265,11 +265,11 @@ pub enum McpAction {
         #[arg(long = "tool-permission", value_name = "TOOL=LEVEL")]
         tool_permission: Vec<String>,
 
-        /// Skip post-add auto-login; run `agsh mcp login <name>` later
+        /// Skip post-add auto-login; run `meka mcp login <name>` later
         #[arg(long = "no-login")]
         no_login: bool,
 
-        /// Persist with disabled=true; re-enable via `agsh mcp enable`
+        /// Persist with disabled=true; re-enable via `meka mcp enable`
         #[arg(long = "disabled")]
         disabled: bool,
     },
@@ -317,7 +317,7 @@ fn parse_mcp_auth_kind(s: &str) -> std::result::Result<McpAuthKind, String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "agsh", version, about = "An agentic shell")]
+#[command(name = "meka", version, about = "A general-purpose AI agent harness")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_cli_defaults() {
-        let cli = Cli::parse_from(["agsh"]);
+        let cli = Cli::parse_from(["meka"]);
         assert!(cli.command.is_none());
         assert!(cli.prompt.is_none());
         assert!(cli.continue_session.is_none());
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_cli_eager_load_tool_repeatable() {
         let cli = Cli::parse_from([
-            "agsh",
+            "meka",
             "--eager-load-tool",
             "notion:search",
             "--eager-load-tool",
@@ -429,40 +429,40 @@ mod tests {
 
     #[test]
     fn test_cli_oneshot_flag() {
-        let cli = Cli::parse_from(["agsh", "--oneshot", "do thing"]);
+        let cli = Cli::parse_from(["meka", "--oneshot", "do thing"]);
         assert!(cli.oneshot);
         assert_eq!(cli.prompt.as_deref(), Some("do thing"));
     }
 
     #[test]
     fn test_cli_oneshot_prompt() {
-        let cli = Cli::parse_from(["agsh", "hello world"]);
+        let cli = Cli::parse_from(["meka", "hello world"]);
         assert_eq!(cli.prompt.as_deref(), Some("hello world"));
     }
 
     #[test]
     fn test_cli_skill_flag_alone() {
-        let cli = Cli::parse_from(["agsh", "--skill", "demo"]);
+        let cli = Cli::parse_from(["meka", "--skill", "demo"]);
         assert_eq!(cli.skill.as_deref(), Some("demo"));
         assert!(cli.prompt.is_none());
     }
 
     #[test]
     fn test_cli_skill_flag_with_extra_prompt() {
-        let cli = Cli::parse_from(["agsh", "--skill", "demo", "extra context"]);
+        let cli = Cli::parse_from(["meka", "--skill", "demo", "extra context"]);
         assert_eq!(cli.skill.as_deref(), Some("demo"));
         assert_eq!(cli.prompt.as_deref(), Some("extra context"));
     }
 
     #[test]
     fn test_cli_continue_last() {
-        let cli = Cli::parse_from(["agsh", "-c"]);
+        let cli = Cli::parse_from(["meka", "-c"]);
         assert_eq!(cli.continue_session.as_deref(), Some("last"));
     }
 
     #[test]
     fn test_cli_continue_specific_session() {
-        let cli = Cli::parse_from(["agsh", "-c", "550e8400-e29b-41d4-a716-446655440000"]);
+        let cli = Cli::parse_from(["meka", "-c", "550e8400-e29b-41d4-a716-446655440000"]);
         assert_eq!(
             cli.continue_session.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn test_cli_flags() {
         let cli = Cli::parse_from([
-            "agsh",
+            "meka",
             "--provider",
             "openai-api",
             "--model",
@@ -490,19 +490,19 @@ mod tests {
 
     #[test]
     fn test_cli_permission_flag() {
-        let cli = Cli::parse_from(["agsh", "--permission", "write"]);
+        let cli = Cli::parse_from(["meka", "--permission", "write"]);
         assert_eq!(cli.permission, Some(Permission::Write));
     }
 
     #[test]
     fn test_cli_continue_long_form() {
-        let cli = Cli::parse_from(["agsh", "--continue"]);
+        let cli = Cli::parse_from(["meka", "--continue"]);
         assert_eq!(cli.continue_session.as_deref(), Some("last"));
     }
 
     #[test]
     fn test_cli_continue_long_form_with_id() {
-        let cli = Cli::parse_from(["agsh", "--continue", "550e8400-e29b-41d4-a716-446655440000"]);
+        let cli = Cli::parse_from(["meka", "--continue", "550e8400-e29b-41d4-a716-446655440000"]);
         assert_eq!(
             cli.continue_session.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_cli_setup_subcommand() {
-        let cli = Cli::parse_from(["agsh", "setup"]);
+        let cli = Cli::parse_from(["meka", "setup"]);
         assert!(matches!(cli.command, Some(Command::Setup)));
     }
 }

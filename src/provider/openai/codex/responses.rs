@@ -15,14 +15,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     provider::{
         ContentBlock, Message, Role, StopReason, StreamEvent, TokenUsage, ToolDefinition,
         ToolResultContent,
     },
 };
 
-/// Build the JSON body POSTed to `/responses`. Translates the agsh internal `Message` /
+/// Build the JSON body POSTed to `/responses`. Translates the meka internal `Message` /
 /// `ContentBlock` shape into Responses API `input` items (`message`, `function_call`,
 /// `function_call_output`).
 pub(super) fn build_request_body(
@@ -200,7 +200,7 @@ struct ActiveToolCall {
 }
 
 /// Pure SSE-event handler. Inspects the named event + parsed JSON payload, updates `state`, and
-/// returns the agsh-level [`StreamEvent`]s to forward to the agent. Returns `Err` when the server
+/// returns the meka-level [`StreamEvent`]s to forward to the agent. Returns `Err` when the server
 /// reports a fatal stream error — the driver propagates this back to the caller.
 pub(super) fn process_event(
     event_name: &str,
@@ -337,7 +337,7 @@ pub(super) fn process_event(
                 .unwrap_or("response.failed event")
                 .to_string();
             out.push(StreamEvent::Error(message.clone()));
-            return Err(AgshError::Provider(message));
+            return Err(MekaError::Provider(message));
         }
 
         "response.incomplete" => {
@@ -350,7 +350,7 @@ pub(super) fn process_event(
                 .unwrap_or("unknown");
             let message = format!("response.incomplete: {}", reason);
             out.push(StreamEvent::Error(message.clone()));
-            return Err(AgshError::Provider(message));
+            return Err(MekaError::Provider(message));
         }
 
         other => {
@@ -381,7 +381,7 @@ pub(super) async fn drive_responses_sse_stream(
             tracing::warn!("failed to read Codex error response body: {}", error);
             String::new()
         });
-        return Err(AgshError::Provider(format!(
+        return Err(MekaError::Provider(format!(
             "Codex API returned status {}: {}",
             status, response_text
         )));
@@ -393,7 +393,7 @@ pub(super) async fn drive_responses_sse_stream(
     loop {
         tokio::select! {
             _ = cancellation.cancelled() => {
-                return Err(AgshError::Interrupted);
+                return Err(MekaError::Interrupted);
             }
             event = event_stream.next() => {
                 let Some(event) = event else { break };
@@ -407,7 +407,7 @@ pub(super) async fn drive_responses_sse_stream(
                         {
                             tracing::trace!("stream event receiver dropped");
                         }
-                        return Err(AgshError::StreamError(error.to_string()));
+                        return Err(MekaError::StreamError(error.to_string()));
                     }
                 };
 
@@ -604,7 +604,7 @@ mod tests {
 
     fn run_events(
         events: &[(&str, serde_json::Value)],
-    ) -> (Vec<StreamEvent>, std::result::Result<(), AgshError>) {
+    ) -> (Vec<StreamEvent>, std::result::Result<(), MekaError>) {
         let mut state = SseState::default();
         let mut emitted = Vec::new();
         let mut outcome = Ok(());
@@ -804,7 +804,7 @@ mod tests {
         );
         assert!(state.finished);
         assert!(
-            matches!(result, Err(AgshError::Provider(ref message)) if message.contains("too many tokens"))
+            matches!(result, Err(MekaError::Provider(ref message)) if message.contains("too many tokens"))
         );
     }
 
@@ -821,7 +821,7 @@ mod tests {
         assert!(state.finished);
         assert!(matches!(
             result,
-            Err(AgshError::Provider(ref message)) if message.contains("max_output_tokens")
+            Err(MekaError::Provider(ref message)) if message.contains("max_output_tokens")
         ));
     }
 

@@ -2,7 +2,7 @@
 // failure by design.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! End-to-end integration tests for `agsh serve`. Spawns the real `agsh serve` binary against
+//! End-to-end integration tests for `meka serve`. Spawns the real `meka serve` binary against
 //! a tempdir and a scripted mock provider, then drives it over HTTP via `reqwest`.
 
 use std::{
@@ -11,8 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn agsh() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_agsh"))
+fn meka() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_meka"))
 }
 
 /// Bind to an OS-assigned ephemeral port, then immediately close so the OS hands the port back.
@@ -37,7 +37,7 @@ struct ServeTestHarness {
 }
 
 impl ServeTestHarness {
-    /// Spawn `agsh serve` with a single `sessions:r + sessions:w` token and the mock
+    /// Spawn `meka serve` with a single `sessions:r + sessions:w` token and the mock
     /// provider. Returns once the server has logged its listening address.
     fn spawn(config_toml: &str, script: serde_json::Value) -> Self {
         Self::spawn_with(config_toml, script, "sk_test_token", &[
@@ -53,23 +53,33 @@ impl ServeTestHarness {
         scopes: &[&str],
     ) -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
-        let config_dir = temp.path().join("agsh");
-        let data_dir = temp.path().join("data").join("agsh");
+        let config_dir = temp.path().join("meka");
+        let data_dir = temp.path().join("data").join("meka");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
-        let port = ephemeral_port();
-        let bind = format!("127.0.0.1:{}", port);
+        let script_path = temp.path().join("script.json");
+        std::fs::write(&script_path, script.to_string()).expect("write script");
 
         let scopes_str = scopes
             .iter()
             .map(|s| format!("\"{}\"", s))
             .collect::<Vec<_>>()
             .join(", ");
-        // `extra_config` is injected into the top-level `[serve]` table (before the
-        // `[[serve.tokens]]` array-of-tables) so callers can set `max_body_bytes`,
-        // `idle_timeout`, etc. without colliding with the per-token block.
-        let config = format!(
-            r#"
+
+        // Startup is retried: a parallel test can re-claim our just-freed ephemeral port before
+        // the server binds it, so the server fails to bind and exits. That surfaces here as a
+        // `Disconnected` recv (stderr EOFs) rather than a timeout, and waiting longer wouldn't
+        // help — only a fresh port does. Retry a few times before giving up.
+        const MAX_ATTEMPTS: usize = 5;
+        let mut last_logs = String::new();
+        for _ in 0..MAX_ATTEMPTS {
+            let port = ephemeral_port();
+            let bind = format!("127.0.0.1:{}", port);
+            // `extra_config` is injected into the top-level `[serve]` table (before the
+            // `[[serve.tokens]]` array-of-tables) so callers can set `max_body_bytes`,
+            // `idle_timeout`, etc. without colliding with the per-token block.
+            let config = format!(
+                r#"
 [provider]
 name = "claude-api"
 model = "claude-sonnet-4-5"
@@ -87,80 +97,88 @@ bind = "{bind}"
 token = "{token}"
 scopes = [{scopes_str}]
 "#,
-            bind = bind,
-            token = token,
-            scopes_str = scopes_str,
-            extra_config = extra_config,
-        );
-        std::fs::write(config_dir.join("config.toml"), &config).expect("write config.toml");
+                bind = bind,
+                token = token,
+                scopes_str = scopes_str,
+                extra_config = extra_config,
+            );
+            std::fs::write(config_dir.join("config.toml"), &config).expect("write config.toml");
 
-        let script_path = temp.path().join("script.json");
-        std::fs::write(&script_path, script.to_string()).expect("write script");
+            let mut child = meka()
+                .arg("serve")
+                .env("MEKA_CONFIG_DIR", &config_dir)
+                .env("MEKA_DATA_DIR", &data_dir)
+                .env("HOME", temp.path())
+                .env("MEKA_ACP_MOCK_PROVIDER", "1")
+                .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+                .env("RUST_LOG", "meka=info")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn meka serve");
 
-        let mut child = agsh()
-            .arg("serve")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
-            .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
-            .env("RUST_LOG", "agsh=info")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn agsh serve");
+            // Drain stdout in the background; the server doesn't write to it.
+            let stdout = child.stdout.take().expect("stdout");
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let mut r = BufReader::new(stdout);
+                while r.read_line(&mut buf).unwrap_or(0) > 0 {}
+            });
 
-        // Drain stdout in the background; the server doesn't write to it.
-        let stdout = child.stdout.take().expect("stdout");
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let mut r = BufReader::new(stdout);
-            while r.read_line(&mut buf).unwrap_or(0) > 0 {}
-        });
-
-        // Watch stderr for the "listening on" line so we know the server has bound. Also
-        // drains the rest of stderr to keep the pipe from blocking the child.
-        let stderr_pipe = child.stderr.take().expect("stderr");
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
-        let stderr_handle = std::thread::spawn(move || {
-            let mut buf = String::new();
-            let mut r = BufReader::new(stderr_pipe);
-            let mut ready_sent = false;
-            let mut accumulated = String::new();
-            loop {
-                buf.clear();
-                let n = r.read_line(&mut buf).unwrap_or(0);
-                if n == 0 {
-                    break;
+            // Watch stderr for the "listening on" line so we know the server has bound. Also
+            // drains the rest of stderr to keep the pipe from blocking the child.
+            let stderr_pipe = child.stderr.take().expect("stderr");
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+            let stderr_handle = std::thread::spawn(move || {
+                let mut buf = String::new();
+                let mut r = BufReader::new(stderr_pipe);
+                let mut ready_sent = false;
+                let mut accumulated = String::new();
+                loop {
+                    buf.clear();
+                    let n = r.read_line(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    accumulated.push_str(&buf);
+                    if !ready_sent && buf.contains("listening on") {
+                        let _ = ready_tx.send(());
+                        ready_sent = true;
+                    }
                 }
-                accumulated.push_str(&buf);
-                if !ready_sent && buf.contains("listening on") {
-                    let _ = ready_tx.send(());
-                    ready_sent = true;
-                }
+                accumulated
+            });
+
+            // Wait for the server to bind. `Ok` means ready; any error (timeout, or the server
+            // exited and dropped the sender) means this attempt failed — kill it, collect its
+            // logs, and retry with a fresh port.
+            if ready_rx.recv_timeout(Duration::from_secs(20)).is_ok() {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .expect("reqwest client");
+
+                return Self {
+                    _temp: temp,
+                    child,
+                    base_url: format!("http://{}", bind),
+                    token: token.to_string(),
+                    stderr_handle,
+                    client,
+                };
             }
-            accumulated
-        });
 
-        // Wait up to 10s for the server to bind.
-        ready_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server should log `listening on` within 10s");
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("reqwest client");
-
-        Self {
-            _temp: temp,
-            child,
-            base_url: format!("http://{}", bind),
-            token: token.to_string(),
-            stderr_handle,
-            client,
+            let _ = child.kill();
+            let _ = child.wait();
+            last_logs = stderr_handle.join().unwrap_or_default();
         }
+
+        panic!(
+            "meka serve failed to log `listening on` within 20s across {} attempts; \
+             last stderr:\n{}",
+            MAX_ATTEMPTS, last_logs,
+        );
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::blocking::RequestBuilder {
@@ -208,12 +226,12 @@ fn missing_authorization_returns_401_problem_detail() {
             .headers()
             .get("www-authenticate")
             .and_then(|v| v.to_str().ok()),
-        Some(r#"Bearer realm="agsh""#),
+        Some(r#"Bearer realm="meka""#),
         "401 responses must carry WWW-Authenticate: Bearer per RFC 9110",
     );
     let body: serde_json::Value = response.json().expect("parse");
     assert_eq!(
-        body["type"], "https://agsh.dev/errors/auth",
+        body["type"], "https://meka.so/errors/auth",
         "missing Authorization should land on auth error"
     );
 }
@@ -229,7 +247,7 @@ fn invalid_bearer_token_returns_401_auth_invalid() {
         .expect("send");
     assert_eq!(response.status(), 401);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/auth");
+    assert_eq!(body["type"], "https://meka.so/errors/auth");
 }
 
 #[test]
@@ -244,7 +262,7 @@ fn insufficient_scope_returns_403() {
         .expect("send");
     assert_eq!(response.status(), 403);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/auth-scope");
+    assert_eq!(body["type"], "https://meka.so/errors/auth-scope");
     // Every Problem Detail must carry the request URI as `instance` per RFC 9457.
     assert_eq!(
         body["instance"], "/v1/sessions",
@@ -501,7 +519,7 @@ fn idempotency_key_with_different_body_returns_409_conflict() {
         .expect("send");
     assert_eq!(second.status(), 409);
     let body: serde_json::Value = second.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/idempotency");
+    assert_eq!(body["type"], "https://meka.so/errors/idempotency");
 }
 
 #[test]
@@ -631,7 +649,7 @@ fn second_turn_on_same_session_returns_409_turn_in_flight() {
         .expect("second send");
     assert_eq!(second.status(), 409, "concurrent turn must return 409");
     let body: serde_json::Value = second.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/turn-in-flight");
+    assert_eq!(body["type"], "https://meka.so/errors/turn-in-flight");
 
     // Drain the first turn so the harness Drop doesn't leave a zombie.
     let first_response = first.join().expect("join").error_for_status();
@@ -687,7 +705,7 @@ fn concurrent_streaming_turns_return_409() {
         "concurrent streaming turn must return 409"
     );
     let body: serde_json::Value = second.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/turn-in-flight");
+    assert_eq!(body["type"], "https://meka.so/errors/turn-in-flight");
 
     // Drain the first stream so the harness drop is clean. The SSE body is consumed lazily,
     // so we just have to read it.
@@ -751,7 +769,7 @@ fn oversize_body_returns_413() {
         "413 must serialize as Problem Detail, not plain text",
     );
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/payload-too-large");
+    assert_eq!(body["type"], "https://meka.so/errors/payload-too-large");
     assert_eq!(body["status"], 413);
     assert!(
         body["max_body_bytes"].is_number(),
@@ -814,7 +832,7 @@ fn patch_without_write_scope_returns_403() {
         .expect("send");
     assert_eq!(response.status(), 403);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/auth-scope");
+    assert_eq!(body["type"], "https://meka.so/errors/auth-scope");
 }
 
 /// After GC evicts an idle session, a subsequent `POST /turn` on the same session id rebuilds
@@ -1102,7 +1120,7 @@ fn max_concurrent_turns_returns_429_across_sessions() {
     );
     let body: serde_json::Value = second.json().expect("parse");
     assert_eq!(
-        body["type"], "https://agsh.dev/errors/concurrency-limit",
+        body["type"], "https://meka.so/errors/concurrency-limit",
         "process-wide cap must surface the concurrency-limit type, not rate-limit-exceeded",
     );
 
@@ -1188,7 +1206,7 @@ fn mid_turn_permission_round_trips() {
     let script = serde_json::json!([
         [
             { "kind": "tool_use_start", "id": "tu_1", "name": "write_file" },
-            { "kind": "tool_use_end", "input": {"path": "/tmp/agsh-test.txt", "content": "x"} },
+            { "kind": "tool_use_end", "input": {"path": "/tmp/meka-test.txt", "content": "x"} },
             { "kind": "message_end", "stop_reason": "tool_use" }
         ],
         [
@@ -1399,7 +1417,7 @@ fn unknown_session_returns_404_on_every_mutating_endpoint() {
         );
         let problem: serde_json::Value = response.json().expect("parse");
         assert_eq!(
-            problem["type"], "https://agsh.dev/errors/session-not-found",
+            problem["type"], "https://meka.so/errors/session-not-found",
             "404 must carry the session-not-found Problem Detail type",
         );
     }
@@ -1434,7 +1452,7 @@ fn malformed_create_body_returns_422() {
         .expect("send");
     assert_eq!(response.status(), 422);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(body["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// Missing required `message` field on POST /turn returns 422 with the `invalid-body`
@@ -1458,7 +1476,7 @@ fn malformed_turn_body_missing_message_returns_422() {
         .expect("send");
     assert_eq!(response.status(), 422);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(body["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// Two concurrent turns on two different sessions complete in roughly the same wall time
@@ -1636,7 +1654,7 @@ fn streaming_provider_failure_emits_turn_failed_event() {
         body,
     );
     assert!(
-        body.contains("https://agsh.dev/errors/provider"),
+        body.contains("https://meka.so/errors/provider"),
         "turn.failed payload must carry the provider error type; body was:\n{}",
         body,
     );
@@ -1650,7 +1668,7 @@ fn permission_allow_outcome_resumes_turn() {
         [
             { "kind": "tool_use_start", "id": "tu_1", "name": "write_file" },
             { "kind": "tool_use_end", "input": {
-                "path": std::env::temp_dir().join("agsh-permission-allow-test.txt").to_string_lossy(),
+                "path": std::env::temp_dir().join("meka-permission-allow-test.txt").to_string_lossy(),
                 "content": "hello"
             } },
             { "kind": "message_end", "stop_reason": "tool_use" }
@@ -1844,7 +1862,7 @@ fn unknown_request_id_returns_404_request_not_found() {
         .expect("send");
     assert_eq!(response.status(), 404);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/request-not-found");
+    assert_eq!(body["type"], "https://meka.so/errors/request-not-found");
 }
 
 /// A second concurrent POST with the same Idempotency-Key receives 409 idempotency-conflict
@@ -1901,7 +1919,7 @@ fn idempotency_key_in_flight_returns_409() {
         "concurrent same-keyed request must receive 409 idempotency-in-flight",
     );
     let body: serde_json::Value = second.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/idempotency");
+    assert_eq!(body["type"], "https://meka.so/errors/idempotency");
 
     // Let the first request finish — it commits the Pending entry into a Cached one.
     let first_response = first.join().expect("join");
@@ -1931,7 +1949,7 @@ fn turn_options_unknown_skill_returns_422() {
         .expect("send");
     assert_eq!(response.status(), 422);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(body["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// Unknown fields under `options` produce 422 invalid-body.
@@ -1957,7 +1975,7 @@ fn turn_options_unknown_field_returns_422() {
         .expect("send");
     assert_eq!(response.status(), 422);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(body["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// DELETE on a session with an active turn returns 409 turn-in-flight.
@@ -2010,7 +2028,7 @@ fn delete_while_turn_in_flight_returns_409() {
         "DELETE during in-flight turn must 409"
     );
     let body: serde_json::Value = delete.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/turn-in-flight");
+    assert_eq!(body["type"], "https://meka.so/errors/turn-in-flight");
 
     // Drain the in-flight turn so the harness Drop is clean.
     let _ = turn_handle.join().expect("join");
@@ -2037,7 +2055,7 @@ fn delete_without_write_scope_returns_403() {
         .expect("send");
     assert_eq!(response.status(), 403);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/auth-scope");
+    assert_eq!(body["type"], "https://meka.so/errors/auth-scope");
 }
 
 /// A GC-evicted session re-attached on a subsequent request must report its original
@@ -2129,7 +2147,7 @@ fn turn_request_unknown_top_level_field_returns_422() {
         .expect("send");
     assert_eq!(response.status(), 422);
     let body: serde_json::Value = response.json().expect("parse");
-    assert_eq!(body["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(body["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// A PATCH that mixes a valid field with an invalid one must reject the request
@@ -2160,7 +2178,7 @@ fn patch_session_atomic_rejects_when_cwd_is_invalid() {
         .expect("patch");
     assert_eq!(patch.status(), 422, "invalid cwd must reject the PATCH");
     let problem: serde_json::Value = patch.json().expect("problem");
-    assert_eq!(problem["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(problem["type"], "https://meka.so/errors/invalid-body");
 
     // GET the session and verify the permission change did NOT leak through.
     let get = harness
@@ -2252,7 +2270,7 @@ fn delete_on_idle_true_removes_db_row_on_eviction() {
         get.status(),
     );
     let body: serde_json::Value = get.json().expect("problem");
-    assert_eq!(body["type"], "https://agsh.dev/errors/session-not-found");
+    assert_eq!(body["type"], "https://meka.so/errors/session-not-found");
 }
 
 /// A pre-attempt `turn-in-flight` 409 from `run_blocking_turn`'s `try_lock` must NOT be
@@ -2316,7 +2334,7 @@ fn idempotency_cache_does_not_persist_turn_in_flight_409() {
         "concurrent turn must hit run_blocking_turn try_lock and 409 with turn-in-flight",
     );
     let problem: serde_json::Value = second.json().expect("parse");
-    assert_eq!(problem["type"], "https://agsh.dev/errors/turn-in-flight");
+    assert_eq!(problem["type"], "https://meka.so/errors/turn-in-flight");
 
     // Let turn A finish so the runtime lock is free.
     let first_response = first.join().expect("join");
@@ -2424,7 +2442,7 @@ fn write_only_token_cannot_read_sessions() {
         "sessions:w-only token must be rejected on GET /v1/sessions",
     );
     let problem: serde_json::Value = response.json().expect("parse");
-    assert_eq!(problem["type"], "https://agsh.dev/errors/auth-scope");
+    assert_eq!(problem["type"], "https://meka.so/errors/auth-scope");
 }
 
 /// `stop_reason = refusal` flows through the blocking response.  The mock provider emits
@@ -2539,7 +2557,7 @@ fn sticky_allow_always_short_circuits_second_tool_call() {
     // Two tool_use rounds of the same write-tier tool + a terminal text round. `write_file`
     // is gated by ask mode; `list_directory` would short-circuit as read-tier without
     // prompting and miss the point of the test.
-    let write_path = std::env::temp_dir().join("agsh-test-sticky.txt");
+    let write_path = std::env::temp_dir().join("meka-test-sticky.txt");
     let _ = std::fs::remove_file(&write_path);
     let script = serde_json::json!([
         [
@@ -2759,7 +2777,7 @@ fn cancel_during_blocking_turn_returns_409_turn_cancelled() {
         "blocking-mode cancel must surface as 409 turn-cancelled, not 500 internal",
     );
     let problem: serde_json::Value = response.json().expect("parse");
-    assert_eq!(problem["type"], "https://agsh.dev/errors/turn-cancelled");
+    assert_eq!(problem["type"], "https://meka.so/errors/turn-cancelled");
 }
 
 /// Ask mode + `stream: false` is a non-functional combination (every tool would auto-deny).
@@ -2843,7 +2861,7 @@ fn responses_body_unknown_field_returns_422() {
         [
             { "kind": "tool_use_start", "id": "tu_1", "name": "write_file" },
             { "kind": "tool_use_end", "input": {
-                "path": std::env::temp_dir().join("agsh-l10-test").to_string_lossy(),
+                "path": std::env::temp_dir().join("meka-l10-test").to_string_lossy(),
                 "content": "x"
             }},
             { "kind": "message_end", "stop_reason": "tool_use" }
@@ -2879,7 +2897,7 @@ fn responses_body_unknown_field_returns_422() {
         "ResponseBody must reject unknown top-level fields with 422",
     );
     let problem: serde_json::Value = response.json().expect("parse");
-    assert_eq!(problem["type"], "https://agsh.dev/errors/invalid-body");
+    assert_eq!(problem["type"], "https://meka.so/errors/invalid-body");
 }
 
 /// When a turn is cancelled mid-tool-execution, `ToolCallStarted` arrives without a matching
@@ -2892,7 +2910,7 @@ fn orphan_tool_call_marked_as_interrupted_in_blocking_response() {
         [
             { "kind": "tool_use_start", "id": "tu_1", "name": "write_file" },
             { "kind": "tool_use_end", "input": {
-                "path": std::env::temp_dir().join("agsh-l8.txt").to_string_lossy(),
+                "path": std::env::temp_dir().join("meka-l8.txt").to_string_lossy(),
                 "content": "x"
             }},
             { "kind": "sleep", "ms": 1500 },

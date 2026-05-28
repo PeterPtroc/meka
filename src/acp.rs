@@ -1,5 +1,5 @@
-//! `agsh acp` subcommand — speaks the Agent Client Protocol (ACP) on stdio so editor / web /
-//! messenger clients can drive an agsh turn end to end.
+//! `meka acp` subcommand — speaks the Agent Client Protocol (ACP) on stdio so editor / web /
+//! messenger clients can drive an meka turn end to end.
 //!
 //! # Capability surface
 //!
@@ -22,7 +22,7 @@
 //!   bypasses `execute_command` delegation so the local Landlock / bwrap / sandbox-exec /
 //!   Low-Integrity jail stays in place.
 //!
-//! Multi-session: any number of sessions can coexist in one `agsh acp` process. Each session has
+//! Multi-session: any number of sessions can coexist in one `meka acp` process. Each session has
 //! its own cwd, permission cell, conversation, cancellation token, and per-session `Agent` +
 //! `AcpFrontend`. Sessions share process-wide dependencies (provider, MCP manager, session DB,
 //! skill cache) via `Arc`. Two sessions can run `session/prompt` calls in parallel — there is no
@@ -59,14 +59,14 @@ use crate::{
     agent::{Agent, SharedCwd, resolve_against_cwd},
     config::ResolvedConfig,
     conversation::Conversation,
-    error::AgshError,
+    error::MekaError,
     frontend::{
         DelegatedExecOutput, DelegatedExecSpec, Frontend, FrontendError, FrontendEvent,
         PermissionOutcome, PermissionRequest, ToolOutputMetadata,
     },
     mcp,
     permission::{Permission, SharedPermission},
-    provider::{AuthCredential, ContentBlock as AgshContentBlock, Role, ToolResultContent},
+    provider::{AuthCredential, ContentBlock as MekaContentBlock, Role, ToolResultContent},
     session::SessionManager,
     skills::SkillCache,
 };
@@ -273,10 +273,10 @@ impl Frontend for AcpFrontend {
             }
             FrontendEvent::Notice(notice) => {
                 // No dedicated ACP primitive for advisories; surface inline as an assistant-message
-                // chunk with an `[agsh]` prefix so editor transcripts record the side-effect and
+                // chunk with an `[meka]` prefix so editor transcripts record the side-effect and
                 // clients can filter or style by that prefix. `notice.level` is unused on the wire
                 // today — when ACP grows a typed notice variant, branch on it here.
-                let text = format!("[agsh] {}", notice.text);
+                let text = format!("[meka] {}", notice.text);
                 SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
                     agent_client_protocol::schema::TextContent::new(text),
                 )))
@@ -498,7 +498,7 @@ enum StickyDecision {
     RejectAlways,
 }
 
-/// Map an ACP outcome to agsh's [`PermissionOutcome`] and fire `record_sticky` when the user picked
+/// Map an ACP outcome to meka's [`PermissionOutcome`] and fire `record_sticky` when the user picked
 /// one of the `*_always` options. Pure function so it's easy to unit-test.
 fn translate_permission_outcome<F>(
     outcome: RequestPermissionOutcome,
@@ -548,7 +548,7 @@ where
     }
 }
 
-/// Map agsh's tool name to ACP's [`ToolKind`] so clients can pick the right icon and grouping.
+/// Map meka's tool name to ACP's [`ToolKind`] so clients can pick the right icon and grouping.
 /// MCP-loaded tools (named `mcp__server__tool`) and anything unknown fall through to `Other`.
 fn tool_kind_for(name: &str) -> ToolKind {
     match name {
@@ -578,7 +578,7 @@ fn tool_locations(name: &str, input: &serde_json::Value, cwd: &SharedCwd) -> Vec
         .unwrap_or_default()
 }
 
-/// Build the `content` array of a `tool_call_update` from agsh's tool output. A populated `Diff`
+/// Build the `content` array of a `tool_call_update` from meka's tool output. A populated `Diff`
 /// metadata wins over the raw text content so clients (Zed) get the structured diff for apply-UI;
 /// if no metadata is set, text/image content blocks pass through.
 fn build_completion_content(
@@ -619,7 +619,7 @@ fn build_completion_content(
 /// original turn. Used by `session/load` so an editor that just reopened a session replays the full
 /// history into its UI.
 ///
-/// `<context>...</context>` preambles agsh prepends to each user message are stripped before emit
+/// `<context>...</context>` preambles meka prepends to each user message are stripped before emit
 /// so the client sees only what the user actually typed.
 ///
 /// Tool calls track open `tool_use_id`s; any tool that never received a matching `ToolResult` (e.g.
@@ -637,7 +637,7 @@ fn replay_session_updates(
             Role::User => {
                 for block in &message.content {
                     match block {
-                        AgshContentBlock::Text { text } => {
+                        MekaContentBlock::Text { text } => {
                             let stripped = crate::session::strip_context_tags(text);
                             if !stripped.is_empty() {
                                 send_session_update(
@@ -653,7 +653,7 @@ fn replay_session_updates(
                                 );
                             }
                         }
-                        AgshContentBlock::ToolResult {
+                        MekaContentBlock::ToolResult {
                             tool_use_id,
                             content,
                             is_error,
@@ -684,7 +684,7 @@ fn replay_session_updates(
             Role::Assistant => {
                 for block in &message.content {
                     match block {
-                        AgshContentBlock::Text { text } => {
+                        MekaContentBlock::Text { text } => {
                             send_session_update(
                                 connection,
                                 session_id,
@@ -697,7 +697,7 @@ fn replay_session_updates(
                                 )),
                             );
                         }
-                        AgshContentBlock::Thinking { thinking, .. } => {
+                        MekaContentBlock::Thinking { thinking, .. } => {
                             send_session_update(
                                 connection,
                                 session_id,
@@ -710,7 +710,7 @@ fn replay_session_updates(
                                 )),
                             );
                         }
-                        AgshContentBlock::ToolUse { id, name, input } => {
+                        MekaContentBlock::ToolUse { id, name, input } => {
                             let locations = tool_locations(name, input, cwd);
                             let call = ToolCall::new(id.clone(), name.clone())
                                 .kind(tool_kind_for(name))
@@ -872,7 +872,7 @@ async fn run_delegated_execute(
 
     let (exit_code, signal) = match output_response.exit_status {
         Some(status) => (
-            // ACP wire protocol uses u32 exit codes; agsh's `DelegatedExecOutput.exit_code` is
+            // ACP wire protocol uses u32 exit codes; meka's `DelegatedExecOutput.exit_code` is
             // i32. Real exit codes are 0-255, so `try_from` always succeeds; the
             // explicit fallback to -1 documents the choice instead of doing a lossy
             // `as`-cast.
@@ -893,7 +893,7 @@ async fn run_delegated_execute(
     })
 }
 
-/// Map an agsh [`Permission`] to its ACP [`SessionModeId`] string. The mapping is the lowercase
+/// Map an meka [`Permission`] to its ACP [`SessionModeId`] string. The mapping is the lowercase
 /// debug name (`none` / `read` / `ask` / `write`) — same string `Permission::Display` produces,
 /// kept as a dedicated function so the inverse parser ([`parse_mode_id`]) reads as the obvious
 /// complement.
@@ -1025,7 +1025,7 @@ fn split_acp_slash(prompt_text: &str) -> Option<(String, String)> {
 /// - Slash followed by a name that isn't a syntactically valid skill identifier (e.g. a pasted path
 ///   like `/etc/hosts` or a `//` comment): returned unchanged so the model can see it.
 /// - `/<skill-name>` matching an installed skill: returns `extra\n\n{body}` where `body` is
-///   [`crate::skills::load_skill_body`]'s output (with `${AGSH_SKILL_DIR}` / `${AGSH_SESSION_ID}`
+///   [`crate::skills::load_skill_body`]'s output (with `${MEKA_SKILL_DIR}` / `${MEKA_SESSION_ID}`
 ///   substituted). Empty `extra` collapses to just `body`. Same composition the REPL uses at
 ///   `main.rs:1004`.
 /// - `/<name>` with a syntactically valid skill name but no installed skill of that name: error.
@@ -1092,7 +1092,7 @@ struct SessionEntry {
     /// emit notifications without blocking on the runtime mutex.
     frontend: Arc<AcpFrontend>,
     /// Held purely for its `Drop` side-effect: dropping releases the OS file lock on the persisted
-    /// session row. Without this, a second `agsh` process could attach to the same id.
+    /// session row. Without this, a second `meka` process could attach to the same id.
     #[allow(dead_code)]
     session_lock: Arc<crate::session::SessionLock>,
 }
@@ -1116,7 +1116,7 @@ struct SessionRuntime {
     tool_registry: crate::tools::ToolRegistry,
 }
 
-/// Run agsh as an ACP agent over stdio. Returns when the client disconnects (stdin EOF).
+/// Run meka as an ACP agent over stdio. Returns when the client disconnects (stdin EOF).
 pub async fn run_acp(
     config: ResolvedConfig,
     session_manager: SessionManager,
@@ -1143,7 +1143,7 @@ pub async fn run_acp(
     // provider built above is dropped unused. Only compiled in debug builds. We rebuild SharedDeps
     // with the mock provider before installing it.
     #[cfg(debug_assertions)]
-    let shared = if std::env::var("AGSH_ACP_MOCK_PROVIDER").as_deref() == Ok("1") {
+    let shared = if std::env::var("MEKA_ACP_MOCK_PROVIDER").as_deref() == Ok("1") {
         let rounds = crate::provider::mock::load_script_from_env()?.unwrap_or_default();
         let mock = Arc::new(crate::provider::mock::MockProvider::from_rounds(rounds));
         // Replace just the provider field, inheriting the rest from the real SharedDeps.
@@ -1158,7 +1158,7 @@ pub async fn run_acp(
         new_inner
             .mcp_context
             .set_provider(Arc::clone(&new_inner.provider));
-        tracing::info!("AGSH_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
+        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
         Arc::new(new_inner)
     } else {
         shared
@@ -1175,7 +1175,7 @@ pub async fn run_acp(
 
     let acp_result = AcpAgentRole
         .builder()
-        .name("agsh")
+        .name("meka")
         .on_receive_request(
             {
                 let client_state = client_state.clone();
@@ -1198,7 +1198,7 @@ pub async fn run_acp(
                         .list(Some(SessionListCapabilities::new()))
                         .resume(Some(SessionResumeCapabilities::new()))
                         .close(Some(SessionCloseCapabilities::new()));
-                    // agsh accepts only `ContentBlock::Text` in
+                    // meka accepts only `ContentBlock::Text` in
                     // `session/prompt` today. Default
                     // `PromptCapabilities` is `{image: false, audio:
                     // false, embedded_context: false}` — declared
@@ -1207,7 +1207,7 @@ pub async fn run_acp(
                     // change can't quietly flip it.
                     //
                     // `mcp_capabilities` is intentionally omitted:
-                    // agsh sources MCP servers from its own config
+                    // meka sources MCP servers from its own config
                     // file and does not yet connect to servers passed
                     // through `session/new`'s `mcpServers` array.
                     // Advertising `{ http: true, sse: true }` while
@@ -1239,7 +1239,7 @@ pub async fn run_acp(
                     );
                     let response = InitializeResponse::new(negotiated)
                         .agent_capabilities(capabilities)
-                        .agent_info(Implementation::new("agsh", env!("CARGO_PKG_VERSION")));
+                        .agent_info(Implementation::new("meka", env!("CARGO_PKG_VERSION")));
                     responder.respond(response)
                 }
             },
@@ -1265,14 +1265,14 @@ pub async fn run_acp(
                         Err(error) => {
                             return responder.respond_with_error(
                                 agent_client_protocol::util::internal_error(format!(
-                                    "failed to create agsh session: {}",
+                                    "failed to create meka session: {}",
                                     error
                                 )),
                             );
                         }
                     };
-                    // Take the OS file lock on the newly created session row so a second `agsh acp`
-                    // process (or an `agsh repl`) can't open the same id and interleave events.
+                    // Take the OS file lock on the newly created session row so a second `meka acp`
+                    // process (or an `meka repl`) can't open the same id and interleave events.
                     let session_lock = match state.shared.session_manager.lock_session(session_uuid)
                     {
                         Ok(lock) => Arc::new(lock),
@@ -1463,7 +1463,7 @@ async fn run_prompt_turn(
                 prompt_text.push_str(&text.text);
             }
             // `ResourceLink` is part of the ACP baseline that every agent MUST support (alongside
-            // `Text`). agsh doesn't fetch the resource server-side; the model sees the reference as
+            // `Text`). meka doesn't fetch the resource server-side; the model sees the reference as
             // a structured tag carrying the link's name, uri, and (optional) description so it can
             // decide what to do with it.
             ContentBlock::ResourceLink(link) => {
@@ -1484,7 +1484,7 @@ async fn run_prompt_turn(
             }
             _ => {
                 return responder.respond_with_error(invalid_params_error(
-                    "agsh acp accepts only `text` and `resource_link` content blocks in \
+                    "meka acp accepts only `text` and `resource_link` content blocks in \
                      `prompt`; `image`, `audio`, and `resource` are not yet supported",
                 ));
             }
@@ -1603,7 +1603,7 @@ async fn run_prompt_turn(
     // Clone the cancellation token so we can probe `is_cancelled()` after the call returns — the
     // spec mandates that any cancel arriving during a turn must surface as `StopReason::Cancelled`,
     // even when the cancellation manifests as a provider / tool error rather than the clean
-    // `AgshError::Interrupted` path.
+    // `MekaError::Interrupted` path.
     let cancel_probe = cancellation.clone();
     let result = agent
         .run_turn(&mut session_uuid_opt, messages, prompt_text, cancellation)
@@ -1613,13 +1613,13 @@ async fn run_prompt_turn(
         Ok(crate::agent::TurnOutcome::EndTurn) => StopReason::EndTurn,
         Ok(crate::agent::TurnOutcome::MaxTokens) => StopReason::MaxTokens,
         Ok(crate::agent::TurnOutcome::Refusal(_)) => StopReason::Refusal,
-        Err(AgshError::Interrupted) => StopReason::Cancelled,
+        Err(MekaError::Interrupted) => StopReason::Cancelled,
         Err(error) => {
             if cancel_probe.is_cancelled() {
                 StopReason::Cancelled
             } else {
                 return responder.respond_with_error(agent_client_protocol::util::internal_error(
-                    format!("agsh turn failed: {}", error),
+                    format!("meka turn failed: {}", error),
                 ));
             }
         }
@@ -2075,7 +2075,7 @@ fn resolve_credential_for_acp(config: &ResolvedConfig) -> anyhow::Result<AuthCre
     config
         .auth_credential
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("agsh acp requires a configured provider credential"))
+        .ok_or_else(|| anyhow::anyhow!("meka acp requires a configured provider credential"))
 }
 
 #[cfg(test)]
@@ -2371,7 +2371,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).expect("mkdir skill");
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\ndescription: demo skill\n---\nrun ls in ${AGSH_SKILL_DIR}\n",
+            "---\ndescription: demo skill\n---\nrun ls in ${MEKA_SKILL_DIR}\n",
         )
         .expect("write SKILL.md");
 

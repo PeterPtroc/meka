@@ -1,6 +1,6 @@
 # Permissions
 
-agsh uses a four-level permission system to control what tools the agent can use. This gives you control over the agent's capabilities and prevents accidental modifications.
+meka uses a four-level permission system to control what tools the agent can use. This gives you control over the agent's capabilities and prevents accidental modifications.
 
 ## Permission Levels
 
@@ -19,11 +19,11 @@ The default permission is **read**. The default *enabled* set is `none / read / 
 
 You can change the start mode with:
 
-- CLI flag: `agsh --permission write`
-- Environment variable: `export AGSH_PERMISSION=write`
+- CLI flag: `meka --permission write`
+- Environment variable: `export MEKA_PERMISSION=write`
 - Config file: `[permissions] default = "write"` — see [Config File](../configuration/config-file.md#permissions)
 
-If `--permission` or `AGSH_PERMISSION` selects a mode that isn't in `[permissions].enabled`, agsh logs a warning and starts in the configured default instead of refusing to launch.
+If `--permission` or `MEKA_PERMISSION` selects a mode that isn't in `[permissions].enabled`, meka logs a warning and starts in the configured default instead of refusing to launch.
 
 ## Changing Permissions at Runtime
 
@@ -60,15 +60,15 @@ This mode is useful when you want the agent to have full capabilities but want t
 
 ## How Permissions Work
 
-When the agent attempts to use a tool, agsh checks whether the current permission level allows it:
+When the agent attempts to use a tool, meka checks whether the current permission level allows it:
 
 - If allowed, the tool executes normally.
 - In ask mode, you are prompted to approve or deny.
-- If denied, agsh returns an error message to the agent explaining which level is required and suggests running `/permission <level>`.
+- If denied, meka returns an error message to the agent explaining which level is required and suggests running `/permission <level>`.
 
 ### Telling the agent the current level
 
-agsh lists **every registered tool** in the system prompt with its required permission level inline — nothing is filtered out — and each user message carries a compact `[Permission context]` block:
+meka lists **every registered tool** in the system prompt with its required permission level inline — nothing is filtered out — and each user message carries a compact `[Permission context]` block:
 
 ```text
 <context>
@@ -98,14 +98,14 @@ Sub-agents spawned via `spawn_agent` inherit the parent's permission level. In w
 ### Read Mode (Default)
 
 ```text
-agsh [r] > read the contents of main.rs
+meka [r] > read the contents of main.rs
 ```
 
 The agent uses `read_file` and shows the contents. Shell commands also work in read mode, but run in a **read-only sandbox** -- the filesystem is physically write-protected for the child process:
 
 ```text
-agsh [r] > list the files in this directory
-agsh [r] > show me the git log
+meka [r] > list the files in this directory
+meka [r] > show me the git log
 ```
 
 Commands like `ls`, `cat`, `git log`, `df`, `ps`, and `uname` work normally. Commands that attempt to write to the filesystem (e.g., `touch`, `rm`, `mkdir`) will fail with a permission error.
@@ -113,7 +113,7 @@ Commands like `ls`, `cat`, `git log`, `df`, `ps`, and `uname` work normally. Com
 If you ask the agent to modify a file:
 
 ```text
-agsh [r] > add a comment to the top of main.rs
+meka [r] > add a comment to the top of main.rs
 ```
 
 The agent will explain that it cannot write files in read mode and suggest switching to write mode.
@@ -123,7 +123,7 @@ The agent will explain that it cannot write files in read mode and suggest switc
 ### Write Mode
 
 ```text
-agsh [w] > run cargo test and show me the output
+meka [w] > run cargo test and show me the output
 ```
 
 The agent uses `execute_command` to run the tests and shows the results.

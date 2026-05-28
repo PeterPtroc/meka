@@ -3,8 +3,8 @@
 // for clear panic-on-failure semantics, and asserting against panics is the standard idiom.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! End-to-end ACP integration tests. Spawn the real `agsh acp` binary with
-//! `AGSH_ACP_MOCK_PROVIDER=1` so a scripted [`crate::provider::mock::MockProvider`] drives
+//! End-to-end ACP integration tests. Spawn the real `meka acp` binary with
+//! `MEKA_ACP_MOCK_PROVIDER=1` so a scripted [`crate::provider::mock::MockProvider`] drives
 //! deterministic `session/prompt` round-trips. Tests verify the tool-call lifecycle, permission
 //! round-trip, session lifecycle (load / resume / list / close), slash-skill invocation, set_mode
 //! flow, and the `fs/*` + `terminal/*` delegation paths.
@@ -41,8 +41,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn agsh_acp() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_agsh"))
+fn meka_acp() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_meka"))
 }
 
 /// Test harness that owns the child process, stdio pipes, and a running deadline. Wraps the spawn /
@@ -120,8 +120,8 @@ impl AcpTestHarnessBuilder {
 
     fn build(self) -> AcpTestHarness {
         let temp = tempfile::tempdir().expect("tempdir");
-        let config_dir = temp.path().join("agsh");
-        let data_dir = temp.path().join("data").join("agsh");
+        let config_dir = temp.path().join("meka");
+        let data_dir = temp.path().join("data").join("meka");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(config_dir.join("config.toml"), &self.config).expect("write config.toml");
 
@@ -134,18 +134,18 @@ impl AcpTestHarnessBuilder {
         let script_path = temp.path().join("script.json");
         std::fs::write(&script_path, script.to_string()).expect("write script");
 
-        let mut child = agsh_acp()
+        let mut child = meka_acp()
             .arg("acp")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
+            .env("MEKA_CONFIG_DIR", &config_dir)
+            .env("MEKA_DATA_DIR", &data_dir)
             .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+            .env("MEKA_ACP_MOCK_PROVIDER", "1")
+            .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn agsh acp");
+            .expect("spawn meka acp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let stderr_pipe = child.stderr.take().expect("stderr");
@@ -182,8 +182,8 @@ impl AcpTestHarnessBuilder {
 // `dead_code` is silenced wholesale for the test-only utility surface.
 #[allow(dead_code)]
 impl AcpTestHarness {
-    /// Spin up `agsh acp` against a fresh tempdir with `config_toml` pre-written and
-    /// `AGSH_ACP_MOCK_PROVIDER` enabled (with an empty script unless `script` is supplied).
+    /// Spin up `meka acp` against a fresh tempdir with `config_toml` pre-written and
+    /// `MEKA_ACP_MOCK_PROVIDER` enabled (with an empty script unless `script` is supplied).
     /// Initialise the connection but don't create a session yet.
     fn spawn(config_toml: &str, script: Option<serde_json::Value>) -> Self {
         Self::spawn_with_capabilities(config_toml, script, serde_json::json!({}))
@@ -246,14 +246,14 @@ impl AcpTestHarness {
         writeln!(self.stdin, "{}", notification).expect("write notification");
     }
 
-    /// Block until the response for `id` arrives. Side-channel notifications + agsh-issued requests
+    /// Block until the response for `id` arrives. Side-channel notifications + meka-issued requests
     /// on the same connection are silently dropped (the latter is the right call only when the test
     /// isn't expected to provoke any).
     fn await_response(&mut self, id: u64) -> serde_json::Value {
         self.await_response_with_dispatch(id, |_| None)
     }
 
-    /// Block until the response for `id` arrives, dispatching any agsh-issued requests through
+    /// Block until the response for `id` arrives, dispatching any meka-issued requests through
     /// `handler`. The handler returns `Some(response)` to answer, or `None` to ignore.
     fn await_response_with_dispatch<F>(&mut self, id: u64, mut handler: F) -> serde_json::Value
     where
@@ -281,7 +281,7 @@ impl AcpTestHarness {
 
     /// Collect every `session/update` notification for `sid` plus the eventual response for `id`.
     /// Captures everything the agent emits during a prompt turn, which is the single most reused
-    /// pattern in the existing test file. Side-channel agsh-issued requests are silently ignored —
+    /// pattern in the existing test file. Side-channel meka-issued requests are silently ignored —
     /// if a test expects them, use [`Self::collect_updates_with_dispatch`] instead.
     fn collect_updates(
         &mut self,
@@ -291,7 +291,7 @@ impl AcpTestHarness {
         self.collect_updates_with_dispatch(sid, id, |_| None)
     }
 
-    /// As [`Self::collect_updates`], but dispatch agsh-issued requests via `handler`. Used by tests
+    /// As [`Self::collect_updates`], but dispatch meka-issued requests via `handler`. Used by tests
     /// that watch the session/update stream *and* answer fs / terminal delegation.
     ///
     /// The free [`read_until_with_dispatch`] only invokes its dispatch closure on JSON-RPC
@@ -395,7 +395,7 @@ impl AcpTestHarness {
 
 /// Returns `true` when `line` is the response (or error) message for the given `id` needle. Used by
 /// [`AcpTestHarness`] helpers that stop reading once the awaited response arrives. The secondary
-/// check on `result` / `error` filters out incoming agsh-issued *requests* that happen to share an
+/// check on `result` / `error` filters out incoming meka-issued *requests* that happen to share an
 /// id with our response we're awaiting (the dispatch loop renumbers those, but
 /// belt-and-suspenders).
 fn response_matches(line: &str, needle: &str) -> bool {
@@ -442,10 +442,10 @@ where
     lines
 }
 
-/// Variant of [`read_until`] that also answers incoming JSON-RPC *requests* from agsh. Any line
-/// that parses to a JSON object with both a `method` and an `id` field is treated as an agsh-issued
+/// Variant of [`read_until`] that also answers incoming JSON-RPC *requests* from meka. Any line
+/// that parses to a JSON object with both a `method` and an `id` field is treated as an meka-issued
 /// request; `dispatch` is invoked with the parsed value and its `Some(response)` return value is
-/// written back to agsh's stdin. Tests use this to play the client side of the `fs/*` and
+/// written back to meka's stdin. Tests use this to play the client side of the `fs/*` and
 /// `terminal/*` round-trips.
 fn read_until_with_dispatch<R, W, D, F>(
     reader: &mut R,
@@ -567,7 +567,7 @@ enum PermissionAnswer {
     RejectOnce,
 }
 
-/// Drive a full `agsh acp` permission round-trip with the mock provider. The scripted turn calls
+/// Drive a full `meka acp` permission round-trip with the mock provider. The scripted turn calls
 /// `write_file` (requires `write` permission, which under `ask` mode triggers a
 /// `session/request_permission`); the test auto-responds with the configured outcome and asserts
 /// the resulting tool-call status.
@@ -686,8 +686,8 @@ fn acp_permission_reject_once_fails_tool_but_completes_turn() {
 #[test]
 fn acp_session_load_replays_persisted_turn() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -718,18 +718,18 @@ api_key = "fake-for-mock-only"
 
     // First run: drive one prompt to populate the session, capture sessionId, then exit cleanly.
     let session_id = {
-        let mut child = agsh_acp()
+        let mut child = meka_acp()
             .arg("acp")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
+            .env("MEKA_CONFIG_DIR", &config_dir)
+            .env("MEKA_DATA_DIR", &data_dir)
             .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+            .env("MEKA_ACP_MOCK_PROVIDER", "1")
+            .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn agsh acp");
+            .expect("spawn meka acp");
         let mut stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let stderr_pipe = child.stderr.take().expect("stderr");
@@ -788,18 +788,18 @@ api_key = "fake-for-mock-only"
     };
 
     // Second run: load the persisted session and assert the replay stream.
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn agsh acp #2");
+        .expect("spawn meka acp #2");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -922,8 +922,8 @@ api_key = "fake-for-mock-only"
 #[test]
 fn acp_session_list_filters_by_cwd() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -950,16 +950,16 @@ api_key = "fake-for-mock-only"
     let script_path = temp.path().join("script.json");
     std::fs::write(&script_path, script.to_string()).expect("write script.json");
 
-    // Helper: launch one `agsh acp`, send initialize + session/new (with the given cwd) +
+    // Helper: launch one `meka acp`, send initialize + session/new (with the given cwd) +
     // session/prompt, return the sessionId.
     let create_one = |session_cwd: &std::path::Path| -> String {
-        let mut child = agsh_acp()
+        let mut child = meka_acp()
             .arg("acp")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
+            .env("MEKA_CONFIG_DIR", &config_dir)
+            .env("MEKA_DATA_DIR", &data_dir)
             .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+            .env("MEKA_ACP_MOCK_PROVIDER", "1")
+            .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1026,13 +1026,13 @@ api_key = "fake-for-mock-only"
     let _id_b = create_one(&cwd_b);
 
     // Second invocation issues session/list filtered to cwd_a.
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1094,8 +1094,8 @@ api_key = "fake-for-mock-only"
 #[test]
 fn acp_session_resume_adopts_without_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -1122,13 +1122,13 @@ api_key = "fake-for-mock-only"
 
     // First run: create a session, run one prompt, capture the id.
     let session_id = {
-        let mut child = agsh_acp()
+        let mut child = meka_acp()
             .arg("acp")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
+            .env("MEKA_CONFIG_DIR", &config_dir)
+            .env("MEKA_DATA_DIR", &data_dir)
             .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+            .env("MEKA_ACP_MOCK_PROVIDER", "1")
+            .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1190,13 +1190,13 @@ api_key = "fake-for-mock-only"
     };
 
     // Second run: resume + a follow-up prompt.
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1344,7 +1344,7 @@ fn acp_session_close_clears_slot_for_subsequent_new() {
     );
 }
 
-/// a skill installed under `$AGSH_CONFIG_DIR/skills/` shows up in the `available_commands_update`
+/// a skill installed under `$MEKA_CONFIG_DIR/skills/` shows up in the `available_commands_update`
 /// push that follows `session/new`, AND the `NewSessionResponse` carries the configured mode
 /// picker.
 #[test]
@@ -1683,7 +1683,7 @@ api_key = "fake-for-mock-only"
 
     assert!(
         saw_fs_read_request,
-        "expected a fs/read_text_file request from agsh",
+        "expected a fs/read_text_file request from meka",
     );
 
     // The on-disk file is untouched (we only wrote `ON DISK` once before the test). The delegate
@@ -1783,7 +1783,7 @@ enabled = ["read", "write"]
     // No local file on disk — the delegate handled the write.
     assert!(
         !target.exists(),
-        "agsh wrote a local file despite delegating: {}",
+        "meka wrote a local file despite delegating: {}",
         target.display(),
     );
 }
@@ -1990,8 +1990,8 @@ enabled = ["read", "write"]
 #[test]
 fn acp_session_cancel_interrupts_running_prompt() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -2018,13 +2018,13 @@ api_key = "fake-for-mock-only"
     let script_path = temp.path().join("script.json");
     std::fs::write(&script_path, script.to_string()).expect("write script");
 
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2312,8 +2312,8 @@ enabled = ["read", "ask", "write"]
 #[test]
 fn acp_session_list_paginates_across_cursor_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -2342,13 +2342,13 @@ api_key = "fake-for-mock-only"
     const TOTAL: usize = PAGE_SIZE + 3;
 
     let create_one = || -> String {
-        let mut child = agsh_acp()
+        let mut child = meka_acp()
             .arg("acp")
-            .env("AGSH_CONFIG_DIR", &config_dir)
-            .env("AGSH_DATA_DIR", &data_dir)
+            .env("MEKA_CONFIG_DIR", &config_dir)
+            .env("MEKA_DATA_DIR", &data_dir)
             .env("HOME", temp.path())
-            .env("AGSH_ACP_MOCK_PROVIDER", "1")
-            .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+            .env("MEKA_ACP_MOCK_PROVIDER", "1")
+            .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2419,13 +2419,13 @@ api_key = "fake-for-mock-only"
 
     // Now drive two session/list calls. The first returns the first page + a cursor; the second
     // uses the cursor to fetch the remainder.
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2670,8 +2670,8 @@ fn acp_multi_session_create_and_isolate_messages() {
 #[test]
 fn acp_multi_session_parallel_prompts_dont_serialize() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     let config_toml = r#"
@@ -2708,13 +2708,13 @@ api_key = "fake-for-mock-only"
     let script_path = temp.path().join("script.json");
     std::fs::write(&script_path, script.to_string()).expect("write script");
 
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
-        .env("AGSH_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER_SCRIPT", &script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3097,7 +3097,7 @@ api_key = "fake-for-mock-only"
 "#;
 
 /// `session/prompt` against an unknown `sessionId` must error with `InvalidParams`. Non-text
-/// content blocks (image / audio / resource) likewise — agsh advertises text-only
+/// content blocks (image / audio / resource) likewise — meka advertises text-only
 /// `PromptCapabilities`, so any other block type is a client contract violation.
 #[test]
 fn acp_session_prompt_rejects_unknown_session_and_non_text_blocks() {
@@ -3239,24 +3239,24 @@ enabled = ["read"]
     assert_invalid_params(&disabled, "set_mode with disabled mode");
 }
 
-/// Tightens the existing protocol-version test: agsh must clamp far-future versions to
+/// Tightens the existing protocol-version test: meka must clamp far-future versions to
 /// `ProtocolVersion::LATEST` (currently V1), not echo the requested value verbatim. A naive echo
 /// would let a future client think we support a version we haven't shipped.
 #[test]
 fn acp_initialize_clamps_far_future_version_to_latest() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
     std::fs::write(config_dir.join("config.toml"), ACP_INVALID_PARAMS_CONFIG)
         .expect("write config.toml");
 
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3422,7 +3422,7 @@ fn acp_session_prompt_thought_chunk_routes_per_session() {
 /// Non-Interrupted `Agent::run_turn` errors must surface as a JSON-RPC `error` on the
 /// `session/prompt` response (the `Err(error)` arm at `src/acp.rs:1514`). Scripted via the `Fail`
 /// mock event so no real provider call is made; the agent loop's stream handler turns the provider
-/// error into `AgshError::Provider`, `run_turn` propagates it, and the ACP handler maps it to
+/// error into `MekaError::Provider`, `run_turn` propagates it, and the ACP handler maps it to
 /// `internal_error`.
 #[test]
 fn acp_session_prompt_surfaces_provider_error_as_jsonrpc_error() {
@@ -3457,7 +3457,7 @@ fn acp_session_prompt_surfaces_provider_error_as_jsonrpc_error() {
         .as_str()
         .unwrap_or_else(|| panic!("error.data must carry the detail string: {}", response));
     assert!(
-        data.contains("agsh turn failed"),
+        data.contains("meka turn failed"),
         "error.data should be the internal_error prefix; got: {}",
         data,
     );
@@ -3676,7 +3676,7 @@ fn acp_terminal_output_failure_still_releases() {
     assert_eq!(response["result"]["stopReason"], "end_turn");
     assert!(
         saw_release,
-        "agsh must release the terminal even when output fails; updates: {:?}",
+        "meka must release the terminal even when output fails; updates: {:?}",
         updates,
     );
     assert!(
@@ -4009,7 +4009,7 @@ fn acp_fs_read_text_file_passes_line_and_limit_when_delegated() {
 
 // === V2 audit follow-ups ============================================
 
-/// C5 — `ContentBlock::ResourceLink` is part of the ACP MUST baseline; agsh used to reject it with
+/// C5 — `ContentBlock::ResourceLink` is part of the ACP MUST baseline; meka used to reject it with
 /// `InvalidParams`. The new behavior flattens the link into a tag the model can see.
 #[test]
 fn acp_session_prompt_accepts_resource_link_baseline() {
@@ -4241,18 +4241,18 @@ enabled = ["read", "ask", "write"]
 #[test]
 fn acp_initialize_rejects_protocol_version_zero() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_dir = temp.path().join("agsh");
-    let data_dir = temp.path().join("data").join("agsh");
+    let config_dir = temp.path().join("meka");
+    let data_dir = temp.path().join("data").join("meka");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
     std::fs::write(config_dir.join("config.toml"), ACP_INVALID_PARAMS_CONFIG)
         .expect("write config.toml");
 
-    let mut child = agsh_acp()
+    let mut child = meka_acp()
         .arg("acp")
-        .env("AGSH_CONFIG_DIR", &config_dir)
-        .env("AGSH_DATA_DIR", &data_dir)
+        .env("MEKA_CONFIG_DIR", &config_dir)
+        .env("MEKA_DATA_DIR", &data_dir)
         .env("HOME", temp.path())
-        .env("AGSH_ACP_MOCK_PROVIDER", "1")
+        .env("MEKA_ACP_MOCK_PROVIDER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

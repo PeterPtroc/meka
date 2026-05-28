@@ -66,7 +66,7 @@ pub fn register(
     tool_use_id: Option<String>,
     frontend: Option<Arc<dyn Frontend>>,
 ) -> (ProgressToken, ProgressGuard) {
-    let token_str = format!("agsh-{}", uuid::Uuid::new_v4());
+    let token_str = format!("meka-{}", uuid::Uuid::new_v4());
     let token = ProgressToken(NumberOrString::String(token_str.clone().into()));
     registry()
         .entries
@@ -98,10 +98,10 @@ impl Drop for ProgressGuard {
     }
 }
 
-/// Called from `AgshClientHandler::on_progress` (the `ClientHandler` trait impl in
+/// Called from `MekaClientHandler::on_progress` (the `ClientHandler` trait impl in
 /// `src/mcp/handler.rs`). Looks up the registered context by token, forwards the update to the
 /// per-session frontend, and emits an `info!` log line for the off-frontend audience (e.g. a tail
-/// on the agsh stderr).
+/// on the meka stderr).
 pub async fn dispatch(params: ProgressNotificationParam) {
     let key = match &params.progress_token.0 {
         NumberOrString::String(s) => s.to_string(),

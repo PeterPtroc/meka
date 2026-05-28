@@ -16,7 +16,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
-use crate::error::{AgshError, Result};
+use crate::error::{MekaError, Result};
 
 /// Pull `chatgpt_account_id` out of an OpenAI id_token JWT. Returns `None` when the claim is absent
 /// (e.g. for a free-tier account with no workspace) — the caller decides whether absence is fatal.
@@ -60,17 +60,17 @@ fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> Result<T> {
             payload
         }
         _ => {
-            return Err(AgshError::Provider(
+            return Err(MekaError::Provider(
                 "id_token is not a well-formed JWT".to_string(),
             ));
         }
     };
 
     let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|error| {
-        AgshError::Provider(format!("id_token base64 decode failed: {}", error))
+        MekaError::Provider(format!("id_token base64 decode failed: {}", error))
     })?;
     serde_json::from_slice(&bytes)
-        .map_err(|error| AgshError::Provider(format!("id_token JSON decode failed: {}", error)))
+        .map_err(|error| MekaError::Provider(format!("id_token JSON decode failed: {}", error)))
 }
 
 #[cfg(test)]
@@ -122,19 +122,19 @@ mod tests {
     #[test]
     fn test_extract_account_id_malformed_jwt_two_parts() {
         let result = extract_account_id("only.two");
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 
     #[test]
     fn test_extract_account_id_malformed_jwt_empty_parts() {
         let result = extract_account_id("..");
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 
     #[test]
     fn test_extract_account_id_invalid_base64() {
         let result = extract_account_id("aaa.!!!.bbb");
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         let signature = URL_SAFE_NO_PAD.encode(b"sig");
         let jwt = format!("{}.{}.{}", header, payload, signature);
         let result = extract_account_id(&jwt);
-        assert!(matches!(result, Err(AgshError::Provider(_))));
+        assert!(matches!(result, Err(MekaError::Provider(_))));
     }
 
     #[test]

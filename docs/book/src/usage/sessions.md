@@ -4,9 +4,9 @@ Sessions persist your conversation so you can resume later. Each session is iden
 
 ## How Sessions Work
 
-- A session is **not** created when agsh starts. It is created lazily when you send the first message.
+- A session is **not** created when meka starts. It is created lazily when you send the first message.
 - When a session is created, its UUID is printed to stderr.
-- When you exit agsh (Ctrl+D), the session UUID is printed again so you can note it for later.
+- When you exit meka (Ctrl+D), the session UUID is printed again so you can note it for later.
 - Sessions include the full conversation: your inputs, the agent's responses, and tool call results.
 
 ## Resuming a Session
@@ -14,7 +14,7 @@ Sessions persist your conversation so you can resume later. Each session is iden
 ### Continue Last Session
 
 ```bash
-agsh -c
+meka -c
 ```
 
 This resumes the most recently updated session.
@@ -22,28 +22,28 @@ This resumes the most recently updated session.
 ### By UUID
 
 ```bash
-agsh -c 550e8400-e29b-41d4-a716-446655440000
+meka -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 The agent loads the previous conversation and continues from where you left off.
 
 ### By UUID Prefix
 
-If the value isn't a valid UUID, agsh treats it as a leading prefix and looks up sessions whose ID starts with it. This avoids having to copy the entire UUID:
+If the value isn't a valid UUID, meka treats it as a leading prefix and looks up sessions whose ID starts with it. This avoids having to copy the entire UUID:
 
 ```bash
-agsh -c 550e            # works if exactly one session starts with `550e`
-agsh -c 5               # likely ambiguous; agsh lists matching IDs and exits
+meka -c 550e            # works if exactly one session starts with `550e`
+meka -c 5               # likely ambiguous; meka lists matching IDs and exits
 ```
 
-When a prefix matches multiple sessions, agsh prints the matching IDs (most-recent first) so you can disambiguate. Type a few more characters until the prefix is unique.
+When a prefix matches multiple sessions, meka prints the matching IDs (most-recent first) so you can disambiguate. Type a few more characters until the prefix is unique.
 
 ## Session Locking
 
-Only one agsh instance can be attached to a session at a time. This prevents race conditions from concurrent writes.
+Only one meka instance can be attached to a session at a time. This prevents race conditions from concurrent writes.
 
-- If you try to resume a session that is locked by a running agsh process, you will get an error.
-- If the locking process has exited (crashed or was killed), agsh detects this and allows you to take over the lock.
+- If you try to resume a session that is locked by a running meka process, you will get an error.
+- If the locking process has exited (crashed or was killed), meka detects this and allows you to take over the lock.
 
 ## Storage Location
 
@@ -51,9 +51,9 @@ Sessions are stored in a SQLite database at a platform-specific location:
 
 | Platform | Path |
 |----------|------|
-| Linux | `~/.local/share/agsh/sessions.db` (`$XDG_DATA_HOME/agsh/sessions.db`) |
-| macOS | `~/Library/Application Support/agsh/sessions.db` |
-| Windows | `%APPDATA%\agsh\sessions.db` |
+| Linux | `~/.local/share/meka/sessions.db` (`$XDG_DATA_HOME/meka/sessions.db`) |
+| macOS | `~/Library/Application Support/meka/sessions.db` |
+| Windows | `%APPDATA%\meka\sessions.db` |
 
 ## Database Schema
 
@@ -92,7 +92,7 @@ Scratchpad entries are scoped to a session. Two sessions can have entries with t
 
 ## History Retention
 
-agsh automatically manages session storage on startup with sensible defaults:
+meka automatically manages session storage on startup with sensible defaults:
 
 - **`retention_days`** (default: `90`) -- deletes sessions whose `updated_at` is older than this many days.
 - **`max_storage_bytes`** (default: `52428800` / 50 MB) -- when total message content exceeds this limit, the oldest sessions are deleted until the total is under the limit.
@@ -128,7 +128,7 @@ Internally, compaction does not delete pre-compaction rows from the database. It
 
 ### Auto-Compact
 
-When `auto_compact` is enabled (default: `true`), agsh automatically compacts the conversation when the input token count exceeds 80% of the context window. This runs between turns, not during tool loops.
+When `auto_compact` is enabled (default: `true`), meka automatically compacts the conversation when the input token count exceeds 80% of the context window. This runs between turns, not during tool loops.
 
 ```toml
 [session]
@@ -141,7 +141,7 @@ context_window = 200000  # optional override
 To see past sessions:
 
 ```bash
-agsh list
+meka list
 ```
 
 This shows a table with each session's ID, last update time, and a preview of the first message:
@@ -155,7 +155,7 @@ a1b2c3d4-e5f6-7890-abcd-ef1234567890  2026-03-13 09:30:00  Fix the login page CS
 By default the 20 most recent sessions are shown. Use `-n` to change:
 
 ```bash
-agsh list -n 50
+meka list -n 50
 ```
 
 ## Exporting a Session
@@ -163,7 +163,7 @@ agsh list -n 50
 You can export any session as a Markdown file:
 
 ```bash
-agsh export 550e8400-e29b-41d4-a716-446655440000
+meka export 550e8400-e29b-41d4-a716-446655440000
 ```
 
 This writes `session-550e8400-e29b-41d4-a716-446655440000.md` in the current directory with the full conversation. User and assistant messages are rendered as Markdown sections, while tool calls and results are wrapped in collapsible `<details>` blocks.
@@ -171,13 +171,13 @@ This writes `session-550e8400-e29b-41d4-a716-446655440000.md` in the current dir
 To write to a specific file:
 
 ```bash
-agsh export 550e8400-e29b-41d4-a716-446655440000 -o conversation.md
+meka export 550e8400-e29b-41d4-a716-446655440000 -o conversation.md
 ```
 
 To print to stdout (for piping):
 
 ```bash
-agsh export 550e8400-e29b-41d4-a716-446655440000 -o -
+meka export 550e8400-e29b-41d4-a716-446655440000 -o -
 ```
 
 ## Deleting Sessions
@@ -185,19 +185,19 @@ agsh export 550e8400-e29b-41d4-a716-446655440000 -o -
 Delete specific sessions by UUID:
 
 ```bash
-agsh delete 550e8400-e29b-41d4-a716-446655440000
+meka delete 550e8400-e29b-41d4-a716-446655440000
 ```
 
 Delete multiple sessions at once:
 
 ```bash
-agsh delete 550e8400-e29b-41d4-a716-446655440000 a1b2c3d4-e5f6-7890-abcd-ef1234567890
+meka delete 550e8400-e29b-41d4-a716-446655440000 a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
 Delete all sessions:
 
 ```bash
-agsh delete --all
+meka delete --all
 ```
 
 ## Managing Sessions via SQLite
@@ -205,6 +205,6 @@ agsh delete --all
 You can also manage sessions directly through the SQLite database. For example, to list all sessions:
 
 ```bash
-sqlite3 ~/.local/share/agsh/sessions.db \
+sqlite3 ~/.local/share/meka/sessions.db \
   "SELECT id, created_at, updated_at FROM sessions ORDER BY updated_at DESC;"
 ```

@@ -3,7 +3,7 @@
 
 mod claude;
 /// Scripted provider used by the ACP integration test. Available in debug builds only — release
-/// builds don't pay the binary-size cost. Activated by the `AGSH_ACP_MOCK_PROVIDER` env var inside
+/// builds don't pay the binary-size cost. Activated by the `MEKA_ACP_MOCK_PROVIDER` env var inside
 /// `acp::run_acp`; never reachable from production paths otherwise.
 #[cfg(debug_assertions)]
 pub(crate) mod mock;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    error::{AgshError, Result},
+    error::{MekaError, Result},
     session::TokenStore,
 };
 
@@ -291,7 +291,7 @@ impl Notice {
 /// Sentinel key inserted into `ToolUse::input` when the upstream tool-call arguments failed to
 /// parse. `resolve_and_execute_tool` checks for this and short-circuits to an error result instead
 /// of invoking the tool with a potentially surprising default-filled object.
-pub(crate) const INVALID_TOOL_ARGS_MARKER: &str = "_agsh_invalid_arguments";
+pub(crate) const INVALID_TOOL_ARGS_MARKER: &str = "_meka_invalid_arguments";
 
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
@@ -546,7 +546,7 @@ impl ProviderBuilder {
                 let api_key = match self.credential {
                     AuthCredential::ApiKey(key) => key,
                     AuthCredential::OAuthToken { .. } => {
-                        return Err(AgshError::Config(
+                        return Err(MekaError::Config(
                             "provider 'claude-api' requires an API key, not an OAuth token. \
                              Use 'claude-oauth' for Claude Code OAuth."
                                 .to_string(),
@@ -564,7 +564,7 @@ impl ProviderBuilder {
             }
             "claude-oauth" => {
                 if matches!(self.credential, AuthCredential::ApiKey(_)) {
-                    return Err(AgshError::Config(
+                    return Err(MekaError::Config(
                         "provider 'claude-oauth' requires an OAuth token, not an API key. \
                          Use 'claude-api' for direct API access."
                             .to_string(),
@@ -587,7 +587,7 @@ impl ProviderBuilder {
             }
             "openai-codex" => {
                 if matches!(self.credential, AuthCredential::ApiKey(_)) {
-                    return Err(AgshError::Config(
+                    return Err(MekaError::Config(
                         "provider 'openai-codex' requires an OAuth token, not an API key. \
                          Use 'openai-api' for direct API access."
                             .to_string(),
@@ -603,7 +603,7 @@ impl ProviderBuilder {
                     self.reasoning_effort,
                 )?))
             }
-            other => Err(AgshError::Config(format!(
+            other => Err(MekaError::Config(format!(
                 "unknown provider: '{}'. Supported providers: {}",
                 other,
                 SUPPORTED_PROVIDERS.join(", ")

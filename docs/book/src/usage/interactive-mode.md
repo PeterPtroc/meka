@@ -1,22 +1,22 @@
 # Interactive Mode
 
-Start agsh without the `-p` flag to enter interactive mode:
+Start meka without the `-p` flag to enter interactive mode:
 
 ```bash
-agsh
+meka
 ```
 
 You get a prompt:
 
 ```text
-agsh [r] >
+meka [r] >
 ```
 
 Type your instruction and press **Enter** to submit. The agent processes your request and prints its response (streamed in real time as Markdown). When it finishes, you get another prompt.
 
 ## Keybindings
 
-agsh uses Emacs-style keybindings (provided by reedline).
+meka uses Emacs-style keybindings (provided by reedline).
 
 ### Input
 
@@ -60,7 +60,7 @@ agsh uses Emacs-style keybindings (provided by reedline).
 ## Prompt Format
 
 ```text
-agsh [indicator] >
+meka [indicator] >
 ```
 
 The indicator shows the current permission mode:
@@ -79,7 +79,7 @@ The color provides a visual cue about the agent's current capabilities. Red mean
 Press **Alt+Enter** to insert a newline instead of submitting. The prompt changes to show continuation:
 
 ```text
-agsh [r] > write a python script that
+meka [r] > write a python script that
   ... prints hello world
   ... and saves it to hello.py
 ```
@@ -90,7 +90,7 @@ Pasting multi-line content also works seamlessly — all pasted lines appear in 
 
 ## Slash Commands
 
-agsh supports `/` prefix commands for controlling the shell:
+meka supports `/` prefix commands for controlling the shell:
 
 | Command | Description |
 |---------|-------------|
@@ -136,20 +136,20 @@ Session status
 
 The `/compact` command asks the LLM to summarize the entire conversation, then replaces the messages the model sees with a single summary message followed by the recent tail. This is useful for long sessions that are approaching the context window limit or becoming expensive.
 
-After compacting, the session continues with the summary as context. The pre-compaction messages stay in the underlying event log on disk — the model just no longer sees them — so `agsh export` and resume continue to work exactly as if the compaction had wiped them.
+After compacting, the session continues with the summary as context. The pre-compaction messages stay in the underlying event log on disk — the model just no longer sees them — so `meka export` and resume continue to work exactly as if the compaction had wiped them.
 
 ## Shell Escape
 
 Prefix any input with `!` to execute it directly as a shell command, bypassing the LLM entirely:
 
 ```text
-agsh [r] > !pwd
+meka [r] > !pwd
 /home/user/projects
-agsh [r] > !ls -la
+meka [r] > !ls -la
 total 32
 drwxr-xr-x  5 user user 4096 Mar  4 10:00 .
 ...
-agsh [r] > !ping 1.1.1.1 -c 2
+meka [r] > !ping 1.1.1.1 -c 2
 PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
 ...
 ```
@@ -158,7 +158,7 @@ The command runs with inherited stdin/stdout/stderr, so it behaves exactly like 
 
 ## Exiting
 
-You can exit agsh in any of these ways:
+You can exit meka in any of these ways:
 
 - Type `/exit`
 - Type `exit` or `quit`

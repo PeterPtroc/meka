@@ -1,5 +1,5 @@
-//! `agsh` — an agentic shell where you describe what you want in natural language and an LLM-backed
-//! agent decides which tools to run.
+//! `meka` — a general-purpose AI agent harness where you describe what you want in natural language
+//! and an LLM-backed agent decides which tools to run.
 //!
 //! The binary wires together: a [`provider`] (Claude or OpenAI), a [`session`] store backed by
 //! SQLite, a [`tools`] registry, an MCP client manager, and a [`repl`] input loop. The [`agent`]
@@ -83,8 +83,8 @@ fn main() -> anyhow::Result<()> {
     // interrupted by user" on top of that is just noise. Exit with the conventional SIGINT code
     // (128 + 2) silently instead.
     if let Err(error) = &result
-        && let Some(crate::error::AgshError::Interrupted) =
-            error.downcast_ref::<crate::error::AgshError>()
+        && let Some(crate::error::MekaError::Interrupted) =
+            error.downcast_ref::<crate::error::MekaError>()
     {
         std::process::exit(130);
     }
@@ -92,7 +92,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::Result<()> {
-    // `agsh acp` and `agsh serve` are heavyweight (full config + credential resolution + MCP
+    // `meka acp` and `meka serve` are heavyweight (full config + credential resolution + MCP
     // setup) so they route through `async_main` rather than the lightweight subcommand block
     // below.
     let acp_mode = matches!(cli.command, Some(cli::Command::Acp));
@@ -134,7 +134,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
     }
 
     // Auto-detect first launch: no config file and no env-based provider.
-    if !config::config_file_exists() && std::env::var("AGSH_PROVIDER").is_err() {
+    if !config::config_file_exists() && std::env::var("MEKA_PROVIDER").is_err() {
         runtime.block_on(async {
             let session_manager = SessionManager::open(None).await?;
             let token_store = session_manager.token_store();
@@ -158,7 +158,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
     if let Some(prompt) = skill_prompt {
         config.prompt = Some(prompt);
     }
-    // `--bind` on `agsh serve` overrides the config-file `[serve].bind`. Apply here so
+    // `--bind` on `meka serve` overrides the config-file `[serve].bind`. Apply here so
     // `async_main` sees a single resolved binding without re-parsing the CLI.
     if let Some(cli::Command::Serve { bind: Some(bind) }) = cli.command.as_ref() {
         config.serve_bind_override = Some(bind.clone());
@@ -177,7 +177,7 @@ async fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
     };
     let skill = skills::cli::require_skill(name)?;
     // Pass `None` for session_id: the session is created lazily on the first turn, so
-    // `${AGSH_SESSION_ID}` would be unresolvable here. This matches the REPL's first-turn `/skill`
+    // `${MEKA_SESSION_ID}` would be unresolvable here. This matches the REPL's first-turn `/skill`
     // behaviour, where session_id is also None until run_turn populates it.
     let body = skills::load_skill_body(&skill, None)
         .await
@@ -189,7 +189,7 @@ async fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
     Ok(Some(combined))
 }
 
-/// Build the `tracing` filter for agsh.
+/// Build the `tracing` filter for meka.
 ///
 /// When the user sets `RUST_LOG` we honour it verbatim — no hidden
 /// overrides, so debugging with `RUST_LOG=rmcp=debug` works as expected.
@@ -307,7 +307,7 @@ async fn async_main(
         None
     };
 
-    // `agsh acp` and `agsh serve` reuse every step above (credential resolution, MCP setup,
+    // `meka acp` and `meka serve` reuse every step above (credential resolution, MCP setup,
     // session-manager housekeeping) and then enter their respective transport loops instead of
     // the REPL.
     if serve_mode {
@@ -350,7 +350,7 @@ async fn async_main(
     .await
 }
 
-/// Process-wide dependencies that every ACP session shares. Built once at `agsh acp` startup by
+/// Process-wide dependencies that every ACP session shares. Built once at `meka acp` startup by
 /// [`build_shared_deps`]; sessions hold an [`Arc<SharedDeps>`] and read fields by reference.
 /// Cheap to clone (every field is either an `Arc`, an owned-but-small value, or a clonable handle).
 ///
@@ -371,7 +371,7 @@ pub struct SharedDeps {
     pub session_stats: Arc<stats::SessionStats>,
 }
 
-/// Build the process-wide [`SharedDeps`] for `agsh acp`. Sets up the provider, MCP wiring, skill
+/// Build the process-wide [`SharedDeps`] for `meka acp`. Sets up the provider, MCP wiring, skill
 /// cache, sandbox capability probe, and the shared `agent_options` template. Each ACP session later
 /// calls [`build_session_agent`] against the resulting struct to spin up its own per-session
 /// `Agent` + `ToolRegistry`.
@@ -775,7 +775,7 @@ async fn run_turn_interruptible(
         .run_turn(session_id, messages, input, cancellation)
         .await;
     signal_handle.abort();
-    // REPL / `agsh -p` callers don't surface a stop reason — they only care whether the turn
+    // REPL / `meka -p` callers don't surface a stop reason — they only care whether the turn
     // succeeded. Drop the `TurnOutcome`.
     result.map(|_| ())
 }
@@ -837,7 +837,7 @@ async fn run_oneshot(
 
     match run_turn_interruptible(&agent, &mut session_id, &mut messages, prompt).await {
         Ok(()) => {}
-        Err(error::AgshError::Interrupted) => {
+        Err(error::MekaError::Interrupted) => {
             eprintln!("\nInterrupted.");
         }
         Err(error) => return Err(error.into()),
@@ -1002,7 +1002,7 @@ async fn run_interactive(
             ReplEvent::UserInput(input) => {
                 match run_turn_interruptible(&agent, &mut session_id, &mut messages, input).await {
                     Ok(()) => {}
-                    Err(error::AgshError::Interrupted) => {
+                    Err(error::MekaError::Interrupted) => {
                         eprintln!("\nInterrupted.");
                         if config.newline_before_prompt {
                             eprintln!();
@@ -1017,7 +1017,7 @@ async fn run_interactive(
                 }
 
                 // The first turn creates the session if one wasn't resumed; claim the file lock as
-                // soon as the ID is known so a second agsh invocation can't attach to it.
+                // soon as the ID is known so a second meka invocation can't attach to it.
                 if session_lock.is_none()
                     && let Some(id) = session_id
                 {
@@ -1161,7 +1161,7 @@ async fn run_interactive(
                                         .await
                                         {
                                             Ok(()) => {}
-                                            Err(error::AgshError::Interrupted) => {
+                                            Err(error::MekaError::Interrupted) => {
                                                 eprintln!("\nInterrupted.");
                                             }
                                             Err(error) => render::render_error(&error),
@@ -1222,7 +1222,7 @@ async fn run_interactive(
                             .await
                         {
                             Ok(()) => {}
-                            Err(error::AgshError::Interrupted) => {
+                            Err(error::MekaError::Interrupted) => {
                                 eprintln!("\nInterrupted.");
                             }
                             Err(error) => render::render_error(&error),
@@ -1430,7 +1430,7 @@ async fn run_mcp_subcommand(
     Ok(())
 }
 
-/// Handle `agsh tools <action>`.
+/// Handle `meka tools <action>`.
 async fn run_tools_subcommand(
     action: &cli::ToolsAction,
     cli_args: &cli::Cli,
@@ -1468,7 +1468,7 @@ async fn run_tools_subcommand(
                 todo_list,
                 session_manager,
                 shared_session_id,
-                // `agsh tools list` only prints the tool catalogue; skill metadata isn't read, so
+                // `meka tools list` only prints the tool catalogue; skill metadata isn't read, so
                 // skip the filesystem walk.
                 crate::skills::SkillCache::for_root(None),
                 crate::tools::BuiltinToolFilter::default(),
@@ -1727,7 +1727,7 @@ fn resolve_credential(config: &ResolvedConfig) -> anyhow::Result<AuthCredential>
         None => Err(anyhow::anyhow!(
             "no API key or OAuth token configured. Set OPENAI_API_KEY, CLAUDE_API_KEY, \
              or CLAUDE_OAUTH_TOKEN env var, or provider.api_key / provider.oauth_token \
-             in config file (~/.config/agsh/config.toml)"
+             in config file (~/.config/meka/config.toml)"
         )),
     }
 }
@@ -1802,7 +1802,7 @@ async fn resolve_session_resume(
     }
 }
 
-/// Resolve `agsh -c <value>` (where `value` is not "last") to a single session UUID. Tries a
+/// Resolve `meka -c <value>` (where `value` is not "last") to a single session UUID. Tries a
 /// full-UUID parse first; if that fails, falls back to a prefix lookup so users can type just the
 /// leading hex chars.
 ///

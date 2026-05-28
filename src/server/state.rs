@@ -1,4 +1,4 @@
-//! Process-wide shared state for `agsh serve`. Owns [`SharedDeps`] (provider, MCP, session DB,
+//! Process-wide shared state for `meka serve`. Owns [`SharedDeps`] (provider, MCP, session DB,
 //! skill cache — identical to the ACP path), the auth registry, and the per-session map. Held
 //! behind an `Arc` and cloned into every axum handler via the `State` extractor.
 
@@ -167,7 +167,7 @@ impl SessionEntry {
 /// Hold across the whole `run_turn` invocation so that the SSE response stream and the GC
 /// scanner both see a consistent picture.
 ///
-/// Per spec: exceeding the cap returns `429` + `https://agsh.dev/errors/concurrency-limit`
+/// Per spec: exceeding the cap returns `429` + `https://meka.so/errors/concurrency-limit`
 /// with a `Retry-After` header.
 #[must_use = "dropping the guard immediately defeats the in-flight tracking"]
 pub struct TurnGuard {

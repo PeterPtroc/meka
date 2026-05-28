@@ -1,10 +1,10 @@
-//! Crate-wide [`AgshError`] enum and [`Result`] alias. All non-binary code paths return `Result<T,
-//! AgshError>`; the `main` binary wraps these in `anyhow::Result` for top-level reporting.
+//! Crate-wide [`MekaError`] enum and [`Result`] alias. All non-binary code paths return `Result<T,
+//! MekaError>`; the `main` binary wraps these in `anyhow::Result` for top-level reporting.
 
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum AgshError {
+pub enum MekaError {
     #[error("configuration error: {0}")]
     Config(String),
 
@@ -29,7 +29,7 @@ pub enum AgshError {
     #[error("agent interrupted by user")]
     Interrupted,
 
-    /// A logic invariant in agsh itself was violated. Used in place of `.expect()` for cases where
+    /// A logic invariant in meka itself was violated. Used in place of `.expect()` for cases where
     /// a bug in our own code (not user input or I/O) is the only path to the error.
     #[error("internal error: {0}")]
     Internal(String),
@@ -63,7 +63,7 @@ pub enum AgshError {
     McpTurnGated { servers: Vec<(String, String)> },
 }
 
-pub type Result<T> = std::result::Result<T, AgshError>;
+pub type Result<T> = std::result::Result<T, MekaError>;
 
 /// Format a [`reqwest::Error`] together with its full source chain.
 ///
@@ -72,7 +72,7 @@ pub type Result<T> = std::result::Result<T, AgshError>;
 /// …). Walking [`std::error::Error::source`] surfaces the underlying reason inline, so users (and
 /// bug reports) see what actually broke instead of reqwest's generic wrapper.
 ///
-/// Used at every site that wraps a `reqwest::Error` in an `AgshError` via Display formatting.
+/// Used at every site that wraps a `reqwest::Error` in an `MekaError` via Display formatting.
 pub(crate) fn format_reqwest_error(error: &reqwest::Error) -> String {
     use std::error::Error as _;
     let mut out = error.to_string();

@@ -1,31 +1,31 @@
 # Installation
 
-agsh is written in Rust and builds as a single binary.
+meka is written in Rust and builds as a single binary.
 
 ## Pre-Built Binaries
 
-Download the latest release for your platform from the [GitHub Releases](https://github.com/k4yt3x/agsh/releases/latest) page.
+Download the latest release for your platform from the [GitHub Releases](https://github.com/k4yt3x/meka/releases/latest) page.
 
 | Platform | Archive |
 |----------|---------|
-| Linux (x86_64) | `agsh-linux-amd64.tar.gz` |
-| macOS (Apple Silicon) | `agsh-macos-arm64.tar.gz` |
-| Windows (x86_64) | `agsh-windows-amd64.zip` |
+| Linux (x86_64) | `meka-linux-amd64.tar.gz` |
+| macOS (Apple Silicon) | `meka-macos-arm64.tar.gz` |
+| Windows (x86_64) | `meka-windows-amd64.zip` |
 
 Extract the binary and place it somewhere on your `$PATH`:
 
 ```bash
 # Linux/macOS
-tar -xzf agsh-*.tar.gz
-cp agsh ~/.local/bin/
+tar -xzf meka-*.tar.gz
+cp meka ~/.local/bin/
 ```
 
 ## Cargo Install
 
-If you have [Rust](https://www.rust-lang.org/tools/install) installed, you can install agsh directly from the Git repository:
+If you have [Rust](https://www.rust-lang.org/tools/install) installed, you can install meka directly from the Git repository:
 
 ```bash
-cargo install --locked --git https://github.com/k4yt3x/agsh.git
+cargo install --locked --git https://github.com/k4yt3x/meka.git
 ```
 
 This builds the latest version from source and installs it to `~/.cargo/bin/`.
@@ -40,20 +40,20 @@ This builds the latest version from source and installs it to `~/.cargo/bin/`.
 ### Build
 
 ```bash
-git clone https://github.com/k4yt3x/agsh.git
-cd agsh
+git clone https://github.com/k4yt3x/meka.git
+cd meka
 cargo build --release
 ```
 
-The binary will be at `target/release/agsh`. Copy it somewhere on your `$PATH`:
+The binary will be at `target/release/meka`. Copy it somewhere on your `$PATH`:
 
 ```bash
-cp target/release/agsh ~/.local/bin/
+cp target/release/meka ~/.local/bin/
 ```
 
 ## Verify
 
 ```bash
-agsh --version
-agsh --help
+meka --version
+meka --help
 ```
