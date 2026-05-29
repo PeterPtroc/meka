@@ -32,7 +32,7 @@ impl Tool for RenderImageTool {
                           Use this after producing image data via a command pipeline (e.g. \
                           `ffmpeg ... | base64 -w0`) to see the image directly, without \
                           needing a public URL or disk write. The bytes must decode to a \
-                          supported raster image — PNG/JPEG/GIF/WebP/BMP pass through, and \
+                          supported raster image: PNG/JPEG/GIF/WebP/BMP pass through, and \
                           TIFF/ICO/HDR/EXR/TGA/PNM/QOI/DDS/Farbfeld are auto-converted to \
                           PNG. Only call this when the current model supports vision."
                 .to_string(),

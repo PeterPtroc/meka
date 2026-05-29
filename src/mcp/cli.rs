@@ -13,7 +13,7 @@ fn config_err(message: impl Into<String>) -> MekaError {
     MekaError::Config(message.into())
 }
 
-/// Run `meka mcp list` — print configured servers + their transport/URL.
+/// Run `meka mcp list`. Prints configured servers + their transport/URL.
 ///
 /// When `manager` is `Some`, the output also carries a `state` column showing each server's live
 /// lifecycle state (`pending` / `connected` / `failed` / `disabled`). The out-of-band `meka mcp
@@ -95,7 +95,7 @@ pub async fn run_list(
     Ok(())
 }
 
-/// Run `meka mcp get <name>` — print a single server config in detail.
+/// Run `meka mcp get <name>`. Prints a single server config in detail.
 pub async fn run_get(servers: &[McpServerConfig], name: &str) -> Result<()> {
     let config = servers
         .iter()
@@ -154,8 +154,8 @@ pub async fn run_get(servers: &[McpServerConfig], name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `meka mcp reconnect <name>` — connect once as a smoke test, print `ok` on success and the
-/// error otherwise. Does not mutate config. Run `meka mcp tools <name>` — connect to the server,
+/// Run `meka mcp reconnect <name>`: connect once as a smoke test, print `ok` on success and the
+/// error otherwise. Does not mutate config. Run `meka mcp tools <name>`: connect to the server,
 /// list every advertised tool, resolve permissions, and print a column-aligned table.
 /// Disabled-by-allow/block tools are still shown (marked `blocked`) so users can edit their config
 /// without leaving the CLI to discover names.
@@ -196,7 +196,7 @@ pub async fn run_tools(
     };
     if !connected {
         return Err(config_err(format!(
-            "failed to connect to '{}' — see logs above",
+            "failed to connect to '{}'; see logs above",
             config.name
         )));
     }
@@ -285,7 +285,7 @@ pub async fn run_reconnect(
     let context = McpClientContext::new();
     // Per-tool permission resolution uses `[mcp].default_permission` as its global fallback.
     // `reconnect` is a smoke-test command run from outside the main agent loop, so we don't have a
-    // `ResolvedConfig` in scope — pass `None` and let resolution fall through to the hardcoded
+    // `ResolvedConfig` in scope. Pass `None` and let resolution fall through to the hardcoded
     // strict default. Any user-specific per-server / per-tool config still applies.
     let manager = McpClientManager::prepare(
         std::slice::from_ref(&config),
@@ -316,20 +316,20 @@ pub async fn run_reconnect(
         Ok(())
     } else {
         Err(config_err(format!(
-            "failed to connect to '{}' — see logs above",
+            "failed to connect to '{}'; see logs above",
             config.name
         )))
     }
 }
 
-/// Run `meka mcp logout <name>` — clear any stored OAuth credentials for the given server, and
+/// Run `meka mcp logout <name>`: clear any stored OAuth credentials for the given server, and
 /// clear the auth-probe cache entry (if any).
 pub async fn run_logout(
     servers: &[McpServerConfig],
     token_store: &TokenStore,
     name: &str,
 ) -> Result<()> {
-    // Best-effort revocation — cleared from stored creds regardless.
+    // Best-effort revocation. Cleared from stored creds regardless.
     if let Some(config) = servers
         .iter()
         .find(|c| c.name == name && matches!(c.transport, McpTransport::Http))
@@ -348,7 +348,7 @@ pub async fn run_logout(
     Ok(())
 }
 
-/// Run `meka mcp login <name>` — drive an interactive OAuth flow.
+/// Run `meka mcp login <name>`. Drives an interactive OAuth flow.
 ///
 /// If the config has an explicit `[auth]` block, it's honoured as-is. If the server is HTTP with no
 /// `auth` set, we assume `type = "oauth"` (authorization-code grant with dynamic client
@@ -379,7 +379,7 @@ pub async fn run_login(
                     redirect_port: None,
                 });
                 tracing::info!(
-                    "no [auth] block for '{}' — assuming OAuth authorization_code.",
+                    "no [auth] block for '{}'; assuming OAuth authorization_code.",
                     name
                 );
                 (assumed, true)
@@ -430,7 +430,7 @@ pub async fn run_login(
     manager.shutdown_arc().await;
 
     if needs_persist && let Err(error) = persist_auth_block_for(name) {
-        // Login worked — don't fail the whole command if we can't write the config back, just
+        // Login worked. Don't fail the whole command if we can't write the config back; just
         // surface the issue so the user can decide whether to hand-edit.
         tracing::warn!(
             "'{}' is authorised, but failed to write 'auth = oauth' back to config.toml: {}",
@@ -567,7 +567,7 @@ struct ResolvedAddArgs {
 ///
 /// Persists the server into `config.toml`, then for HTTP servers:
 ///   1. Probes the endpoint (RFC 6750 / RFC 9728) to see if auth is required.
-///   2. If the probe says auth is required — or the user explicitly passed `--auth oauth` — and
+///   2. If the probe says auth is required (or the user explicitly passed `--auth oauth`) and
 ///      `--no-login` wasn't set, runs the OAuth authorization_code flow immediately so the whole
 ///      setup is "add + authorise" in a single command.
 ///   3. If that OAuth flow fails, rolls back by purging the entry we just wrote. The CLI exit is
@@ -656,7 +656,7 @@ pub async fn run_add(args: AddArgs, token_store: &TokenStore) -> Result<()> {
         return Ok(());
     }
 
-    // From here on, anything that goes wrong — natural failure, timeout, Ctrl-C — should leave
+    // From here on, anything that goes wrong (natural failure, timeout, Ctrl-C) should leave
     // config.toml in the "never added" state. Race the probe + auto-login block against SIGINT so
     // an interrupted user ends up in exactly the same place as a clean `mcp remove`.
     let result: Result<()> = tokio::select! {
@@ -668,17 +668,17 @@ pub async fn run_add(args: AddArgs, token_store: &TokenStore) -> Result<()> {
     if let Err(error) = result {
         match &error {
             MekaError::Interrupted => {
-                tracing::warn!("interrupted — rolling back '{}'.", resolved.name);
+                tracing::warn!("interrupted; rolling back '{}'.", resolved.name);
             }
             other => tracing::warn!(
-                "authorisation failed for '{}': {} — rolling back the config entry.",
+                "authorisation failed for '{}': {}; rolling back the config entry.",
                 resolved.name,
                 other
             ),
         }
         if let Err(purge_err) = purge_server(&resolved.name, token_store).await {
             tracing::warn!(
-                "rollback of '{}' also failed: {} — you may need to edit config.toml by hand.",
+                "rollback of '{}' also failed: {}; you may need to edit config.toml by hand.",
                 resolved.name,
                 purge_err
             );
@@ -720,7 +720,7 @@ async fn probe_then_login(resolved: &ResolvedAddArgs, token_store: &TokenStore) 
         return Ok(());
     }
 
-    // Synthesised server config for the login — equivalent to parsing the entry we just wrote but
+    // Synthesised server config for the login, equivalent to parsing the entry we just wrote but
     // without round-tripping through disk.
     let server_config = resolved_to_server_config(resolved);
     tracing::info!(
@@ -764,7 +764,7 @@ async fn probe_and_announce(name: &str, url: &str) -> ProbeOutcome {
         }
         McpAuthProbe::Unexpected { status } => {
             tracing::warn!(
-                "probe: '{}' answered HTTP {} — couldn't infer auth state.",
+                "probe: '{}' answered HTTP {}; couldn't infer auth state.",
                 name,
                 status
             );
@@ -1368,7 +1368,7 @@ async fn purge_server(name: &str, token_store: &TokenStore) -> Result<std::path:
     Ok(path)
 }
 
-/// Run `meka mcp remove <name>` — delete the entry from config.toml, best-effort revoke OAuth
+/// Run `meka mcp remove <name>`: delete the entry from config.toml, best-effort revoke OAuth
 /// tokens at the provider, clear local state.
 pub async fn run_remove(name: &str, token_store: &TokenStore) -> Result<()> {
     let path = purge_server(name, token_store).await?;
@@ -1403,8 +1403,8 @@ async fn set_server_disabled(name: &str, disabled: bool) -> Result<std::path::Pa
     if disabled {
         entry.insert("disabled", toml_edit::value(true));
     } else {
-        // Remove the key entirely rather than setting `false` — keeps minimal diffs for users who
-        // never enabled the flag before.
+        // Remove the key entirely rather than setting `false`. This keeps minimal diffs for users
+        // who never enabled the flag before.
         entry.remove("disabled");
     }
 
@@ -1413,7 +1413,7 @@ async fn set_server_disabled(name: &str, disabled: bool) -> Result<std::path::Pa
     Ok(path)
 }
 
-/// Run `meka mcp disable <name>` — set `disabled = true` in config.toml. The currently-running meka
+/// Run `meka mcp disable <name>`. Sets `disabled = true` in config.toml. The currently-running meka
 /// session (if any) keeps its state; the change takes effect on the next start.
 pub async fn run_disable(name: &str) -> Result<()> {
     let path = set_server_disabled(name, true).await?;
@@ -1421,7 +1421,7 @@ pub async fn run_disable(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `meka mcp enable <name>` — clear `disabled` from the server entry in config.toml.
+/// Run `meka mcp enable <name>`. Clears `disabled` from the server entry in config.toml.
 pub async fn run_enable(name: &str) -> Result<()> {
     let path = set_server_disabled(name, false).await?;
     tracing::info!("enabled '{}' in {}", name, path.display());
@@ -1606,8 +1606,8 @@ mod tests {
         args.scope = vec!["read".to_string(), "write".to_string()];
         args.redirect_port = Some(8400);
         let resolved = resolve_add_args(args).expect("resolve");
-        // Parse it back through toml to confirm the schema matches what ResolvedConfig expects —
-        // checking the textual rendering is fragile because toml_edit decides when to emit a
+        // Parse it back through toml to confirm the schema matches what ResolvedConfig expects.
+        // Checking the textual rendering is fragile because toml_edit decides when to emit a
         // standalone `[mcp.servers.auth]` header.
         let mut doc = toml_edit::DocumentMut::new();
         let mut servers = toml_edit::ArrayOfTables::new();

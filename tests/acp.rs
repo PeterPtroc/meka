@@ -31,8 +31,8 @@
 //!   `acp_multi_session_parallel_prompts_dont_serialize`) rely on precise `Instant::now()`
 //!   measurements outside the harness's deadline window.
 //!
-//! Everything else — the tool-call lifecycle, permission flows, delegation paths, sub-agent
-//! forwarding, and per-session isolation — sits on the harness.
+//! Everything else (the tool-call lifecycle, permission flows, delegation paths, sub-agent
+//! forwarding, and per-session isolation) sits on the harness.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -221,7 +221,7 @@ impl AcpTestHarness {
     }
 
     /// Fire a JSON-RPC request and return the id without waiting. Use [`Self::await_response`] or
-    /// [`Self::collect_updates`] to pick up the response later — useful when a test fires a prompt,
+    /// [`Self::collect_updates`] to pick up the response later. Useful when a test fires a prompt,
     /// observes intermediate notifications, then collects the final response.
     fn send_request(&mut self, method: &str, params: serde_json::Value) -> u64 {
         self.next_id += 1;
@@ -281,7 +281,7 @@ impl AcpTestHarness {
 
     /// Collect every `session/update` notification for `sid` plus the eventual response for `id`.
     /// Captures everything the agent emits during a prompt turn, which is the single most reused
-    /// pattern in the existing test file. Side-channel meka-issued requests are silently ignored —
+    /// pattern in the existing test file. Side-channel meka-issued requests are silently ignored;
     /// if a test expects them, use [`Self::collect_updates_with_dispatch`] instead.
     fn collect_updates(
         &mut self,
@@ -296,7 +296,7 @@ impl AcpTestHarness {
     ///
     /// The free [`read_until_with_dispatch`] only invokes its dispatch closure on JSON-RPC
     /// *requests* (those with both `method` and `id`). Notifications carry `method` but no `id`, so
-    /// we can't piggy-back on it — drive a parallel loop here that also captures `session/update`
+    /// we can't piggy-back on it; drive a parallel loop here that also captures `session/update`
     /// notifications for the target `sid`.
     fn collect_updates_with_dispatch<F>(
         &mut self,
@@ -443,7 +443,7 @@ where
 }
 
 /// Variant of [`read_until`] that also answers incoming JSON-RPC *requests* from meka. Any line
-/// that parses to a JSON object with both a `method` and an `id` field is treated as an meka-issued
+/// that parses to a JSON object with both a `method` and an `id` field is treated as a meka-issued
 /// request; `dispatch` is invoked with the parsed value and its `Some(response)` return value is
 /// written back to meka's stdin. Tests use this to play the client side of the `fs/*` and
 /// `terminal/*` round-trips.
@@ -489,7 +489,7 @@ where
 
 #[test]
 fn acp_tool_call_lifecycle_round_trips_through_mock_provider() {
-    // Fake config + credential so `create_agent_from_config` builds a real provider stack — the
+    // Fake config + credential so `create_agent_from_config` builds a real provider stack. The
     // mock swap inside `run_acp` then replaces the provider before any HTTP call is attempted.
     let config_toml = r#"
 [provider]
@@ -1003,7 +1003,7 @@ api_key = "fake-for-mock-only"
             .to_string();
 
         // Drive a no-op prompt so the session is persisted with a message (otherwise the title
-        // would be empty — not required by the assertion but matches the realistic shape).
+        // would be empty; not required by the assertion but matches the realistic shape).
         let prompt_req = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -1235,7 +1235,7 @@ api_key = "fake-for-mock-only"
     let resume_lines = read_until(&mut reader, deadline, |line| line.contains("\"id\":6"));
 
     // The `available_commands_update` push is allowed (and expected) on resume. What must NOT
-    // appear is a replay update — `user_message_chunk`, `agent_message_chunk`, `tool_call`, or
+    // appear is a replay update: `user_message_chunk`, `agent_message_chunk`, `tool_call`, or
     // `tool_call_update`.
     let mut saw_replay_update = false;
     let mut resume_response: Option<serde_json::Value> = None;
@@ -1335,7 +1335,7 @@ fn acp_session_close_clears_slot_for_subsequent_new() {
         close_response,
     );
 
-    // Re-closing the first session must error — it's gone.
+    // Re-closing the first session must error; it's gone.
     let reclose = harness.close_session(&first_id);
     assert!(
         reclose["error"].is_object(),
@@ -1371,7 +1371,7 @@ enabled = ["read", "ask", "write"]
                 "---\ndescription: a demo skill\n---\ndo stuff\n",
             )
             .expect("write SKILL.md");
-            // Empty script — we never run a turn.
+            // Empty script; we never run a turn.
             serde_json::json!([])
         })
         .build();
@@ -1433,8 +1433,8 @@ enabled = ["read", "ask", "write"]
 }
 
 /// a `session/prompt` whose text is `/<skill-name>` resolves to the rendered skill body before
-/// being handed to the agent. Asserts the prompt completes successfully (the alternative — the
-/// helper returning an error from an unknown skill — would surface as a JSON-RPC error response
+/// being handed to the agent. Asserts the prompt completes successfully (the alternative, the
+/// helper returning an error from an unknown skill, would surface as a JSON-RPC error response
 /// instead of `stopReason=end_turn`).
 #[test]
 fn acp_session_prompt_invokes_skill_by_slash_name() {
@@ -1495,8 +1495,8 @@ fn acp_session_prompt_passes_through_unknown_skill_name() {
 
 /// A `/<skill>` invocation that resolves to an installed skill but whose body file becomes
 /// unreadable between scan and invocation must surface as JSON-RPC `InternalError` (-32603), not
-/// `InvalidParams` (-32602). The client's request was syntactically valid and named a real skill —
-/// the failure is a server-side disk problem.
+/// `InvalidParams` (-32602). The client's request was syntactically valid and named a real
+/// skill; the failure is a server-side disk problem.
 ///
 /// We trigger this by chmod-ing SKILL.md to 0 after the skills cache has registered it. The cache's
 /// disk-snapshot key is the file's mtime (see `disk_snapshot` in `src/skills.rs`), which `chmod`
@@ -1597,7 +1597,7 @@ enabled = ["read", "ask"]
         .to_string();
 
     // Valid set_mode: read → ask. The `current_mode_update` notification arrives via the same
-    // session/update channel, which `request` discards — collect it via a small ad-hoc loop instead
+    // session/update channel, which `request` discards; collect it via a small ad-hoc loop instead
     // by issuing the request and watching for the notification before the response.
     let set_id = harness.send_request(
         "session/set_mode",
@@ -1748,7 +1748,7 @@ enabled = ["read", "write"]
     let mut delegated_content: Option<String> = None;
     let _ = harness.await_response_with_dispatch(id, |value| match value["method"].as_str() {
         Some("fs/read_text_file") => {
-            // Pre-read for diff metadata — return file-not-found shaped error so write_file falls
+            // Pre-read for diff metadata: return file-not-found shaped error so write_file falls
             // back to None old_text.
             Some(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -1780,7 +1780,7 @@ enabled = ["read", "write"]
         Some(content_to_write),
         "delegate received wrong content"
     );
-    // No local file on disk — the delegate handled the write.
+    // No local file on disk; the delegate handled the write.
     assert!(
         !target.exists(),
         "meka wrote a local file despite delegating: {}",
@@ -1803,7 +1803,7 @@ api_key = "fake-for-mock-only"
 default = "write"
 enabled = ["read", "write"]
 "#;
-    // No capabilities advertised — the harness default is `{}`.
+    // No capabilities advertised; the harness default is `{}`.
     let mut harness = AcpTestHarness::builder()
         .config(config_toml)
         .pre_spawn(move |config_dir| {
@@ -2005,8 +2005,8 @@ api_key = "fake-for-mock-only"
     // Round 1: a short "starting" delta so the test knows the turn started, then a 5s sleep that
     // races against cancel. If cancel arrives in time the mock returns early; the agent loop's
     // post-stream cancellation check breaks with Interrupted. If cancel is starved (bug regressed),
-    // the sleep finishes, the text "done" + end_turn fires, and the response carries `end_turn` —
-    // the assertion below catches that.
+    // the sleep finishes, the text "done" + end_turn fires, and the response carries `end_turn`.
+    // The assertion below catches that.
     let script = serde_json::json!([
         [
             { "kind": "text", "text": "starting..." },
@@ -2080,7 +2080,7 @@ api_key = "fake-for-mock-only"
     writeln!(stdin, "{}", prompt_req).expect("prompt");
 
     // Wait until we've seen the "starting..." chunk so we know the turn is actually parked inside
-    // the mock's sleep — firing cancel any earlier might race the prompt setup.
+    // the mock's sleep; firing cancel any earlier might race the prompt setup.
     let start_deadline = Instant::now() + Duration::from_secs(5);
     let _ = read_until(&mut reader, start_deadline, |line| {
         line.contains("starting...")
@@ -2111,7 +2111,7 @@ api_key = "fake-for-mock-only"
         .find(|line| line.contains("\"id\":3"))
         .unwrap_or_else(|| {
             panic!(
-                "no PromptResponse before deadline — cancel was likely starved.\nSTDERR:\n{}\nstream:\n{}",
+                "no PromptResponse before deadline, cancel was likely starved.\nSTDERR:\n{}\nstream:\n{}",
                 stderr_handle.join().unwrap_or_default(),
                 lines.join(""),
             )
@@ -2141,7 +2141,7 @@ default = "write"
 enabled = ["read", "write"]
 "#;
     // edit_file canonicalizes the target before reaching the delegation seam, so the path must
-    // exist on disk. Seed it with a *different* content from what the delegate will serve — this
+    // exist on disk. Seed it with a *different* content from what the delegate will serve; this
     // proves the editor's in-buffer view (via fs/read_text_file) wins over the on-disk bytes.
     // `force=true` skips the read-before-edit gate (we're not testing that path).
     let disk_content = "this should NOT be edited\n";
@@ -2214,7 +2214,7 @@ enabled = ["read", "write"]
         "delegated write content didn't reflect the edit \
          applied to the editor's in-buffer view"
     );
-    // On-disk content must be untouched — delegation bypassed the local filesystem.
+    // On-disk content must be untouched; delegation bypassed the local filesystem.
     let on_disk = std::fs::read_to_string(&target).expect("read seeded file");
     assert_eq!(
         on_disk, disk_content,
@@ -2518,7 +2518,7 @@ api_key = "fake-for-mock-only"
     );
 }
 
-/// `allow_always` sticks — a subsequent `session/prompt` that hits the same write tool MUST NOT
+/// `allow_always` sticks: a subsequent `session/prompt` that hits the same write tool MUST NOT
 /// trigger another `session/request_permission` round-trip. Regression guard for the sticky-allow
 /// store. Two consecutive prompts in one session.
 #[test]
@@ -2538,7 +2538,7 @@ enabled = ["read", "ask", "write"]
         .pre_spawn(|config_dir| {
             let target_a = config_dir.join("a.txt");
             let target_b = config_dir.join("b.txt");
-            // Two complete turns — both invoke write_file. Only the first should provoke a
+            // Two complete turns; both invoke write_file. Only the first should provoke a
             // permission round-trip.
             serde_json::json!([
                 // Turn 1 round 1.
@@ -2595,13 +2595,13 @@ enabled = ["read", "ask", "write"]
         }
     });
 
-    // Turn 2: same tool — sticky allow must suppress the round-trip.
+    // Turn 2: same tool; sticky allow must suppress the round-trip.
     let id_2 = harness.prompt(&sid, "write b");
     let mut prompts_for_turn_2 = 0_usize;
     let _ = harness.await_response_with_dispatch(id_2, |value| {
         if value["method"] == "session/request_permission" {
             prompts_for_turn_2 += 1;
-            // Defensive answer just in case — but the assertion below catches the sticky-allow
+            // Defensive answer just in case, but the assertion below catches the sticky-allow
             // regression.
             Some(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -2626,7 +2626,7 @@ enabled = ["read", "ask", "write"]
 }
 
 // `acp_initialize_negotiates_unknown_protocol_version` was superseded by
-// `acp_initialize_clamps_far_future_version_to_latest` (below) — stricter: asserts the clamp lands
+// `acp_initialize_clamps_far_future_version_to_latest` (below); stricter: asserts the clamp lands
 // on `ProtocolVersion::LATEST`, not just "some number".
 
 /// Two `session/new` calls succeed and produce independent session ids. Each session has its own
@@ -2664,7 +2664,7 @@ fn acp_multi_session_create_and_isolate_messages() {
 }
 
 /// Two sessions prompting in parallel: A stalls in a long sleep, B completes a fast prompt. With
-/// multi-session ACP, B's response must arrive *well before* A's — proving the per-session mutex
+/// multi-session ACP, B's response must arrive *well before* A's, proving the per-session mutex
 /// design lets sessions parallelise (the single-session `Mutex<ServerState>` would have serialised
 /// them).
 #[test]
@@ -2779,7 +2779,7 @@ api_key = "fake-for-mock-only"
 
     // Wait for A's "A starting" delta to surface before firing B, so we know A holds the runtime
     // mutex and isn't merely queued. A blind `sleep(300ms)` was the previous approach, but it was
-    // flake-prone on loaded CI — the deterministic marker mirrors what
+    // flake-prone on loaded CI; the deterministic marker mirrors what
     // `acp_session_cancel_interrupts_running_prompt` already does.
     let barrier = Instant::now() + Duration::from_secs(5);
     let _ = read_until(&mut reader, barrier, |line| line.contains("A starting"));
@@ -2822,11 +2822,11 @@ api_key = "fake-for-mock-only"
     let a = a_finish.expect("session A never responded");
     let b = b_finish.expect("session B never responded");
 
-    // B must finish *substantially* before A — A is stalled, B should return well within the
+    // B must finish *substantially* before A. A is stalled, so B should return well within the
     // threshold. If the design serialised B behind A, B would take ≥ a_stall_ms.
     assert!(
         b < b_threshold,
-        "session B took {:?} (threshold {:?}) — looks serialised behind A's {}ms stall;\nSTDERR:\n{}",
+        "session B took {:?} (threshold {:?}), looks serialised behind A's {}ms stall;\nSTDERR:\n{}",
         b,
         b_threshold,
         a_stall_ms,
@@ -2834,7 +2834,7 @@ api_key = "fake-for-mock-only"
     );
     assert!(
         a > b,
-        "session A finished before B ({:?} vs {:?}) — script ordering wrong?",
+        "session A finished before B ({:?} vs {:?}), script ordering wrong?",
         a,
         b,
     );
@@ -2860,7 +2860,7 @@ enabled = ["read", "write"]
     let sid_b = harness.new_session();
 
     // Use `collect_updates` against sid_a to gather A's notifications during the set_mode
-    // round-trip. Notifications for sid_b appear in the same stream — collect a second pass
+    // round-trip. Notifications for sid_b appear in the same stream; collect a second pass
     // afterwards by inspecting the raw transcript to be sure none leaked.
     let set_id = harness.send_request(
         "session/set_mode",
@@ -2900,7 +2900,7 @@ enabled = ["read", "write"]
     );
     assert!(
         !saw_a_update_on_b,
-        "session B must NOT receive A's current_mode_update — modes are per-session",
+        "session B must NOT receive A's current_mode_update, modes are per-session",
     );
 }
 
@@ -2972,7 +2972,7 @@ fn acp_multi_session_cancel_fires_only_target_session() {
     assert_eq!(
         b_stop.as_deref(),
         Some("end_turn"),
-        "session B's cancel must NOT have fired — only A was cancelled",
+        "session B's cancel must NOT have fired, only A was cancelled",
     );
 }
 
@@ -3066,7 +3066,7 @@ fn acp_session_close_while_prompt_in_flight_cancels_and_rejects_followups() {
     );
 }
 
-// === Audit finding #8: input-validation error-path tests ============
+// === Input-validation error-path tests ==============================
 //
 // Each handler that takes a `sessionId`, `modeId`, or rich `prompt` content array must reject
 // malformed input with a JSON-RPC `InvalidParams` (`-32602`) error, not a generic `InternalError`
@@ -3097,7 +3097,7 @@ api_key = "fake-for-mock-only"
 "#;
 
 /// `session/prompt` against an unknown `sessionId` must error with `InvalidParams`. Non-text
-/// content blocks (image / audio / resource) likewise — meka advertises text-only
+/// content blocks (image / audio / resource) likewise: meka advertises text-only
 /// `PromptCapabilities`, so any other block type is a client contract violation.
 #[test]
 fn acp_session_prompt_rejects_unknown_session_and_non_text_blocks() {
@@ -3112,7 +3112,7 @@ fn acp_session_prompt_rejects_unknown_session_and_non_text_blocks() {
     );
     assert_invalid_params(&unknown, "prompt with unknown sessionId");
 
-    // Now open a real session and send an image block — also a contract violation, must yield
+    // Now open a real session and send an image block (also a contract violation); must yield
     // InvalidParams.
     let sid = harness.new_session();
     let bad_block = harness.request(
@@ -3160,7 +3160,7 @@ fn acp_session_load_rejects_malformed_uuid_and_already_loaded() {
 }
 
 /// `session/resume` rejects malformed UUIDs, unknown ids, and ids for sessions already occupying
-/// the active slot — all client-side mistakes that map to `InvalidParams`. The already-loaded guard
+/// the active slot, all client-side mistakes that map to `InvalidParams`. The already-loaded guard
 /// at `src/acp.rs:1695` mirrors the `session/load` one tested in
 /// `acp_session_load_rejects_malformed_uuid_and_already_loaded`.
 #[test]
@@ -3202,7 +3202,7 @@ fn acp_session_resume_rejects_malformed_uuid_unknown_and_already_loaded() {
 }
 
 /// `session/set_mode` rejects an unknown mode id and rejects a valid-but-disabled mode (configured
-/// `enabled` array doesn't list it). Both arms are input validation — `InvalidParams`.
+/// `enabled` array doesn't list it). Both arms are input validation: `InvalidParams`.
 #[test]
 fn acp_session_set_mode_rejects_unknown_and_disabled() {
     let config = r#"
@@ -3274,7 +3274,7 @@ fn acp_initialize_clamps_far_future_version_to_latest() {
     });
     let deadline = Instant::now() + Duration::from_secs(10);
 
-    // Far-future version — well past anything the schema crate would ever produce. Must come back
+    // Far-future version, well past anything the schema crate would ever produce. Must come back
     // clamped to LATEST (V1).
     let init_req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -3316,10 +3316,10 @@ fn acp_initialize_clamps_far_future_version_to_latest() {
     );
 }
 
-// === Audit deferred items: mock-provider-driven coverage =============
+// === Mock-provider-driven coverage ==================================
 //
-// These tests round-trip features that the mock provider couldn't emit before — `ThinkingDelta` /
-// `ThinkingComplete` and the `MaxTokens` stop reason — through the full ACP pipeline.
+// These tests round-trip features that the mock provider couldn't emit before (`ThinkingDelta` /
+// `ThinkingComplete` and the `MaxTokens` stop reason) through the full ACP pipeline.
 
 /// A `ThinkingDelta` + `ThinkingComplete` pair from the provider maps to a `session/update`
 /// notification with `sessionUpdate: "agent_thought_chunk"` carrying the thinking text. The text
@@ -3472,7 +3472,7 @@ fn acp_session_prompt_surfaces_provider_error_as_jsonrpc_error() {
 /// bails out promptly. A spec-conformant client always answers `Selected` / `Cancelled`, so any
 /// `Err` from `block_task` (channel closed or peer JSON-RPC error) signals a broken/malformed
 /// client. The agent denies the tool call, completes the current iteration, then short-circuits the
-/// next iteration via `Frontend::client_disconnected()` — the turn resolves `cancelled`, not
+/// next iteration via `Frontend::client_disconnected()`; the turn resolves `cancelled`, not
 /// `end_turn`.
 #[test]
 fn acp_session_prompt_request_permission_failure_marks_disconnect() {
@@ -3529,13 +3529,13 @@ enabled = ["read", "ask", "write"]
     );
 }
 
-// === Audit deferred items: terminal/* delegation failure paths ======
+// === terminal/* delegation failure paths ============================
 //
 // `run_delegated_execute` has four error arms (`terminal/create` failure, `terminal/wait_for_exit`
-// failure, `terminal/output` failure with release-anyway, and cancel-mid-wait kill-then-read). The
-// original audit only had the happy-path test
-// `acp_execute_command_is_delegated_when_terminal_capability_offered`; these tests fill in the
-// failure modes.
+// failure, `terminal/output` failure with release-anyway, and cancel-mid-wait kill-then-read).
+// Previously only the happy-path test
+// `acp_execute_command_is_delegated_when_terminal_capability_offered` was covered; these tests fill
+// in the failure modes.
 
 const ACP_TERMINAL_CONFIG: &str = r#"
 [provider]
@@ -3738,7 +3738,7 @@ fn acp_terminal_cancel_mid_wait_kills_then_reads_output() {
                         "result": { "terminalId": "term-1" }
                     }))
                 }
-                // `wait_for_exit` is intentionally never answered — the agent races it against the
+                // `wait_for_exit` is intentionally never answered; the agent races it against the
                 // cancel token. When cancel fires, the agent proceeds to kill + output regardless
                 // of wait still being pending.
                 "terminal/wait_for_exit" => None,
@@ -3775,7 +3775,7 @@ fn acp_terminal_cancel_mid_wait_kills_then_reads_output() {
                 let _ = writeln!(harness.stdin, "{}", r);
             }
         }
-        // Fire cancel as soon as create has been dispatched — by then the agent is inside
+        // Fire cancel as soon as create has been dispatched; by then the agent is inside
         // `tokio::select!` waiting on the wait_for_exit request.
         if saw_create && !cancel_fired {
             let cancel_notif = serde_json::json!({
@@ -3876,7 +3876,7 @@ fn acp_terminal_timeout_kills_then_reads_output_and_continues() {
                         "result": { "terminalId": "term-1" }
                     }))
                 }
-                // Intentionally never answered — the 100ms timeout races wait_for_exit and wins.
+                // Intentionally never answered: the 100ms timeout races wait_for_exit and wins.
                 "terminal/wait_for_exit" => None,
                 "terminal/kill" => {
                     saw_kill = true;
@@ -3923,7 +3923,7 @@ fn acp_terminal_timeout_kills_then_reads_output_and_continues() {
             saw_create, saw_kill, saw_output, saw_release, transcript,
         );
     });
-    // Timeout is not cancel — the turn completes normally and proceeds to round 2 (`done` text +
+    // Timeout is not cancel; the turn completes normally and proceeds to round 2 (`done` text +
     // `end_turn`).
     assert_eq!(
         response["result"]["stopReason"], "end_turn",
@@ -3940,7 +3940,7 @@ fn acp_terminal_timeout_kills_then_reads_output_and_continues() {
     );
 }
 
-// === Audit deferred item: fs/read_text_file line + limit ============
+// === fs/read_text_file line + limit =================================
 
 /// `read_file` with `offset` + `limit` in the tool input translates to `fs/read_text_file` with
 /// `line: offset + 1` (1-based) and the same `limit`, when the client advertises `fs.readTextFile`.
@@ -3999,7 +3999,7 @@ fn acp_fs_read_text_file_passes_line_and_limit_when_delegated() {
         "offset 9 must translate to 1-based line 10 on fs/read_text_file",
     );
     assert_eq!(observed_limit, Some(50), "limit must pass through verbatim");
-    // On-disk file is untouched — proves the delegate path won.
+    // On-disk file is untouched, proving the delegate path won.
     assert_eq!(
         std::fs::read_to_string(&target).expect("read on-disk"),
         on_disk_marker,
@@ -4007,10 +4007,10 @@ fn acp_fs_read_text_file_passes_line_and_limit_when_delegated() {
     );
 }
 
-// === V2 audit follow-ups ============================================
+// === V2 protocol conformance ========================================
 
-/// C5 — `ContentBlock::ResourceLink` is part of the ACP MUST baseline; meka used to reject it with
-/// `InvalidParams`. The new behavior flattens the link into a tag the model can see.
+/// `ContentBlock::ResourceLink` is part of the ACP baseline. meka used to reject it with
+/// `InvalidParams`; the new behavior flattens the link into a tag the model can see.
 #[test]
 fn acp_session_prompt_accepts_resource_link_baseline() {
     let script = serde_json::json!([[
@@ -4043,7 +4043,7 @@ fn acp_session_prompt_accepts_resource_link_baseline() {
     );
 }
 
-/// C6 — `session/cancel` MUST yield `Cancelled` stop reason even when the cancellation manifests as
+/// `session/cancel` yields a `Cancelled` stop reason even when the cancellation manifests as
 /// a non-`Interrupted` provider error. Script a `Sleep` followed by a `Fail`; fire cancel during
 /// the sleep; assert `stopReason: cancelled` rather than the JSON-RPC error the `Fail` would
 /// otherwise produce.
@@ -4072,7 +4072,7 @@ fn acp_session_prompt_cancelled_after_provider_error() {
     );
 }
 
-/// C7 — `session/cancel` between turns is latched and applied to the next prompt. Without the
+/// `session/cancel` between turns is latched and applied to the next prompt. Without the
 /// latch, the cancel handler fires on the previous turn's already-dead token and the signal is
 /// lost.
 #[test]
@@ -4099,7 +4099,7 @@ fn acp_session_cancel_between_turns_applied_to_next_prompt() {
     let response_1 = harness.await_response(id_1);
     assert_eq!(response_1["result"]["stopReason"], "end_turn");
 
-    // Cancel arrives before the second prompt — must be latched.
+    // Cancel arrives before the second prompt. It must be latched.
     harness.cancel(&sid);
 
     // Second prompt: the latched cancel applies immediately, so the turn resolves Cancelled even
@@ -4113,7 +4113,7 @@ fn acp_session_cancel_between_turns_applied_to_next_prompt() {
     );
 }
 
-/// C9 — `session/set_mode` no longer needs the runtime mutex. Mid-turn mode change takes effect
+/// `session/set_mode` no longer needs the runtime mutex. Mid-turn mode change takes effect
 /// without waiting for the turn to finish.
 #[test]
 fn acp_session_set_mode_during_long_prompt_does_not_block() {
@@ -4162,7 +4162,7 @@ enabled = ["read", "write"]
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
 }
 
-/// C10 — `session/cancel` during an `Ask`-mode permission prompt must resolve the turn promptly.
+/// `session/cancel` during an `Ask`-mode permission prompt resolves the turn promptly.
 /// Without the race against the cancellation token, the agent hangs inside `request_permission`
 /// until the client answers.
 #[test]
@@ -4236,7 +4236,7 @@ enabled = ["read", "ask", "write"]
     );
 }
 
-/// C11 — `protocolVersion: 0` is the schema's parse-failure sentinel and must be rejected with
+/// `protocolVersion: 0` is the schema's parse-failure sentinel and is rejected with
 /// `InvalidParams`, not silently clamped.
 #[test]
 fn acp_initialize_rejects_protocol_version_zero() {
@@ -4323,7 +4323,7 @@ fn acp_session_prompt_rejects_concurrent_prompt_same_session() {
     assert_eq!(response_a["result"]["stopReason"], "end_turn");
 }
 
-/// Refusal stop reason — Claude `stop_reason: "refusal"` is mapped to `MockStopReason::Refusal` and
+/// Refusal stop reason: Claude `stop_reason: "refusal"` is mapped to `MockStopReason::Refusal` and
 /// surfaces as the spec's `refusal` stop reason in the response. Mock needs the variant; add it.
 #[test]
 fn acp_session_prompt_refusal_stop_reason() {

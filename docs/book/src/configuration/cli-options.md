@@ -63,7 +63,7 @@ When omitted, meka starts the REPL with no initial input.
 
 ### `-c`, `--continue [SESSION_ID]`
 
-Resume a session. Without a session ID, resumes the most recently updated session. With a session ID, resumes that specific session — accepts either the full UUID or any unique leading prefix (most-recent-first if the prefix matches more than one).
+Resume a session. Without a session ID, resumes the most recently updated session. With a session ID, resumes that specific session. It accepts either the full UUID or any unique leading prefix (most-recent-first if the prefix matches more than one).
 
 ```bash
 meka -c                                          # resume last session
@@ -158,7 +158,7 @@ meka --instructions "Be terse. No code fences in answers."
 
 ### `--skill <NAME>`
 
-Invoke a [skill](../usage/skills.md) as the first turn. Mirrors the REPL slash command [`/skill <name> [extra...]`](../usage/skills.md#invoking-a-skill-from-the-cli) — the positional `[PROMPT]` arg, if given, is prepended to the rendered skill body as additional context. Pair with [`--oneshot`](#oneshot) to exit after the turn instead of opening the REPL.
+Invoke a [skill](../usage/skills.md) as the first turn. Mirrors the REPL slash command [`/skill <name> [extra...]`](../usage/skills.md#invoking-a-skill-from-the-cli). The positional `[PROMPT]` arg, if given, is prepended to the rendered skill body as additional context. Pair with [`--oneshot`](#oneshot) to exit after the turn instead of opening the REPL.
 
 ```bash
 meka --skill download-videos "https://example.com/video"             # first turn, then REPL
@@ -169,7 +169,7 @@ Errors out with a clean message if the skill name is unknown.
 
 ### `--oneshot`
 
-Exit after the first turn finishes. Requires either the positional `[PROMPT]` or `--skill <NAME>` — without one of those, meka has nothing to do. Useful for scripts and CI invocations.
+Exit after the first turn finishes. Requires either the positional `[PROMPT]` or `--skill <NAME>`; without one of those, meka has nothing to do. Useful for scripts and CI invocations.
 
 ```bash
 meka --oneshot "summarize the last commit"
@@ -178,9 +178,9 @@ meka --oneshot --skill deploy "to staging"
 
 ### `--eager-load-tool <SERVER:TOOL>`
 
-Eager-load a specific MCP tool for this session, bypassing the `load_tool` round-trip. The tool's schema ships in the cacheable tools-array prefix from turn 1 instead of being deferred. Mirrors the per-server [`eager_load_tools`](./config-file.md#mcp-servers) config field — repeatable, raw tool names (the server-advertised form, not `mcp__<server>__<tool>`).
+Eager-load a specific MCP tool for this session, bypassing the `load_tool` round-trip. The tool's schema ships in the cacheable tools-array prefix from turn 1 instead of being deferred. Mirrors the per-server [`eager_load_tools`](./config-file.md#mcp-servers) config field: repeatable, raw tool names (the server-advertised form, not `mcp__<server>__<tool>`).
 
-Particularly useful for scripted runs that know up front which tools they'll need. The flag *appends to* whatever `eager_load_tools` lists in `config.toml` for that server — it doesn't replace existing entries. Unknown server names log a warning and are skipped.
+Particularly useful for scripted runs that know up front which tools they'll need. The flag *appends to* whatever `eager_load_tools` lists in `config.toml` for that server; it doesn't replace existing entries. Unknown server names log a warning and are skipped.
 
 ```bash
 meka --eager-load-tool notion:search --eager-load-tool github:create_issue \

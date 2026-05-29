@@ -15,13 +15,13 @@ Each level includes all tools from the levels below it. Write mode includes all 
 
 ## Default Permission
 
-The default permission is **read**. The default *enabled* set is `none / read / write` — **`ask` is opt-in**: enable it under `[permissions]` in your config if you want approval prompts.
+The default permission is **read**. The default *enabled* set is `none / read / write`. **`ask` is opt-in**: enable it under `[permissions]` in your config if you want approval prompts.
 
 You can change the start mode with:
 
 - CLI flag: `meka --permission write`
 - Environment variable: `export MEKA_PERMISSION=write`
-- Config file: `[permissions] default = "write"` — see [Config File](../configuration/config-file.md#permissions)
+- Config file: `[permissions] default = "write"`; see [Config File](../configuration/config-file.md#permissions)
 
 If `--permission` or `MEKA_PERMISSION` selects a mode that isn't in `[permissions].enabled`, meka logs a warning and starts in the configured default instead of refusing to launch.
 
@@ -68,7 +68,7 @@ When the agent attempts to use a tool, meka checks whether the current permissio
 
 ### Telling the agent the current level
 
-meka lists **every registered tool** in the system prompt with its required permission level inline — nothing is filtered out — and each user message carries a compact `[Permission context]` block:
+meka lists **every registered tool** in the system prompt with its required permission level inline (nothing is filtered out), and each user message carries a compact `[Permission context]` block:
 
 ```text
 <context>
@@ -79,7 +79,7 @@ Only read-only tools are executable.
 </context>
 ```
 
-That two-line block is the only permission-dependent content in the request. The system prompt and the tools-array schemas stay byte-identical across `/permission` toggles, so mid-session level changes don't invalidate the Claude prompt cache — the entire conversation stays warm.
+That two-line block is the only permission-dependent content in the request. The system prompt and the tools-array schemas stay byte-identical across `/permission` toggles, so mid-session level changes don't invalidate the Claude prompt cache; the entire conversation stays warm.
 
 ### MCP tool permissions
 
@@ -87,7 +87,7 @@ MCP tools are classified through a 5-step resolution chain: per-tool override �
 
 ### Built-in tool permissions
 
-Any built-in tool's required permission can be overridden from `config.toml` without editing code — see [`[tools]` — built-in tool filters](../configuration/config-file.md#tools--built-in-tool-filters). The same section documents how to allow-list or block-list specific built-ins (e.g. disabling `web_search` in a locked-down environment).
+Any built-in tool's required permission can be overridden from `config.toml` without editing code; see [`[tools]`: built-in tool filters](../configuration/config-file.md#tools-built-in-tool-filters). The same section documents how to allow-list or block-list specific built-ins (e.g. disabling `web_search` in a locked-down environment).
 
 ### Sub-agent permissions
 
@@ -101,7 +101,7 @@ Sub-agents spawned via `spawn_agent` inherit the parent's permission level. In w
 meka [r] > read the contents of main.rs
 ```
 
-The agent uses `read_file` and shows the contents. Shell commands also work in read mode, but run in a **read-only sandbox** -- the filesystem is physically write-protected for the child process:
+The agent uses `read_file` and shows the contents. Shell commands also work in read mode, but run in a **read-only sandbox**; the filesystem is physically write-protected for the child process:
 
 ```text
 meka [r] > list the files in this directory

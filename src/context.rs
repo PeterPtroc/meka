@@ -211,7 +211,7 @@ pub fn build_system_prompt(
     if sandboxed_shell {
         prompt.push_str(
             "- `read`: read-only tools (file reads, search, web fetch). `execute_command` \
-             runs with the filesystem mounted read-only — commands that write to disk fail.\n",
+             runs with the filesystem mounted read-only. Commands that write to disk fail.\n",
         );
     } else {
         prompt.push_str(
@@ -225,7 +225,7 @@ pub fn build_system_prompt(
     );
     prompt.push_str("- `write`: full tool access, no approval required.\n\n");
     prompt.push_str(
-        "The current level — and the set of tools it does NOT allow — is delivered in \
+        "The current level, and the set of tools it does NOT allow, is delivered in \
          the per-turn `[Permission context]` block of each user message. If the user \
          asks for an operation their current level blocks, name the required tool and \
          suggest they run `/permission <level>` (or Shift+Tab) to enable it. For \
@@ -342,8 +342,8 @@ pub fn build_system_prompt(
 /// Build the per-turn `[Permission context]` block. Names the current permission level plus a
 /// one-line statement of what tools can execute at that level. The static system-prompt catalogue
 /// already lists every tool's required level, so the per-turn block stays short and bounded
-/// regardless of how many tools are registered. Permission-dependent content lives here — NOT in
-/// the system prompt — so `/permission` toggles don't invalidate the cached prefix.
+/// regardless of how many tools are registered. Permission-dependent content lives here, NOT in
+/// the system prompt, so `/permission` toggles don't invalidate the cached prefix.
 pub fn build_permission_context(permission: Permission) -> String {
     let summary = match permission {
         Permission::None => "No tools are executable.",
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_omits_active_tool_descriptions() {
-        // Active tools' descriptions already live in the API tools array — the system prompt
+        // Active tools' descriptions already live in the API tools array. The system prompt
         // catalogue is now name + permission only, so the description string must not appear in the
         // `## Available Tools` section.
         let catalogue = sample_catalogue();
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt_load_tool_itself_is_active_not_deferred() {
-        // load_tool is the bootstrap meta-tool — listing it under `## Tool Discovery` would create
+        // load_tool is the bootstrap meta-tool. Listing it under `## Tool Discovery` would create
         // a chicken-and-egg problem, so it must always be in the active `## Available Tools`
         // section, never in the deferred catalogue.
         let catalogue: Vec<ToolCatalogueEntry> = vec![
@@ -702,8 +702,8 @@ mod tests {
 
     #[test]
     fn test_short_description_no_sentence_terminator_short() {
-        // A short description without an ASCII/CJK sentence terminator is the complete description
-        // — no ellipsis suffix, since the model is seeing the whole text already.
+        // A short description without an ASCII/CJK sentence terminator is the complete description,
+        // no ellipsis suffix, since the model is seeing the whole text already.
         let s = "no terminator at all here just words";
         assert_eq!(short_description(s), "no terminator at all here just words");
     }
@@ -794,7 +794,7 @@ mod tests {
         assert!(context.contains("[Permission context]"));
         assert!(context.contains("Current permission level: read"));
         assert!(context.contains("Only read-only tools are executable."));
-        // The per-turn block must NOT enumerate individual tools — that duplicates the static
+        // The per-turn block must NOT enumerate individual tools; that duplicates the static
         // system-prompt catalogue and balloons with MCP-tool count. Regression-guards the O(1) size
         // invariant.
         assert!(!context.contains("write_file"));
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_permission_context_size_bounded_regardless_of_catalogue() {
-        // Whatever the registered tool count, the block's token cost stays constant — this is the
+        // Whatever the registered tool count, the block's token cost stays constant; this is the
         // whole point of the trim.
         for level in [
             Permission::None,

@@ -1,10 +1,10 @@
-//! [`Conversation`] — append-only-by-default newtype for the agent's conversation.
+//! [`Conversation`]: append-only-by-default newtype for the agent's conversation.
 //!
 //! Built on an event log: each mutation pushes one or more [`Event`]s, and the materialized
 //! `&[Message]` view consumed by providers and the scanner is derived from those events. The three
 //! legitimate destructive operations ([`Conversation::pop_unsaved`],
 //! [`Conversation::replace_for_compaction`], [`Conversation::sanitize_orphans`]) remain explicit,
-//! named methods — the compiler refuses casual mutation.
+//! named methods; the compiler refuses casual mutation.
 //!
 //! On disk, events are stored row-per-event in the existing `messages` table (no schema migration);
 //! the encoding lives in `session.rs`'s `encode_event_for_db` / `decode_event_from_row` helpers,
@@ -60,7 +60,7 @@ impl Conversation {
         log
     }
 
-    /// Hydrate from a flat `Vec<Message>` — every entry becomes an `Event::Append`. Used by the
+    /// Hydrate from a flat `Vec<Message>`; every entry becomes an `Event::Append`. Used by the
     /// resume path until the persistence layer is fully event-aware.
     pub fn from_vec(entries: Vec<Message>) -> Self {
         let events = entries.into_iter().map(Event::Append).collect();
@@ -102,9 +102,9 @@ impl Conversation {
     }
 
     /// Text content of the most recent `Role::Assistant` message, or `None` when no assistant
-    /// message exists. Walks backward — necessary because a turn that ended via tool-use leaves a
-    /// `Role::User` tool-result trailer in the conversation, hiding the assistant's final text from
-    /// the plain [`Self::last`].
+    /// message exists. Walks backward, which is necessary because a turn that ended via tool-use
+    /// leaves a `Role::User` tool-result trailer in the conversation, hiding the assistant's
+    /// final text from the plain [`Self::last`].
     pub fn last_assistant_text(&self) -> Option<String> {
         self.materialized
             .iter()
@@ -137,7 +137,7 @@ impl Conversation {
     /// Replace the visible window with `summary` followed by `tail`. Used by `compact_session`:
     /// appends one [`Event::CompactBoundary`] (which tells the materializer to truncate the prior
     /// tail and push the summary), then appends each kept tail message as an [`Event::Append`]. The
-    /// events log itself is *only ever appended to* — pre-compaction events stay untouched in the
+    /// events log itself is *only ever appended to*; pre-compaction events stay untouched in the
     /// log and on disk.
     ///
     /// `loaded_tools_snapshot` is the active deferred-tool set captured from the conversation
@@ -160,7 +160,7 @@ impl Conversation {
             self.events.push(Event::Append(message));
         }
         self.rebuild_materialized();
-        // Make sure `summary` is referenced even if `tail` is empty — the boundary's summary alone
+        // Make sure `summary` is referenced even if `tail` is empty; the boundary's summary alone
         // is the visible head after the truncate. (Materialization handles this; the let-binding
         // above only exists to consume `summary`.)
         let _ = summary;
@@ -171,7 +171,7 @@ impl Conversation {
     /// Those events are fully superseded: a `CompactBoundary` truncates all materialized messages
     /// before it and replaces them with its summary, and [`extract_loaded_tool_names_from_events`]
     /// reads the boundary's `loaded_tools_snapshot` rather than the events preceding it. So the
-    /// materialized view and the recovered tool set are byte-identical before and after this call —
+    /// materialized view and the recovered tool set are byte-identical before and after this call;
     /// it only stops the in-memory log from growing unbounded across a long-lived,
     /// repeatedly-compacted session.
     ///
@@ -308,7 +308,7 @@ fn orphan_event_indices(events: &[Event]) -> Vec<usize> {
     orphan
 }
 
-/// Walk events and collect the names of tools loaded via successful `load_tool` calls — same
+/// Walk events and collect the names of tools loaded via successful `load_tool` calls. Same
 /// contract as [`crate::tools::extract_loaded_tool_names`] but events-aware so it can absorb
 /// [`Event::CompactBoundary::loaded_tools_snapshot`] when it crosses a boundary. Pending uses
 /// inside the summarized window are cleared at the boundary (the actual tool_use/tool_result rows
@@ -433,7 +433,7 @@ mod tests {
     fn test_last_assistant_text_walks_past_tool_results() {
         // Sub-agent turn shape after a tool-use round: assistant emits a tool_use, then the loop
         // appends the matching tool_result as a Role::User trailer. `last()` would return that
-        // trailer, not the assistant's text — the helper has to walk backward.
+        // trailer, not the assistant's text; the helper has to walk backward.
         let mut log = Conversation::new();
         log.append(Message::user("kick off"));
         log.append(Message::assistant_text("final assistant answer"));
@@ -509,7 +509,7 @@ mod tests {
         let mut log = Conversation::new();
         log.append(Message::user("hello"));
         log.append(assistant_with_tool_use("u1"));
-        // No matching tool_result follows — the assistant message is orphaned.
+        // No matching tool_result follows; the assistant message is orphaned.
 
         let dropped = log.sanitize_orphans();
         assert_eq!(dropped.len(), 1);
@@ -659,7 +659,7 @@ mod tests {
             "deferred tool must survive the prune"
         );
 
-        // The log now starts at the last boundary — nothing precedes it.
+        // The log now starts at the last boundary; nothing precedes it.
         assert!(matches!(
             log.events().first(),
             Some(Event::CompactBoundary { .. })
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_extract_loaded_tool_names_pending_use_wiped_at_boundary() {
-        // load_tool tool_use lives on one side of the boundary, its tool_result on the other — both
+        // load_tool tool_use lives on one side of the boundary, its tool_result on the other; both
         // vanish from the materialized view, so the scanner must NOT count the pending pair across
         // the boundary.
         let mut log = Conversation::new();
@@ -757,7 +757,7 @@ mod tests {
         log.append(Message::user("u1"));
         log.append(Message::assistant_text("a1"));
         log.replace_for_compaction(Message::user("[summary]"), Vec::new(), HashSet::new());
-        // Synthetic summary is a plain user message — sanitize must leave it.
+        // Synthetic summary is a plain user message; sanitize must leave it.
         log.sanitize_orphans();
         assert_eq!(log.len(), 1);
         assert_eq!(log.as_slice()[0].text_content(), "[summary]");

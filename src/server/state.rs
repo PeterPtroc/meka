@@ -1,5 +1,5 @@
 //! Process-wide shared state for `meka serve`. Owns [`SharedDeps`] (provider, MCP, session DB,
-//! skill cache — identical to the ACP path), the auth registry, and the per-session map. Held
+//! skill cache; identical to the ACP path), the auth registry, and the per-session map. Held
 //! behind an `Arc` and cloned into every axum handler via the `State` extractor.
 
 use std::{
@@ -50,7 +50,7 @@ pub struct ServerState {
 pub struct SessionEntry {
     pub session_uuid: Uuid,
     /// Fingerprint of the bearer token that created this session. Used for per-token
-    /// idempotency cache keying and observability. Not the raw token — the SHA-256 fingerprint
+    /// idempotency cache keying and observability. Not the raw token: the SHA-256 fingerprint
     /// already on [`crate::server::auth::Principal::token_id`], safe to log.
     ///
     /// Persisted to the `sessions` row at create time and restored on re-attach. `None` only
@@ -88,7 +88,7 @@ pub struct SessionEntry {
     pub capabilities: super::http_frontend::SessionCapabilities,
     /// The session's `HttpFrontend`, kept as a typed `Arc` so the turn handler can call
     /// `drain()` after `run_turn` returns. The same `Arc` (cast to `Arc<dyn Frontend>`) is
-    /// also held by `runtime.agent` — both point at the same instance.
+    /// also held by `runtime.agent`; both point at the same instance.
     pub frontend: Arc<HttpFrontend>,
     /// In-flight turn's cancellation token. Written by the turn handler at the start of every
     /// turn, read by `POST /cancel`. The handler cancels this token to interrupt the running
@@ -177,7 +177,7 @@ pub struct TurnGuard {
 
 impl TurnGuard {
     /// Acquire a guard, enforcing the optional process-wide cap. On overflow, returns a
-    /// `ProblemDetail` carrying the suggested `Retry-After` value (set to 1 second — the
+    /// `ProblemDetail` carrying the suggested `Retry-After` value (set to 1 second; the
     /// in-flight tracker decreases as soon as any other turn finishes).
     // `ProblemDetail` is ~144 bytes; for a path that fires at most once per request the
     // extra stack space is fine and boxing would just shuffle the allocation to the heap.

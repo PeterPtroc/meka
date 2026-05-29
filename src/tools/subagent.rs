@@ -27,7 +27,7 @@ pub struct ToolBuilderParams {
     pub sandbox_capability: crate::sandbox::SandboxCapability,
     pub sandbox_backend: crate::config::SandboxBackend,
     pub backend_probe: crate::sandbox::BackendProbe,
-    /// Parent's `[tools]` filter — sub-agents inherit it.
+    /// Parent's `[tools]` filter; sub-agents inherit it.
     pub builtin_filter: BuiltinToolFilter,
     /// Shared skill cache. Sub-agents read from the same cache as the parent so their system
     /// prompts stay consistent and pick up the same auto-reloads.
@@ -51,7 +51,7 @@ pub struct ToolBuilderParams {
     /// `SessionManager::delete_session` then sweeps sub-agent rows when the parent is deleted.
     pub parent_shared_session_id: Arc<RwLock<Option<Uuid>>>,
     /// Parent's session-level counters. Shared so sub-agent token usage rolls up into the same
-    /// `/status` totals — operators see the full cost of a session including everything its
+    /// `/status` totals; operators see the full cost of a session including everything its
     /// sub-agents consumed.
     pub session_stats: Arc<crate::stats::SessionStats>,
     /// Parent's options, used to derive the sub-agent's inherited fields (`sandboxed_shell`,
@@ -84,7 +84,7 @@ impl Tool for SpawnAgentTool {
                           The sub-agent inherits the parent's permission level, has its own \
                           private todo list and scratchpad, and returns a single text report. \
                           Multiple spawn_agent calls in one turn run in parallel. Pass `skill` \
-                          to run an installed skill in the sub-agent — the skill's instructions \
+                          to run an installed skill in the sub-agent. The skill's instructions \
                           become the sub-agent's task; supply at least one of `prompt` or \
                           `skill`. Use `inherit_scratchpad` to grant read-only access to \
                           specific parent scratchpad entries by name so the sub-agent can \
@@ -142,8 +142,9 @@ impl Tool for SpawnAgentTool {
         input: serde_json::Value,
         cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
-        // Both `prompt` and `skill` are optional, but at least one must be present — mirrors the
-        // CLI's `--oneshot` guard in `src/main.rs`. An empty/whitespace `prompt` counts as absent.
+        // Both `prompt` and `skill` are optional, but at least one must be present. This mirrors
+        // the CLI's `--oneshot` guard in `src/main.rs`. An empty/whitespace `prompt` counts
+        // as absent.
         let prompt = input["prompt"]
             .as_str()
             .map(str::trim)
@@ -205,7 +206,7 @@ impl Tool for SpawnAgentTool {
 
         // Resolve parent session ID. By the time a tool runs, `Agent::run_turn` has already written
         // `shared_session_id` before dispatching tools. A missing value here means an agent ran a
-        // tool without first creating its session — an internal invariant break worth surfacing
+        // tool without first creating its session, an internal invariant break worth surfacing
         // rather than silently producing an orphan.
         let parent_sid = self
             .tool_builder_params
@@ -303,11 +304,11 @@ impl Tool for SpawnAgentTool {
 
         // Inherit the parent's MCP toolset. Skipped silently when no MCP manager is attached (no
         // servers configured) or when the parent's servers are still Pending / Failed at spawn
-        // time. `install_tools_on` is non-spawning and idempotent — see
+        // time. `install_tools_on` is non-spawning and idempotent. See
         // `src/mcp.rs:install_tools_on`.
         if let Some(weak) = self.tool_builder_params.mcp_manager.as_ref() {
             // Upgrade only if the manager is still alive. If the parent's `meka acp` process is
-            // mid-shutdown, the Arc may already be gone — skip silently.
+            // mid-shutdown, the Arc may already be gone. Skip silently.
             if let Some(manager) = weak.upgrade() {
                 manager.install_tools_on(&sub_registry).await;
             }
@@ -384,7 +385,7 @@ impl Tool for SpawnAgentTool {
 /// Compose the sub-agent's first-turn task from an optional parent directive and an optional
 /// rendered skill body. Mirrors the CLI's `--skill` ordering (`build_skill_prompt` in
 /// `src/main.rs`): the parent directive comes first, the skill body second. Returns `None` only
-/// when both inputs are absent — the caller treats that as an error.
+/// when both inputs are absent; the caller treats that as an error.
 fn compose_subagent_task(prompt: Option<&str>, skill_body: Option<&str>) -> Option<String> {
     match (prompt, skill_body) {
         (Some(prompt), Some(body)) => Some(format!("{}\n\n{}", prompt, body)),
@@ -404,9 +405,9 @@ fn build_subagent_system_prompt(
     prompt.push_str(
         "You are a research sub-agent. Complete the assigned task using the \
          available tools, then produce a concise final report summarizing your \
-         findings. Do not ask follow-up questions — work with what you have. \
+         findings. Do not ask follow-up questions. Work with what you have. \
          For multi-step work, use `todo_write` to plan and `todo_read` to \
-         check progress — your todo list is private to this sub-agent.\n\n",
+         check progress. Your todo list is private to this sub-agent.\n\n",
     );
 
     prompt.push_str(&format!("## Permission Level: {}\n\n", permission));
@@ -429,7 +430,7 @@ fn build_subagent_system_prompt(
         prompt.push_str(
             "Your parent agent has granted you read-only access to the following \
              scratchpad entries from its own session. Use `scratchpad_read` with \
-             the exact names below to load them on demand — do not assume their \
+             the exact names below to load them on demand. Do not assume their \
              contents without reading. `scratchpad_write`, `_edit`, and `_delete` \
              against these names will return an error; if you need to derive new \
              state, save it under a different name (e.g. `<name>_local`).\n\n",
@@ -540,7 +541,7 @@ mod tests {
 
     // (Permission gating and "Unknown tool" fold-into-ToolOutput semantics that used to live in
     // `run_subagent_tool` are now exercised by the shared `Agent::run_turn` path's tool-dispatch
-    // logic — covered by `src/agent.rs` and `src/tools.rs` test suites.)
+    // logic, covered by `src/agent.rs` and `src/tools.rs` test suites.)
 
     #[tokio::test]
     async fn test_subagent_registry_has_independent_todo_list() {

@@ -1,7 +1,7 @@
 //! Conversation history: `GET /v1/sessions/{id}/messages`.
 //!
 //! Returns the materialized `Conversation` view (post-compaction-aware) for clients that want
-//! to read past turns. Pagination via `?limit=` and `?offset=` is intentionally simple — the
+//! to read past turns. Pagination via `?limit=` and `?offset=` is intentionally simple; the
 //! source of truth is the SQLite event log, which holds the full history.
 
 use axum::{
@@ -46,7 +46,7 @@ pub struct MessageView {
     pub role: String,
     pub content: Vec<ContentBlockView>,
     /// RFC 3339 timestamp at which this message was persisted. `None` for messages produced by
-    /// `assemble_response` in the same turn (no DB round-trip yet) — once the conversation has
+    /// `assemble_response` in the same turn (no DB round-trip yet). Once the conversation has
     /// been read back via `GET /v1/sessions/{id}/messages`, every row has a `created_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
@@ -156,7 +156,7 @@ pub async fn list_messages(
     }
     // Materialize messages while keeping per-message timestamps aligned. Mirrors
     // `Conversation::rebuild_materialized` but with a parallel timestamp
-    // vec — Event::Append pushes (timestamp, message); Event::CompactBoundary truncates the
+    // vec: Event::Append pushes (timestamp, message); Event::CompactBoundary truncates the
     // tail and pushes (boundary_timestamp, summary). Result: `messages.len() == timestamps.len()`.
     let (materialized, timestamps) = materialize_with_timestamps(&events_with_ts);
     let total = materialized.len();

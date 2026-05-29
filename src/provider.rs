@@ -2,7 +2,7 @@
 //! and the [`ProviderBuilder`] that returns a concrete Claude or OpenAI-compatible implementation.
 
 mod claude;
-/// Scripted provider used by the ACP integration test. Available in debug builds only — release
+/// Scripted provider used by the ACP integration test. Available in debug builds only; release
 /// builds don't pay the binary-size cost. Activated by the `MEKA_ACP_MOCK_PROVIDER` env var inside
 /// `acp::run_acp`; never reachable from production paths otherwise.
 #[cfg(debug_assertions)]
@@ -40,7 +40,7 @@ pub enum AuthCredential {
         refresh_token: Option<String>,
         expires_at: Option<i64>,
         /// Provider-flavoured identity carried alongside the bearer token. Currently only
-        /// `openai-codex` populates this — the `chatgpt_account_id` extracted from the id_token
+        /// `openai-codex` populates this, the `chatgpt_account_id` extracted from the id_token
         /// JWT, sent on every request as `ChatGPT-Account-ID`. Claude OAuth leaves it `None`.
         account_id: Option<String>,
     },
@@ -248,7 +248,7 @@ pub enum StreamEvent {
     /// User-visible advisory from the provider layer (e.g. "redacted N old images to fit the
     /// 32 MiB request limit"). The agent translates this into
     /// [`crate::frontend::FrontendEvent::Notice`] so every frontend renders it consistently.
-    /// Distinct from `Error` — the request itself is proceeding successfully; the notice
+    /// Distinct from `Error`: the request itself is proceeding successfully; the notice
     /// describes a side-effect the user should know about.
     Notice(Notice),
     Error(String),
@@ -264,7 +264,7 @@ pub enum NoticeLevel {
 }
 
 /// User-visible advisory surfaced by a provider during a request. Carries no structured data
-/// beyond the level and the message — frontends format it themselves.
+/// beyond the level and the message; frontends format it themselves.
 #[derive(Debug, Clone)]
 pub struct Notice {
     pub level: NoticeLevel,
@@ -313,13 +313,13 @@ pub enum StopReason {
     MaxTokens,
     /// The model declined to comply with the request. Claude's API surfaces this as `stop_reason:
     /// "refusal"`; OpenAI's responses API has the equivalent. The string carries the model's
-    /// refusal text when the provider includes one — empty otherwise.
+    /// refusal text when the provider includes one, empty otherwise.
     Refusal(String),
     Unknown(String),
 }
 
 /// Abstraction over an LLM provider (Claude API/OAuth, OpenAI, etc.). Implementors are held behind
-/// `Arc<dyn Provider>` and shared across concurrent tool dispatch — calls must be safe to make in
+/// `Arc<dyn Provider>` and shared across concurrent tool dispatch; calls must be safe to make in
 /// parallel from multiple sub-agents in one turn.
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -336,7 +336,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<(Message, StopReason, TokenUsage, Vec<Notice>)>;
 
     /// Streaming variant. The provider pushes `StreamEvent`s onto `event_sender` as they arrive.
-    /// Cancellation is observed via `cancellation` — implementors must check the token and abort
+    /// Cancellation is observed via `cancellation`; implementors must check the token and abort
     /// in-flight HTTP work when it fires.
     async fn stream(
         &self,
@@ -351,7 +351,7 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
 
     /// Override thinking for the next API call. `Some(false)` disables, `Some(true)` enables,
-    /// `None` restores the default. Default impl is a silent no-op — providers that don't support
+    /// `None` restores the default. Default impl is a silent no-op. Providers that don't support
     /// thinking should leave it that way; providers that do must override.
     fn set_thinking_override(&self, _enabled: Option<bool>) {}
 }
@@ -421,7 +421,7 @@ async fn finalize_tool_call_accumulators(
 /// Constructs a concrete [`Provider`] (Claude API, Claude OAuth, or OpenAI-compatible) from a bag
 /// of provider-specific settings. Each setter documents which provider(s) consume it; unused
 /// settings are silently ignored by providers that don't need them. The only required inputs are
-/// the provider name, the credential, and the model — everything else has a sensible default.
+/// the provider name, the credential, and the model; everything else has a sensible default.
 pub struct ProviderBuilder {
     provider_name: String,
     credential: AuthCredential,

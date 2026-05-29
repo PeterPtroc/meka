@@ -69,7 +69,7 @@ tokio::task_local! {
     /// Per-task override for the cwd reported in MCP `roots/list`. When an agent dispatches an MCP
     /// tool from a multi-session ACP process, the dispatch wraps the tool's `execute` future in
     /// [`with_session_cwd`] so any `roots/list` callback fired *during* the tool call sees the
-    /// calling session's cwd — rather than the process default the MCP context was seeded with at
+    /// calling session's cwd rather than the process default the MCP context was seeded with at
     /// startup.
     ///
     /// `roots/list` queries outside a tool call (e.g. the connection-establishment handshake before
@@ -84,7 +84,7 @@ tokio::task_local! {
     /// from those callbacks directly. Instead, the [`crate::mcp::handler::McpToolAdapter`]
     /// snapshots [`current_session_frontend`] at its call site and stashes the value on the
     /// per-call progress-registry entry; the rmcp dispatch path then looks it up by token. So
-    /// this task-local exists to source the frontend at the agent-driven call site only — the
+    /// this task-local exists to source the frontend at the agent-driven call site only; the
     /// progress registry is what carries it across the rmcp task boundary.
     ///
     /// Outside any `with_session_frontend` scope (connection-time handshakes, REPL startup probes,
@@ -113,7 +113,7 @@ where
 }
 
 /// Read the per-session frontend currently in scope, if any. Returns `None` outside a
-/// [`with_session_frontend`] block — callers must treat that as "no UI available" rather than
+/// [`with_session_frontend`] block; callers must treat that as "no UI available" rather than
 /// hitting a panic, because MCP callbacks can legitimately fire before any session exists
 /// (connection-time handshakes) or under code paths that intentionally aren't session-scoped
 /// (e.g. the `sampling/createMessage` handler in this module).
@@ -140,7 +140,7 @@ pub struct McpClientManager {
     /// Global fallback permission from `[mcp].default_permission`. Consulted by
     /// `resolve_tool_permission` at tool-registration time when neither the server nor the user
     /// has configured a more specific permission and the server didn't advertise a
-    /// `readOnlyHint`. `None` means "no user default" — resolution falls through to the
+    /// `readOnlyHint`. `None` means "no user default": resolution falls through to the
     /// hardcoded strict `Write`.
     mcp_default_permission: Option<Permission>,
     /// Flipped to `true` by the background connector once every enabled entry has reached a
@@ -268,7 +268,7 @@ impl ServerEntry {
     /// returns immediately.
     ///
     /// Schedule: 1s, 2s, 4s, 8s, 16s, capped at 30s, max 5 attempts. Only remote (HTTP) transports
-    /// go through backoff — a dead stdio child has to be respawned and retry-after-sleep doesn't
+    /// go through backoff; a dead stdio child has to be respawned and retry-after-sleep doesn't
     /// help.
     ///
     /// The connect future itself can be `!Send` for OAuth-authenticated servers (rmcp 1.5 holds a
@@ -392,7 +392,7 @@ fn resolve_concurrency_env(env_var: &str, default: usize) -> usize {
 impl McpClientManager {
     /// Validate configs and build a manager with every non-empty entry
     /// in `Disabled` or `Pending` state. Does NOT spawn any network /
-    /// process work — that happens in [`Self::start_connector`].
+    /// process work; that happens in [`Self::start_connector`].
     /// Callers typically:
     /// 1. `let manager = McpClientManager::prepare(...).await?;`
     /// 2. Register the manager on the `McpClientContext`.
@@ -534,7 +534,7 @@ impl McpClientManager {
     /// attached list *before* backfilling from the snapshot so any concurrent
     /// [`Self::update_server_tools`] either fans out to the new registry (push happened first) or
     /// has its result observed by the subsequent backfill (push happened second). The opposite
-    /// ordering — read snapshot, then push — has a window where an update can land between the
+    /// ordering (read snapshot, then push) has a window where an update can land between the
     /// snapshot read and the push, with the registry missing it forever.
     ///
     /// `replace_server_tools` is idempotent, so the double-write when both paths fire is harmless.
@@ -562,8 +562,8 @@ impl McpClientManager {
     }
 
     /// Mark a batch of tool names as deferred across every attached registry. Called after
-    /// [`Self::update_server_tools`] when some of the newly-registered adapters are lazy-load only
-    /// — the agent's tools-array build then skips them until they're explicitly requested.
+    /// [`Self::update_server_tools`] when some of the newly-registered adapters are lazy-load only;
+    /// the agent's tools-array build then skips them until they're explicitly requested.
     pub async fn mark_deferred_on_attached(&self, tool_names: &[String]) {
         let registries = self.attached_registries.read().await;
         for registry in registries.iter() {
@@ -579,7 +579,7 @@ impl McpClientManager {
     ///
     /// The connector writes tool discoveries through [`Self::update_server_tools`], which fans out
     /// to every registry attached via [`Self::attach_registry`]. The caller does not pass a
-    /// specific registry — attach yours first, then start the connector.
+    /// specific registry: attach yours first, then start the connector.
     pub fn start_connector(self: &Arc<Self>, runtime: McpRuntimeConfig) {
         let Some(pending) = self
             .pending_entries
@@ -688,7 +688,7 @@ impl McpClientManager {
                 continue;
             }
 
-            // Sanitise the tool's advertised name defensively — rare in the wild, but a server
+            // Sanitise the tool's advertised name defensively. It is rare in the wild, but a server
             // returning `my.tool` or anything with Unicode would cause the provider to reject the
             // schema.
             let sanitised_tool_name = crate::mcp::sanitize::normalize_server_name(&raw_tool_name);
@@ -759,10 +759,10 @@ impl McpClientManager {
     }
 
     /// Install MCP tools onto a freshly-built sub-agent registry. Mirrors the startup wiring at
-    /// `main.rs:create_agent_from_config` minus the `start_connector` spawn — only
+    /// `main.rs:create_agent_from_config` minus the `start_connector` spawn: only
     /// already-`Connected` servers contribute adapters; Pending / Failed servers are skipped
     /// silently and their tools simply don't appear in the sub-agent's catalogue. The resource /
-    /// prompt meta-tools are registered unconditionally — they delegate through
+    /// prompt meta-tools are registered unconditionally; they delegate through
     /// [`ServerEntry::require_connected`] themselves and tolerate non-connected servers until
     /// invoked.
     ///
@@ -779,7 +779,7 @@ impl McpClientManager {
             let adapters = match self.discover_tools_for_server(&name).await {
                 Ok(adapters) => adapters,
                 Err(error) => {
-                    // Pending / Failed servers fall through `require_connected` as Err — that's
+                    // Pending / Failed servers fall through `require_connected` as Err; that's
                     // normal, not worth a warn. The sub-agent just won't see this server's tools
                     // until it next runs (and the parent's connector finishes the handshake).
                     tracing::debug!(
@@ -811,7 +811,7 @@ impl McpClientManager {
         }
     }
 
-    /// Connect to the named server and list EVERY advertised tool — including ones currently
+    /// Connect to the named server and list EVERY advertised tool, including ones currently
     /// filtered out by `allowed_tools` / `disabled_tools` so users editing those lists can see what
     /// names are available. Permission is resolved through the normal 5-step chain with the winning
     /// step recorded on each entry.
@@ -948,7 +948,7 @@ impl McpClientManager {
 
 /// Decide whether a tool advertised by a server should be registered. Applies `allowed_tools`
 /// (restrict-in, when set and non-empty) then `disabled_tools` (always-remove). Both fields can
-/// coexist — the allow-list acts as a restriction, and the block-list subtracts from whatever
+/// coexist: the allow-list acts as a restriction, and the block-list subtracts from whatever
 /// remains. A tool passes iff it survives both checks.
 pub(crate) fn tool_is_allowed(server_config: &McpServerConfig, tool_raw_name: &str) -> bool {
     if let Some(allow) = server_config.allowed_tools.as_deref()
@@ -978,7 +978,7 @@ pub(crate) fn tool_should_eager_load(server_config: &McpServerConfig, tool_raw_n
 
 /// Emit a `warn!` once per entry in `allowed_tools` / `disabled_tools` / `eager_load_tools` /
 /// `tool_permissions` that doesn't match anything the server currently advertises. Users get a
-/// visible heads-up without failing the connect — tool lists can change between server releases,
+/// visible heads-up without failing the connect. Tool lists can change between server releases,
 /// and forcing a hard error on every rename would be hostile. Also warns on the disabled∩eager-load
 /// overlap, which is meaningless (disabled tools aren't registered, so eager-loading them is a
 /// no-op).
@@ -1045,11 +1045,11 @@ pub(crate) fn warn_on_stale_tool_config(
 /// Resolve the required permission for a single MCP tool. Applies the
 /// layered policy documented in `docs/book/src/configuration/config-file.md`:
 ///
-/// 1. `server.tool_permissions[tool]` — per-tool user override.
-/// 2. `server.permission` — server-level user override.
+/// 1. `server.tool_permissions[tool]`: per-tool user override.
+/// 2. `server.permission`: server-level user override.
 /// 3. `tool.annotations.readOnlyHint` advertised by the server: `true` → Read, `false` → Write.
-/// 4. `mcp.default_permission` — global fallback when no hint exists.
-/// 5. Hardcoded `Write` — ultimate strict fallback.
+/// 4. `mcp.default_permission`: global fallback when no hint exists.
+/// 5. Hardcoded `Write`: ultimate strict fallback.
 ///
 /// User config at steps 1/2 always beats the server's hints. Hints beat the global fallback so a
 /// `readOnlyHint = false` destructive tool isn't silently promoted to Read just because the user
@@ -1102,7 +1102,7 @@ impl PermissionSource {
 /// [`PermissionSource::ReadOnlyHint`] already signals when the hint drove the decision; downstream
 /// renderers that want the raw value can re-query.
 pub struct AdvertisedTool {
-    /// Raw name as advertised by the server — use this value in `allowed_tools` / `disabled_tools`
+    /// Raw name as advertised by the server. Use this value in `allowed_tools` / `disabled_tools`
     /// / `tool_permissions` config.
     pub raw_name: String,
     /// Sanitised + truncated description (same pipeline as registered tools).
@@ -1111,7 +1111,7 @@ pub struct AdvertisedTool {
     pub resolved_permission: Permission,
     /// Which step of the chain won.
     pub permission_source: PermissionSource,
-    /// `false` if currently filtered out by `allowed_tools` / `disabled_tools` — i.e. the agent
+    /// `false` if currently filtered out by `allowed_tools` / `disabled_tools`, i.e. the agent
     /// would never see this tool.
     pub allowed: bool,
 }
@@ -1176,7 +1176,7 @@ fn resolve_tool_permission_with_source(
 
 /// Shared context threaded into every [`handler::MekaClientHandler`] so notification callbacks and
 /// server-to-client requests (sampling, list_roots, elicitation) can reach the rest of the agent.
-/// All slots are optional because the handler is constructed before the agent/provider exist — they
+/// All slots are optional because the handler is constructed before the agent/provider exist; they
 /// are filled in post-construction by `main.rs` using the `set_*` helpers.
 #[derive(Default)]
 pub struct McpClientContext {
@@ -1185,7 +1185,7 @@ pub struct McpClientContext {
     provider: OnceLock<Arc<dyn Provider>>,
     /// Weak reference to the MCP manager so the notification callback can rediscover tools without
     /// creating an Arc cycle through the handler. Tool registry updates flow through the manager's
-    /// attached registries — no per-context registry slot is needed.
+    /// attached registries; no per-context registry slot is needed.
     manager: OnceLock<Weak<McpClientManager>>,
     /// Per-session working directory shared with the agent. Read by the `roots/list` handler so
     /// the path reported to MCP servers tracks `/cd` rather than the process cwd at startup.
@@ -1572,7 +1572,7 @@ mod tests {
 
     #[test]
     fn tool_is_allowed_empty_allowlist_means_all() {
-        // An empty `allowed_tools` array is treated as "unset" — i.e. no restriction. A totally
+        // An empty `allowed_tools` array is treated as "unset", i.e. no restriction. A totally
         // absent field behaves the same way.
         let mut server = bare_server_config("s");
         server.allowed_tools = Some(Vec::new());
@@ -1653,7 +1653,7 @@ mod tests {
     #[test]
     fn tool_should_eager_load_uses_raw_not_namespaced_name() {
         // The check is against the server-advertised raw name; the namespaced `mcp__notion__search`
-        // form must NOT match an entry of `"search"` — that would create a footgun where users
+        // form must NOT match an entry of `"search"`; that would create a footgun where users
         // could accidentally over-match across servers.
         let mut server = bare_server_config("notion");
         server.eager_load_tools = Some(vec!["search".into()]);
@@ -1889,9 +1889,9 @@ mod tests {
     }
 
     /// Sub-agent registry inherits the parent's MCP resource / prompt meta-tools, even when no
-    /// server is connected yet. The per-server adapters only show up for `Connected` servers —
-    /// covered separately by manual verification since spinning up a real stdio MCP server here is
-    /// heavy.
+    /// server is connected yet. The per-server adapters only show up for `Connected` servers; that
+    /// case is covered separately by manual verification since spinning up a real stdio MCP server
+    /// here is heavy.
     #[tokio::test]
     async fn install_tools_on_registers_resource_meta_tools() {
         let mut config = bare_server_config("subagent-fixture");
@@ -2002,7 +2002,7 @@ mod tests {
         assert_eq!(
             observed_b,
             std::path::PathBuf::from("/tmp/b"),
-            "task B must see its own cwd — not A's, not the default"
+            "task B must see its own cwd, not A's, not the default"
         );
 
         // Outside any `with_session_cwd` scope, the fallback path must report the process default.
@@ -2025,7 +2025,7 @@ mod tests {
             tools::{Tool, ToolOutput},
         };
 
-        // Minimal fixture so each server publishes a distinctively- named tool — empty Vec to
+        // Minimal fixture so each server publishes a distinctively-named tool. An empty Vec to
         // `replace_server_tools` is a no-op and wouldn't actually exercise the propagation path.
         struct FixtureTool {
             name: String,
@@ -2053,7 +2053,7 @@ mod tests {
             }
         }
 
-        // Empty config — we don't need real servers to exercise the snapshot/registry plumbing,
+        // Empty config: we don't need real servers to exercise the snapshot/registry plumbing,
         // just the manager methods.
         let context = McpClientContext::new();
         let manager = McpClientManager::prepare(&[], None, None, context)
@@ -2113,7 +2113,7 @@ mod tests {
                 let tool_name = format!("mcp__{}__ping", server);
                 assert!(
                     registry.get(&tool_name).is_some(),
-                    "registry missing '{}' after concurrent attach/update — race regressed",
+                    "registry missing '{}' after concurrent attach/update: race regressed",
                     tool_name,
                 );
             }

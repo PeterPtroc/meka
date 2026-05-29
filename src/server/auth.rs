@@ -3,7 +3,7 @@
 //! (so a near-miss can't be distinguished from an early mismatch via timing), and attaches the
 //! matched principal to the request extensions for downstream handlers to consult.
 //!
-//! No tenants — all configured tokens share the same session namespace. Scopes (`sessions:r`,
+//! No tenants: all configured tokens share the same session namespace. Scopes (`sessions:r`,
 //! `sessions:w`, `skills:r`, `mcp:r`) gate which endpoints a token can hit. See the HTTP API docs
 //! for the full scope catalogue.
 
@@ -23,7 +23,7 @@ use crate::config::ResolvedServeToken;
 /// Authenticated principal, attached as a request extension by [`bearer_auth`].
 #[derive(Debug, Clone)]
 pub struct Principal {
-    /// Stable per-token identifier — the first 8 bytes of a SHA-256 of the token, hex-encoded.
+    /// Stable per-token identifier, the first 8 bytes of a SHA-256 of the token, hex-encoded.
     /// Used as the per-token key in the idempotency cache and structured logs (never the raw
     /// token, which we don't want appearing in observability output).
     pub token_id: String,
@@ -52,7 +52,7 @@ pub struct AuthRegistry {
     entries: Arc<[AuthEntry]>,
 }
 
-// Manual `Debug` so the raw token strings never reach logs — only the count and the non-secret
+// Manual `Debug` so the raw token strings never reach logs: only the count and the non-secret
 // fingerprints are printed, mirroring `ResolvedServeToken`'s redacting `Debug`.
 impl std::fmt::Debug for AuthRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -113,7 +113,7 @@ impl AuthRegistry {
 }
 
 /// Stable, non-reversible per-token identifier for logs and per-token cache keys. SHA-256
-/// truncated to 8 bytes (16 hex chars) — enough collision resistance for log correlation, never
+/// truncated to 8 bytes (16 hex chars), enough collision resistance for log correlation, never
 /// long enough to reconstruct the token. `pub(crate)` so other modules (startup logging,
 /// idempotency cache keying) share one source of truth for the fingerprint format.
 pub(crate) fn token_fingerprint(token: &str) -> String {
@@ -128,7 +128,7 @@ pub(crate) fn token_fingerprint(token: &str) -> String {
 
 /// axum middleware: extracts the bearer token, looks it up in the registry, and attaches the
 /// matched [`Principal`] to the request via `Extensions`. Routes that want to gate on a scope
-/// extract the principal and call [`Principal::has_scope`] (or — preferred — use a small
+/// extract the principal and call [`Principal::has_scope`] (or, preferred, use a small
 /// extractor helper that does both in one step).
 pub async fn bearer_auth(
     State(registry): State<AuthRegistry>,
@@ -224,7 +224,7 @@ mod tests {
         let principal = registry.lookup("sk_test_a").expect("match");
         assert!(principal.has_scope("sessions:r"));
         assert!(principal.has_scope("sessions:w"));
-        // Token_id is the fingerprint, not the raw token — never log the raw value.
+        // Token_id is the fingerprint, not the raw token. Never log the raw value.
         assert_ne!(principal.token_id, "sk_test_a");
         assert_eq!(principal.token_id.len(), 16);
     }
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn lookup_rejects_prefix_attack() {
         // Constant-time compare must reject a presented token that's a prefix of a configured
-        // one (and vice versa) — the length-mismatch branch in `lookup` handles this.
+        // one (and vice versa); the length-mismatch branch in `lookup` handles this.
         let registry = AuthRegistry::new(vec![entry("sk_test_secret", &["sessions:r"])]);
         assert!(registry.lookup("sk_test_").is_none());
         assert!(registry.lookup("sk_test_secrets").is_none());

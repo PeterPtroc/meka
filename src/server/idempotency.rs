@@ -1,6 +1,6 @@
 //! Stripe-style `Idempotency-Key` cache for blocking `POST /turn` responses.
 //!
-//! Key scope: `(token_id, key)` — tokens get independent dedup namespaces. Body mismatch on
+//! Key scope: `(token_id, key)`. Tokens get independent dedup namespaces. Body mismatch on
 //! replay returns 409. Entries expire after 24 h and are pruned in the background.
 //!
 //! Concurrency: a per-key slot state machine (`Pending` → `Completed`) ensures only one
@@ -67,16 +67,16 @@ impl Slot {
 #[derive(Clone)]
 pub struct IdempotencyCache {
     inner: Arc<RwLock<HashMap<(String, String), Slot>>>,
-    /// TTL for `Cached` entries — Stripe's documented 24h.
+    /// TTL for `Cached` entries, Stripe's documented 24h.
     ttl: Duration,
-    /// TTL for `Pending` entries — much shorter. If a handler holds a ticket longer than this
+    /// TTL for `Pending` entries, much shorter. If a handler holds a ticket longer than this
     /// (typically because it crashed or was abort()ed in a way that bypassed Drop), the
     /// pruner sweeps the entry so a retry can proceed. Longer than the longest reasonable
     /// turn duration to avoid premature eviction on slow legitimate turns.
     pending_ttl: Duration,
     /// Soft cap on the number of cached entries per `token_id`. When a token's entry count
     /// reaches the cap, the oldest `Cached` entry is evicted to make room for the new
-    /// `Pending`. `Pending` entries are never evicted mid-flight — they're a contract with
+    /// `Pending`. `Pending` entries are never evicted mid-flight: they're a contract with
     /// the in-flight ticket holder.
     ///
     /// Bounds the DoS surface from a malicious client sending many unique keys: the worst
@@ -91,7 +91,7 @@ impl IdempotencyCache {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             ttl,
-            // 10 minutes — longer than any provider's max turn time, short enough that an
+            // 10 minutes, longer than any provider's max turn time, short enough that an
             // orphaned `Pending` doesn't block retries for hours.
             pending_ttl: Duration::from_secs(10 * 60),
             // 1000 entries per token covers any realistic retry pattern (Stripe-style clients
@@ -100,7 +100,7 @@ impl IdempotencyCache {
         }
     }
 
-    /// Standard 24h TTL — matches Stripe's documented guarantee for completed entries.
+    /// Standard 24h TTL. Matches Stripe's documented guarantee for completed entries.
     pub fn standard() -> Self {
         Self::new(Duration::from_secs(24 * 60 * 60))
     }
@@ -109,13 +109,13 @@ impl IdempotencyCache {
     /// inserting a `Pending` marker. The returned `LookupOutcome` reflects what the caller
     /// should do:
     ///
-    /// - `Hit(envelope)` — a previous request with the same key + same body completed; replay.
-    /// - `Conflict` — a previous request with the same key but a different body completed (or is
+    /// - `Hit(envelope)`: a previous request with the same key + same body completed; replay.
+    /// - `Conflict`: a previous request with the same key but a different body completed (or is
     ///   pending). Return 409 `idempotency-conflict`.
-    /// - `InFlight` — another request with the same key + same body is currently running. Return
-    ///   409 `idempotency-conflict` (with a different `detail` message). Clients can retry after a
+    /// - `InFlight`: another request with the same key + same body is currently running. Return 409
+    ///   `idempotency-conflict` (with a different `detail` message). Clients can retry after a
     ///   brief delay.
-    /// - `Miss(ticket)` — no prior request; the caller now owns the slot via the ticket. Must call
+    /// - `Miss(ticket)`: no prior request; the caller now owns the slot via the ticket. Must call
     ///   `ticket.commit(...)` on completion to upgrade the slot to `Cached`; drop without commit
     ///   removes the `Pending` entry so retries aren't blocked forever.
     pub async fn lookup_and_mark(
@@ -129,7 +129,7 @@ impl IdempotencyCache {
         // Take the slot (if any) for in-place inspection.
         match inner.get(&composite_key) {
             Some(slot) if slot.is_expired(self.ttl, self.pending_ttl) => {
-                // Expired — fall through and treat as absent.
+                // Expired: fall through and treat as absent.
                 inner.remove(&composite_key);
             }
             Some(Slot::Cached(entry)) => {
@@ -150,7 +150,7 @@ impl IdempotencyCache {
             None => {}
         }
         // Enforce per-token cap: evict the oldest `Cached` to make room. `Pending` entries are
-        // never evicted — they're owed to the in-flight ticket holder. The common path (under
+        // never evicted: they're owed to the in-flight ticket holder. The common path (under
         // the cap) only counts; the scan-and-evict pass runs solely when the cap is hit.
         let token_count = inner.keys().filter(|(tid, _)| tid == token_id).count();
         if token_count >= self.max_entries_per_token {
@@ -167,7 +167,7 @@ impl IdempotencyCache {
                     inner.remove(&victim);
                 }
                 None => {
-                    // All `max_entries_per_token` slots are `Pending`. Refuse the new key —
+                    // All `max_entries_per_token` slots are `Pending`. Refuse the new key:
                     // evicting one would break a still-in-flight entry's contract. Surface as a
                     // 429 back-pressure signal so the client slows its unique-key cadence.
                     return LookupOutcome::CapExceeded;
@@ -189,7 +189,7 @@ impl IdempotencyCache {
     }
 
     /// Replace the `Pending` slot at `key` with a `Cached` envelope. Called by
-    /// `IdempotencyTicket::commit`. Not public — callers acquire a ticket via `lookup_and_mark`.
+    /// `IdempotencyTicket::commit`. Not public: callers acquire a ticket via `lookup_and_mark`.
     async fn commit(&self, key: (String, String), body_hash: [u8; 32], status: u16, body: Vec<u8>) {
         let mut inner = self.inner.write().await;
         inner.insert(
@@ -204,7 +204,7 @@ impl IdempotencyCache {
     }
 
     /// Remove the `Pending` slot at `key` without recording a cached envelope. Called by
-    /// `IdempotencyTicket::drop` when the handler returned without committing — typically
+    /// `IdempotencyTicket::drop` when the handler returned without committing, typically
     /// because of a panic or an early abort. Removing the entry lets retries proceed.
     async fn rollback(&self, key: (String, String)) {
         let mut inner = self.inner.write().await;
@@ -219,7 +219,7 @@ impl IdempotencyCache {
         let inner = self.inner.clone();
         let ttl = self.ttl;
         let pending_ttl = self.pending_ttl;
-        // Scan every 5 minutes — short enough that expired entries don't sit forever, long
+        // Scan every 5 minutes: short enough that expired entries don't sit forever, long
         // enough that the lock contention is negligible.
         let scan = Duration::from_secs(5 * 60);
         tokio::spawn(async move {
@@ -246,7 +246,7 @@ impl IdempotencyCache {
 ///
 /// `commit` is async; `Drop` cannot await, so the rollback path uses `tokio::spawn` to enqueue
 /// the cleanup. The cleanup task runs after the response has flushed and only touches the
-/// cache map — no user-observable effect.
+/// cache map: no user-observable effect.
 pub struct IdempotencyTicket {
     cache: IdempotencyCache,
     key: (String, String),
@@ -303,13 +303,13 @@ pub enum LookupOutcome {
     InFlight,
     Miss(IdempotencyTicket),
     /// Per-token entry cap reached and only `Pending` slots are available to evict. Surface to
-    /// the client as 429 `idempotency` (cache capacity) with a `Retry-After` hint — they should
+    /// the client as 429 `idempotency` (cache capacity) with a `Retry-After` hint; they should
     /// slow down the unique-key cadence.
     CapExceeded,
 }
 
 /// Compute the body hash used as the cache's tamper-detection signal. SHA-256 over the raw
-/// request bytes — clients that re-send byte-identical bodies get a hit, anything else gets
+/// request bytes: clients that re-send byte-identical bodies get a hit, anything else gets
 /// a conflict.
 pub fn hash_body(body: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -403,7 +403,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         match cache.lookup_and_mark("token1", "key", &hash).await {
             LookupOutcome::Miss(t) => {
-                // Retry succeeds — `Pending` was cleared by the drop.
+                // Retry succeeds: `Pending` was cleared by the drop.
                 drop(t);
             }
             other => panic!("expected Miss after dropped ticket, got {:?}", other),
@@ -419,7 +419,7 @@ mod tests {
             _ => panic!("expected Miss"),
         };
         ticket.commit(200, b"a".to_vec()).await;
-        // token2 sees no entry — distinct namespaces.
+        // token2 sees no entry: distinct namespaces.
         assert!(matches!(
             cache.lookup_and_mark("token2", "key", &hash).await,
             LookupOutcome::Miss(_),

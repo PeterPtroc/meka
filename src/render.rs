@@ -137,7 +137,7 @@ impl StreamingRenderer {
     }
 
     pub fn push_delta(&mut self, delta: &str) -> io::Result<()> {
-        // Short-circuit before any buffering — Silent shouldn't even accumulate state since
+        // Short-circuit before any buffering; Silent shouldn't even accumulate state since
         // `finish` will discard it anyway.
         if matches!(self.mode, RenderMode::Silent) {
             return Ok(());
@@ -423,8 +423,8 @@ fn normalize_spacing(text: &str) -> String {
     output
 }
 
-/// Holds the expensive-to-load syntect assets — a `SyntaxSet` (~1 MB bincode blob) and a dark
-/// `Theme` — so subsequent highlighting calls can reuse them without paying the decode cost each
+/// Holds the expensive-to-load syntect assets, a `SyntaxSet` (~1 MB bincode blob) and a dark
+/// `Theme`, so subsequent highlighting calls can reuse them without paying the decode cost each
 /// time. Session-resume reprint and live streaming both call `highlight_markdown_line` per line;
 /// initializing assets once per process turns that cost from ~50 ms/call into <1 ms/call.
 struct Highlighter {
@@ -565,7 +565,7 @@ fn format_table(lines: &[String]) -> Vec<String> {
 
 /// Render the live "[tool X(`arg`)]" indicator line on stderr. The agent loop computes
 /// `display_summary` (via [`resolve_primary_param`] over the tool's JSON Schema) and passes it
-/// pre-resolved so the frontend layer no longer needs the schema at all — see
+/// pre-resolved so the frontend layer no longer needs the schema at all. See
 /// `FrontendEvent::ToolCallStarted` in `crate::frontend`.
 pub fn render_tool_indicator(
     name: &str,
@@ -599,8 +599,8 @@ static CSI_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Strip ANSI CSI escapes and C0 control characters (except `\n`, `\r`, `\t`) from a string
-/// destined for the user's terminal. Intended for text that originates in untrusted sources — LLM
-/// tool arguments, command output echoed into indicators/prompts, etc. — so a hostile or broken
+/// destined for the user's terminal. Intended for text that originates in untrusted sources (LLM
+/// tool arguments, command output echoed into indicators/prompts, etc.) so a hostile or broken
 /// string cannot forge UI chrome or corrupt terminal state.
 ///
 /// The sanitized form is for **display only**. The conversation copy sent back to the LLM keeps
@@ -617,20 +617,20 @@ pub fn render_session_id(label: &str, id: &str) {
     eprintln!("{}", format!("{}: {}", label, id).with(Color::DarkGrey));
 }
 
-/// Format `rows` into a left-aligned, space-padded column layout — the shared renderer for meka's
+/// Format `rows` into a left-aligned, space-padded column layout, the shared renderer for meka's
 /// CLI list tables (`skill list`, `mcp list`, `list`, `scratchpad_list`).
 ///
 /// Each column is widened to its longest cell, the matching header included. Columns are separated
 /// by two spaces; the final column is left unpadded so a long trailing value (a path, a URL, a
 /// preview) doesn't drag a run of trailing whitespace. The returned string has one trailing newline
-/// per line and no extra blank line — the caller picks the stream (`print!` for stdout list
+/// per line and no extra blank line; the caller picks the stream (`print!` for stdout list
 /// commands, or embed it in a tool result).
 ///
 /// (Distinct from the private `format_table`, which lays out *markdown* pipe tables for the
 /// streaming renderer.)
 ///
 /// Width is measured in `char`s, which is correct for the ASCII-dominated data meka tabulates
-/// (names, versions, UUIDs, timestamps); a CJK-heavy cell would pad slightly short — no caller hits
+/// (names, versions, UUIDs, timestamps); a CJK-heavy cell would pad slightly short. No caller hits
 /// that today.
 pub fn format_columns(headers: &[&str], rows: &[Vec<String>]) -> String {
     if headers.is_empty() {
@@ -659,7 +659,7 @@ fn format_columns_row(cells: &[&str], widths: &[usize]) -> String {
     let last = cells.len().saturating_sub(1);
     for (index, cell) in cells.iter().enumerate() {
         if index == last {
-            // Final column: never padded — nothing follows it.
+            // Final column: never padded; nothing follows it.
             line.push_str(cell);
         } else {
             let width = widths.get(index).copied().unwrap_or(0);
@@ -755,7 +755,7 @@ pub fn render_provider_setup_hint() {
 
 /// Walk backwards through `messages` and return the suffix that starts at the `n`th most recent
 /// user turn. A "turn" begins at a User-role message whose content is not purely `ToolResult`
-/// blocks — i.e. an actual user prompt, not an agent-driven tool result echoed back as a User
+/// blocks, i.e. an actual user prompt, not an agent-driven tool result echoed back as a User
 /// message. `n == 0` or no qualifying turns returns an empty slice.
 pub fn last_n_turns(
     messages: &[crate::provider::Message],
@@ -785,7 +785,7 @@ pub fn last_n_turns(
     }
 }
 
-/// True when `message` is the start of a new turn from the user's perspective — Role::User with at
+/// True when `message` is the start of a new turn from the user's perspective: Role::User with at
 /// least one non-`ToolResult` block.
 fn is_user_prompt_boundary(message: &crate::provider::Message) -> bool {
     use crate::provider::{ContentBlock, Role};
@@ -821,8 +821,8 @@ pub fn render_message_history(messages: &[crate::provider::Message], opts: &Hist
         return;
     }
     let mut spacing = OutputSpacing::new();
-    // The caller (e.g. the `/history` dispatch) is expected to emit the leading blank — the
-    // equivalent of the live REPL's `newline_after_prompt` — between its own command line and this
+    // The caller (e.g. the `/history` dispatch) is expected to emit the leading blank, the
+    // equivalent of the live REPL's `newline_after_prompt`, between its own command line and this
     // rendered history. So the very first user prompt we render must skip its own
     // `newline_before_prompt` to avoid stacking blanks. Once anything has been emitted, the inner
     // spacing rules take over and turn-to-turn transitions get their own blanks naturally.
@@ -869,7 +869,7 @@ pub fn render_message_history(messages: &[crate::provider::Message], opts: &Hist
                     render_tool_indicator(name, input, None);
                     emitted_any = true;
                 }
-                // Tool results are intentionally hidden — the live REPL doesn't echo them either,
+                // Tool results are intentionally hidden; the live REPL doesn't echo them either,
                 // so showing them in history would be a fidelity regression. The user sees the tool
                 // indicator (above) and whatever the assistant's next text block says about the
                 // result.
@@ -881,7 +881,7 @@ pub fn render_message_history(messages: &[crate::provider::Message], opts: &Hist
 
 fn render_assistant_text(text: &str, render_mode: RenderMode) {
     // Caller has already emitted the leading blank line (via `OutputSpacing::before_text`) when
-    // needed, and verified the text is non-empty. We just stream the markdown — no trailing blank,
+    // needed, and verified the text is non-empty. We just stream the markdown, no trailing blank,
     // because the next block's `before_*` will add one if appropriate.
     let mut renderer = StreamingRenderer::new(render_mode);
     if let Err(error) = renderer.push_delta(text) {
@@ -1094,7 +1094,7 @@ mod tests {
         assert!(lines[1].starts_with("a            1.0      /long/path"));
         assert!(lines[2].starts_with("longer-name  12       /p"));
 
-        // The last column is never padded — no trailing whitespace.
+        // The last column is never padded: no trailing whitespace.
         for line in &lines {
             assert_eq!(*line, line.trim_end(), "no trailing padding: {:?}", line);
         }
@@ -1792,7 +1792,7 @@ mod tests {
 
     #[test]
     fn test_last_n_turns_skips_tool_result_user_messages() {
-        // A User message that's purely ToolResult blocks must not count as a turn boundary —
+        // A User message that's purely ToolResult blocks must not count as a turn boundary;
         // otherwise N=1 would land on the tool result echo instead of the user's actual prompt.
         let messages = vec![
             user_prompt("real prompt"),
@@ -1808,7 +1808,7 @@ mod tests {
     #[test]
     fn test_last_n_turns_no_user_prompt_returns_empty() {
         // Assistant-only history (rare; only happens if the materialised view starts
-        // mid-conversation) has no turn boundaries — N doesn't find anything.
+        // mid-conversation) has no turn boundaries; N doesn't find anything.
         let messages = vec![assistant_text("orphan reply")];
         assert!(last_n_turns(&messages, 1).is_empty());
     }
@@ -1819,7 +1819,7 @@ mod tests {
         assert!(!is_user_prompt_boundary(&assistant_text("hi")));
         assert!(!is_user_prompt_boundary(&tool_result_message("u", "out")));
 
-        // User message with mixed blocks (rare but possible) is still a boundary — at least one
+        // User message with mixed blocks (rare but possible) is still a boundary: at least one
         // block is not a ToolResult.
         let mixed = Message {
             role: Role::User,
@@ -1881,7 +1881,7 @@ mod tests {
             },
             assistant_text("File starts with `hello`."),
         ];
-        // Show-thinking on. If this panics, the test fails — we don't assert on captured output
+        // Show-thinking on. If this panics, the test fails. We don't assert on captured output
         // (would need a TTY harness).
         let opts_with_thinking = HistoryRenderOptions {
             render_mode: RenderMode::Raw,
@@ -1891,7 +1891,7 @@ mod tests {
             newline_after_prompt: true,
         };
         render_message_history(&messages, &opts_with_thinking);
-        // And off — the call must still complete cleanly.
+        // And off: the call must still complete cleanly.
         let opts_no_thinking = HistoryRenderOptions {
             show_thinking: false,
             ..opts_with_thinking

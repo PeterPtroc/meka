@@ -1,4 +1,4 @@
-//! `HttpFrontend` — the `meka serve` impl of [`crate::frontend::Frontend`].
+//! `HttpFrontend`, the `meka serve` impl of [`crate::frontend::Frontend`].
 //!
 //! Blocking mode buffers every emitted event into the turn's recorder; mid-turn pause primitives
 //! (permission approval, MCP elicitation) short-circuit to their safe defaults (`Deny`,
@@ -9,7 +9,7 @@
 //! client POSTs to `/v1/sessions/{id}/responses/{request_id}`.
 //!
 //! The HTTP API deliberately omits frontend-tool delegation (`delegate_fs_read` / `_fs_write` /
-//! `_execute`). See the HTTP API docs — the
+//! `_execute`). See the HTTP API docs. The
 //! `Frontend` trait defaults already return `None`, which is the correct behaviour (the agent
 //! falls back to local I/O).
 
@@ -53,7 +53,7 @@ pub struct HttpFrontend {
     /// Per-turn streaming channel. Set by the turn handler before calling `run_turn` (via
     /// [`Self::install_stream`]) and cleared after (via [`Self::clear_stream`]). When `Some`,
     /// every emitted event is translated into an `SseEvent` and published on the broadcast.
-    /// `None` means blocking-mode — events go only to the recorder.
+    /// `None` means blocking-mode: events go only to the recorder.
     stream: Mutex<Option<StreamSink>>,
     /// In-memory parking lot for mid-turn pause primitives (`request_permission` and
     /// `handle_elicitation`). The HTTP turn handler emits an SSE event with the `request_id`,
@@ -198,7 +198,7 @@ impl HttpFrontend {
 
     /// Install a broadcast sink so subsequent `emit()` calls publish translated SSE events on
     /// it (in addition to recording into the blocking-mode recorder). Returns a `Receiver` the
-    /// turn handler subscribes to *before* the broadcast is installed — so no events between
+    /// turn handler subscribes to *before* the broadcast is installed, so no events between
     /// install and first subscribe are lost.
     pub fn install_stream(
         &self,
@@ -268,7 +268,7 @@ impl Frontend for HttpFrontend {
                     event_type,
                     data,
                 };
-                // `send` returns Err only when there are no subscribers — that means the SSE
+                // `send` returns Err only when there are no subscribers: that means the SSE
                 // client has disconnected. The recorder still gets the event so the turn
                 // handler can produce the blocking-mode JSON fallback (or in the streaming
                 // case, just discard the events after run_turn returns).
@@ -281,7 +281,7 @@ impl Frontend for HttpFrontend {
     }
 
     async fn request_permission(&self, request: PermissionRequest) -> PermissionOutcome {
-        // Honour sticky decisions recorded earlier this session — they short-circuit before any
+        // Honour sticky decisions recorded earlier this session; they short-circuit before any
         // SSE pause event so the client never sees the same tool prompted twice.
         if self.is_always_allowed(&request.tool_name) {
             return PermissionOutcome::Allow;
@@ -291,7 +291,7 @@ impl Frontend for HttpFrontend {
         }
 
         if !self.is_streaming() {
-            // Blocking mode — no SSE channel to ask through. Auto-deny and surface the
+            // Blocking mode: no SSE channel to ask through. Auto-deny and surface the
             // misconfiguration signal in the response so the operator notices.
             self.record_warn_notice(format!(
                 "Permission for '{}' auto-denied: session is in Ask mode but the caller \
@@ -303,7 +303,7 @@ impl Frontend for HttpFrontend {
             return PermissionOutcome::Deny;
         }
 
-        // Streaming mode — emit a permission_required event and park on a oneshot for the
+        // Streaming mode: emit a permission_required event and park on a oneshot for the
         // matching POST /responses/{request_id}. Race against per-turn cancellation and the
         // 60s timeout so the agent loop never blocks indefinitely.
         let request_id = format!("req_{}", uuid::Uuid::new_v4());
@@ -370,7 +370,7 @@ impl Frontend for HttpFrontend {
     }
 
     async fn handle_elicitation(&self, prompt: ElicitationPrompt) -> ElicitationResponse {
-        // The HTTP API doesn't expose MCP elicitation in either mode — service-to-service
+        // The HTTP API doesn't expose MCP elicitation in either mode: service-to-service
         // callers can't render interactive prompts (see HTTP API docs § Ask mode). The
         // notice surfaces the auto-decline so operators can spot misconfigured servers that
         // expect to drive elicitation interactively.
@@ -388,7 +388,7 @@ impl Frontend for HttpFrontend {
     // routes the call to the agent's local I/O path.
 
     /// SSE-mode disconnect detection. When a `StreamSink` is installed and the broadcast has zero
-    /// remaining subscribers, the SSE consumer has dropped — the agent loop should short-circuit
+    /// remaining subscribers, the SSE consumer has dropped; the agent loop should short-circuit
     /// at its next iteration so we don't keep burning provider tokens for an audience that's
     /// gone away. Blocking mode (no `StreamSink`) has no transport-level disconnect to observe
     /// until the response writes complete, so we keep the trait default `false` there.
@@ -469,7 +469,7 @@ mod tests {
             "tools in always_allowed must not re-prompt"
         );
         let recorder = frontend.drain();
-        // No diagnostic notice should be emitted — the sticky path bypasses both the streaming
+        // No diagnostic notice should be emitted: the sticky path bypasses both the streaming
         // SSE pause and the blocking-mode auto-deny.
         assert!(
             !recorder

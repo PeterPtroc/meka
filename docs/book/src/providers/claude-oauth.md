@@ -61,7 +61,7 @@ When `true`, meka adds the `redact-thinking-2026-02-12` beta header so the serve
 
 Stable per-machine identifier embedded in `metadata.user_id` to mirror Claude Code's `~/.claude.json` device ID (`getOrCreateUserID` in `utils/config.ts`).
 
-If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine present as the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way the resolved value is persisted back to `[provider].device_id` in `config.toml`. Other providers ignore this field — no stub config file is written for them.
+If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine present as the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way the resolved value is persisted back to `[provider].device_id` in `config.toml`. Other providers ignore this field; no stub config file is written for them.
 
 ## Authentication
 
@@ -93,13 +93,13 @@ Any model your Claude Code subscription exposes. Current line-up (per [Anthropic
 
 | Family | Alias | Notes |
 |--------|-------|-------|
-| Opus 4.7 | `claude-opus-4-7` | Latest Opus — most capable, no extended-thinking, adaptive thinking |
-| Sonnet 4.6 | `claude-sonnet-4-6` | Latest Sonnet — speed + intelligence balance |
-| Haiku 4.5 | `claude-haiku-4-5` | Latest Haiku — fastest |
+| Opus 4.7 | `claude-opus-4-7` | Latest Opus; most capable, no extended-thinking, adaptive thinking |
+| Sonnet 4.6 | `claude-sonnet-4-6` | Latest Sonnet, speed + intelligence balance |
+| Haiku 4.5 | `claude-haiku-4-5` | Latest Haiku, fastest |
 
 Older but still available: `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-1`. Deprecated and retiring 2026-06-15: `claude-opus-4-20250514`, `claude-sonnet-4-20250514`.
 
-meka forwards the model string verbatim — it doesn't gate which strings are valid. Per-model behaviour depends on capability gates baked into the request shape (see [Beta header](#beta-header)). The current gates target `opus-4-6` / `sonnet-4-6` for adaptive-thinking and effort; newer models (e.g. Opus 4.7) fall through to the conservative defaults until the gates are updated.
+meka forwards the model string verbatim; it doesn't gate which strings are valid. Per-model behaviour depends on capability gates baked into the request shape (see [Beta header](#beta-header)). The current gates target `opus-4-6` / `sonnet-4-6` for adaptive-thinking and effort; newer models (e.g. Opus 4.7) fall through to the conservative defaults until the gates are updated.
 
 ## API Details
 
@@ -117,7 +117,7 @@ meka forwards the model string verbatim — it doesn't gate which strings are va
 
 ### Beta header
 
-Composed dynamically from the model + thinking settings, mirroring Claude Code's `getAllModelBetas` (`utils/betas.ts`). Order is significant — wire dumps from Claude Code show this exact ordering:
+Composed dynamically from the model + thinking settings, mirroring Claude Code's `getAllModelBetas` (`utils/betas.ts`). Order is significant; wire dumps from Claude Code show this exact ordering:
 
 | Beta | When |
 |------|------|
@@ -134,23 +134,23 @@ Composed dynamically from the model + thinking settings, mirroring Claude Code's
 
 Sent as an array of three `text` blocks:
 
-1. `x-anthropic-billing-header: cc_version=<version>.<fingerprint>; cc_entrypoint=cli; cch=<xxHash64-attestation>;` — the fingerprint suffix is a 3-character hex hash derived from the first user message (`SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]`); the `cch` token is xxHash64 of the entire serialized request body, computed and patched in just before send.
-2. `You are Claude Code, Anthropic's official CLI for Claude.` — fixed identity prefix.
-3. Your own system prompt — carries `cache_control: {type: "ephemeral", ttl: "1h"}`.
+1. `x-anthropic-billing-header: cc_version=<version>.<fingerprint>; cc_entrypoint=cli; cch=<xxHash64-attestation>;` The fingerprint suffix is a 3-character hex hash derived from the first user message (`SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]`); the `cch` token is xxHash64 of the entire serialized request body, computed and patched in just before send.
+2. `You are Claude Code, Anthropic's official CLI for Claude.` (fixed identity prefix).
+3. Your own system prompt, which carries `cache_control: {type: "ephemeral", ttl: "1h"}`.
 
 Only block 3 is marked for caching, matching the recent Claude Code wire shape ("boundary mode" in `utils/api.ts:362-409`). Blocks 1 and 2 must come first so the `cch=00000` placeholder is the first occurrence in the serialized JSON, which is what `patch_request_body` looks for when computing the attestation.
 
 ### Other body fields
 
-- `metadata.user_id`: JSON-encoded `{"device_id": "...", "account_uuid": "", "session_id": "..."}` — `device_id` from `[provider].device_id`, `session_id` is per-process.
-- `context_management.edits = [{type: "clear_thinking_20251015", keep: "all"}]` — present when thinking is enabled on a context-management-capable model. Mirrors Claude Code's `apiMicrocompact`.
+- `metadata.user_id`: JSON-encoded `{"device_id": "...", "account_uuid": "", "session_id": "..."}` (`device_id` from `[provider].device_id`; `session_id` is per-process).
+- `context_management.edits = [{type: "clear_thinking_20251015", keep: "all"}]`: present when thinking is enabled on a context-management-capable model. Mirrors Claude Code's `apiMicrocompact`.
 - `output_config.effort`: present for effort-capable models, value from `[provider].effort`.
-- `temperature: 1` — only when thinking is disabled.
-- `max_tokens` — `64_000` for adaptive-thinking models, `max(thinking_budget * 2, 32_000)` for legacy thinking models, `32_000` otherwise.
+- `temperature: 1` (only when thinking is disabled).
+- `max_tokens`: `64_000` for adaptive-thinking models, `max(thinking_budget * 2, 32_000)` for legacy thinking models, `32_000` otherwise.
 
 ### Cache control
 
-The most recent message's last content block, the last tool definition, and the user system prompt all carry `cache_control: {type: "ephemeral", ttl: "1h"}`. The 1h TTL matches Claude Code's `getCacheControl` for OAuth subscribers (`should1hCacheTTL` in `claude.ts:358-374`). Mid-session permission toggles never invalidate this cache — see [Permissions](../usage/permissions.md) for the reasoning.
+The most recent message's last content block, the last tool definition, and the user system prompt all carry `cache_control: {type: "ephemeral", ttl: "1h"}`. The 1h TTL matches Claude Code's `getCacheControl` for OAuth subscribers (`should1hCacheTTL` in `claude.ts:358-374`). Mid-session permission toggles never invalidate this cache; see [Permissions](../usage/permissions.md) for the reasoning.
 
 ### Streaming
 

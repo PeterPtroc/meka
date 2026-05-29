@@ -35,9 +35,9 @@ Any model available through the Claude Messages API. Current line-up (per [Anthr
 
 | Family | Alias | Notes |
 |--------|-------|-------|
-| Opus 4.7 | `claude-opus-4-7` | Latest Opus — most capable, adaptive thinking |
-| Sonnet 4.6 | `claude-sonnet-4-6` | Latest Sonnet — speed + intelligence balance |
-| Haiku 4.5 | `claude-haiku-4-5` | Latest Haiku — fastest |
+| Opus 4.7 | `claude-opus-4-7` | Latest Opus; most capable, adaptive thinking |
+| Sonnet 4.6 | `claude-sonnet-4-6` | Latest Sonnet, speed + intelligence balance |
+| Haiku 4.5 | `claude-haiku-4-5` | Latest Haiku, fastest |
 
 Older but still available: `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-1`. Deprecated and retiring 2026-06-15: `claude-opus-4-20250514`, `claude-sonnet-4-20250514`.
 

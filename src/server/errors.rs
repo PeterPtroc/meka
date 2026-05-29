@@ -27,7 +27,7 @@ use crate::error::MekaError;
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProblemDetail {
     /// Stable URI identifying the error class. Always set; opaque to clients beyond exact
-    /// comparison. URIs are documented (not dereferenced) — clients should never fetch them.
+    /// comparison. URIs are documented (not dereferenced); clients should never fetch them.
     #[serde(rename = "type")]
     pub type_uri: String,
     /// Short, human-readable summary. Stable for a given `type_uri`.
@@ -47,7 +47,7 @@ pub struct ProblemDetail {
     #[schema(value_type = Object)]
     pub extensions: BTreeMap<String, Value>,
     /// When present, surfaced as an HTTP `Retry-After: <n>` response header (seconds). Not
-    /// serialized into the body — call sites also pass the same value into the `retry_after`
+    /// serialized into the body; call sites also pass the same value into the `retry_after`
     /// body extension via `.with(...)` for clients that only parse JSON.
     #[serde(skip)]
     #[schema(value_type = Option<u64>)]
@@ -86,7 +86,7 @@ impl ProblemDetail {
     /// Attach a `Retry-After: <seconds>` HTTP response header. The spec requires this on every
     /// 429 (concurrency-limit, idempotency-key cache cap). The same value is typically also
     /// added as the `retry_after` extension via `.with(...)` so clients reading just the JSON
-    /// body can see it — most callers should use [`Self::with_retry_after`] which sets both.
+    /// body can see it; most callers should use [`Self::with_retry_after`] which sets both.
     #[must_use]
     pub fn retry_after(mut self, seconds: u64) -> Self {
         self.retry_after_seconds = Some(seconds);
@@ -94,7 +94,7 @@ impl ProblemDetail {
     }
 
     /// Convenience: set both the `Retry-After` HTTP header *and* the `retry_after` JSON body
-    /// extension. Always use this on 429 responses — calling only one of the two halves is
+    /// extension. Always use this on 429 responses: calling only one of the two halves is
     /// a wire-shape bug clients can hit silently.
     #[must_use]
     pub fn with_retry_after(self, seconds: u64) -> Self {
@@ -202,7 +202,7 @@ impl IntoResponse for ProblemDetail {
 
 /// Best-effort mapping from internal `MekaError` to a Problem Detail. Used by handlers that
 /// propagate agent-layer errors back to the client. Variants without a dedicated HTTP shape
-/// land on `internal` (500) — refine on demand as new error paths surface.
+/// land on `internal` (500). Refine on demand as new error paths surface.
 impl From<&MekaError> for ProblemDetail {
     fn from(error: &MekaError) -> Self {
         match error {

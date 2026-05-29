@@ -1,7 +1,7 @@
 //! `load_tool` meta-tool: makes a deferred tool's full schema visible to the model on subsequent
 //! turns. The active tool set is derived by scanning the conversation for successful `load_tool`
 //! calls ([`super::extract_loaded_tool_names`]); this tool's `execute` only renders the description
-//! and schema as `tool_result` text — it never mutates the registry.
+//! and schema as `tool_result` text. It never mutates the registry.
 
 use std::{
     collections::HashSet,
@@ -15,7 +15,7 @@ use super::{LOAD_TOOL_NAME, Tool, ToolOutput, util::require_str};
 use crate::{error::Result, permission::Permission, provider::ToolDefinition};
 
 /// Meta-tool that makes a deferred tool's schema visible for use. Held by the
-/// [`super::ToolRegistry`] like any other tool, so the same `Arc` lifecycle applies — the `Weak`
+/// [`super::ToolRegistry`] like any other tool, so the same `Arc` lifecycle applies. The `Weak`
 /// handles avoid a self-referential cycle (registry → `Arc<dyn Tool>` → `Arc<RwLock<…>>` →
 /// registry).
 pub(super) struct LoadToolTool {
@@ -31,7 +31,7 @@ impl Tool for LoadToolTool {
             description: "Load the full schema for a deferred tool listed under \
                           `## Tool Discovery` in the system prompt. After a successful \
                           call, the tool's full schema becomes available on your next \
-                          turn — invoke the tool by name as usual. Pass the exact tool \
+                          turn. Invoke the tool by name as usual. Pass the exact tool \
                           name (e.g. `mcp__notion__fetch`)."
                 .to_string(),
             parameters: serde_json::json!({
@@ -88,7 +88,7 @@ impl Tool for LoadToolTool {
         };
 
         // Tools that aren't deferred are already part of the active tool set. Treat this as a no-op
-        // success so the scanner harmlessly records the name (it was already there) — the model
+        // success so the scanner harmlessly records the name (it was already there). The model
         // gets a clear hint to call the tool directly next time without an extra round trip.
         let is_deferred = self
             .deferred
@@ -102,7 +102,7 @@ impl Tool for LoadToolTool {
 
         if !is_deferred {
             return Ok(ToolOutput::text(
-                format!("Tool '{}' is already available — call it directly.", name),
+                format!("Tool '{}' is already available. Call it directly.", name),
                 false,
             ));
         }
@@ -111,7 +111,7 @@ impl Tool for LoadToolTool {
             .unwrap_or_else(|_| definition.parameters.to_string());
         let body = format!(
             "# {}\n\n{}\n\n## Schema\n\n```json\n{}\n```\n\n\
-             The tool's full schema is now available on your next turn — call \
+             The tool's full schema is now available on your next turn. Call \
              `{}` directly with the parameters above.",
             name, definition.description, schema, name,
         );
@@ -273,14 +273,14 @@ mod tests {
         let text = ContentBlock::tool_result_text_content(&result.content);
         assert!(text.contains("already available"));
         assert!(text.contains("read_file"));
-        // Must NOT render the schema block — the model already has it.
+        // Must NOT render the schema block; the model already has it.
         assert!(!text.contains("## Schema"));
     }
 
     #[tokio::test]
     async fn test_load_tool_registry_dropped() {
         // Simulate the registry going away while the LoadToolTool is still held somewhere. Both
-        // Weak upgrades should fail gracefully — returning a plain error tool_result, not
+        // Weak upgrades should fail gracefully, returning a plain error tool_result, not
         // panicking.
         let mut fixture = build_test_tool(Vec::new(), &[]);
         fixture.tools.take();

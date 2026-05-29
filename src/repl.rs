@@ -43,7 +43,7 @@ struct MekaPrompt {
     shared_permission: SharedPermission,
     show_path: bool,
     /// Per-session working directory shared with the agent and the `/cd` slash command. Reading
-    /// the lock per prompt render is cheap (microseconds) and bounded — `/cd` is the only
+    /// the lock per prompt render is cheap (microseconds) and bounded; `/cd` is the only
     /// writer.
     cwd: crate::agent::SharedCwd,
 }
@@ -137,30 +137,30 @@ pub enum SlashCommand {
     Compact,
     Export,
     Cd(Option<String>),
-    /// `/mcp <server>:<prompt> [args...]` — render an MCP prompt and send its messages as the next
+    /// `/mcp <server>:<prompt> [args...]`: render an MCP prompt and send its messages as the next
     /// user turn.
     McpPrompt {
         server: String,
         prompt: String,
         args: Vec<String>,
     },
-    /// `/mcp list` — display configured MCP servers.
+    /// `/mcp list`: display configured MCP servers.
     McpList,
-    /// `/mcp reconnect <server>` — smoke-test connect for one server.
+    /// `/mcp reconnect <server>`: smoke-test connect for one server.
     McpReconnect {
         server: String,
     },
-    /// `/mcp login <server>` — run the OAuth flow from the REPL.
+    /// `/mcp login <server>`: run the OAuth flow from the REPL.
     McpLogin {
         server: String,
     },
-    /// `/mcp logout <server>` — clear stored credentials + revoke.
+    /// `/mcp logout <server>`: clear stored credentials + revoke.
     McpLogout {
         server: String,
     },
-    /// `/skill` (no argument) — list installed skills.
+    /// `/skill` (no argument): list installed skills.
     SkillList,
-    /// `/skill <name> [extra...]` — invoke a user-invocable skill directly. Anything the user types
+    /// `/skill <name> [extra...]`: invoke a user-invocable skill directly. Anything the user types
     /// after the skill name is captured verbatim in `extra` and prepended to the rendered skill
     /// body before the agent turn, so the model reads the user's directive first and the skill body
     /// as the method. Empty when the user just typed `/skill <name>`.
@@ -168,10 +168,10 @@ pub enum SlashCommand {
         name: String,
         extra: String,
     },
-    /// `/status` — print cumulative session stats (turns, tokens, cache hit ratio, image
+    /// `/status`: print cumulative session stats (turns, tokens, cache hit ratio, image
     /// redactions).
     Status,
-    /// `/history [N]` — reprint past conversation in REPL style. Bare `/history` dumps every
+    /// `/history [N]`: reprint past conversation in REPL style. Bare `/history` dumps every
     /// materialised message; `/history N` shows the last `N` turns (turn = user prompt + the agent
     /// work it triggered). Any non-numeric argument (e.g. `all`) falls back to the dump-everything
     /// path.
@@ -198,7 +198,7 @@ pub struct ToolApprovalRequest {
 pub enum AgentToReplEvent {
     Done,
     ApprovalRequest(ToolApprovalRequest),
-    /// Server-driven elicitation — the REPL prompts the user, then sends the response back via the
+    /// Server-driven elicitation: the REPL prompts the user, then sends the response back via the
     /// embedded oneshot. `ReplFrontend::handle_elicitation` is the producer; the await on the
     /// matching receiver carries the response into the agent's task.
     McpElicitation {
@@ -288,7 +288,7 @@ fn parse_mcp_slash(rest: &str) -> Option<SlashCommand> {
             return Some(ctor(server.to_string()));
         }
     }
-    // `<server>:<prompt> [args...]` — the first token is the prompt spec.
+    // `<server>:<prompt> [args...]`: the first token is the prompt spec.
     let mut parts = rest.split_whitespace();
     let spec = parts.next()?;
     let (server, prompt) = spec.split_once(':')?;
@@ -382,7 +382,7 @@ pub fn run_repl(
                     // Re-emit the "backend unavailable" warn at the moment the user enters read
                     // mode, so a misconfigured sandbox surfaces immediately instead of waiting for
                     // the first `execute_command` failure. The "stronger sandbox available" nudge
-                    // (Warn 2) intentionally doesn't fire here — startup-only, to avoid nagging.
+                    // (Warn 2) intentionally doesn't fire here: startup-only, to avoid nagging.
                     if new_permission == crate::permission::Permission::Read {
                         crate::sandbox::warn_if_sandbox_issues(
                             &sandbox_state,
@@ -548,7 +548,7 @@ pub fn run_repl(
                 break;
             }
             // The pinned reedline fork (wtfbbqhax/reedline @ 3a457ff) has a slimmer `Signal` enum
-            // than upstream — no `ExternalBreak` variant — so this catch-all is currently
+            // than upstream, no `ExternalBreak` variant, so this catch-all is currently
             // unreachable. When we switch back to upstream after #1005 lands in a release, it'll
             // fire on the unhandled `ExternalBreak`.
             #[allow(unreachable_patterns)]
@@ -659,7 +659,7 @@ fn handle_elicitation_prompt(
                     "" | "y" | "yes" => {
                         if let Err(error) = open::that(url) {
                             // URL was printed right above; launch failure on headless hosts is
-                            // expected noise — diagnostic only.
+                            // expected noise, diagnostic only.
                             tracing::debug!(
                                 "failed to open browser for URL elicitation: {}",
                                 error
@@ -841,7 +841,7 @@ pub struct ReplFrontendConfig {
 /// over the existing mpsc to the blocking REPL thread.
 ///
 /// Lives in `crate::repl` (alongside the REPL thread it talks to) rather than in `crate::frontend`,
-/// so the trait module stays free of concrete UI types — see the module docs in `crate::frontend`.
+/// so the trait module stays free of concrete UI types. See the module docs in `crate::frontend`.
 pub struct ReplFrontend {
     config: ReplFrontendConfig,
     state: Mutex<ReplFrontendState>,
@@ -944,7 +944,7 @@ impl Frontend for ReplFrontend {
                 render::render_tool_indicator(&name, &input, display_summary.as_deref());
             }
             // The REPL renders tool results inline through the agent's own message-history path
-            // (the next assistant turn). No additional UI is needed at completion time — the
+            // (the next assistant turn). No additional UI is needed at completion time; the
             // model's response that follows already summarizes what happened.
             FrontendEvent::ToolCallCompleted { .. } => {}
             FrontendEvent::TodoListUpdated(items) => {
@@ -960,7 +960,7 @@ impl Frontend for ReplFrontend {
             }
             FrontendEvent::Notice(notice) => {
                 // Close any in-flight text run so the hint lands on its own line. Level is unused
-                // by `render_hint` today (it always paints DarkGrey) — future styling can branch
+                // by `render_hint` today (it always paints DarkGrey); future styling can branch
                 // on `notice.level` when there's a need.
                 Self::close_text_run(&mut state);
                 render::render_hint(&notice.text);
@@ -995,7 +995,7 @@ impl Frontend for ReplFrontend {
             .send(AgentToReplEvent::ApprovalRequest(approval))
             .is_err()
         {
-            // REPL thread is gone — there is no human to ask. Treat as cancellation rather than
+            // REPL thread is gone; there is no human to ask. Treat as cancellation rather than
             // denial so the caller's ToolOutput message is honest about the cause.
             return PermissionOutcome::Cancelled;
         }
@@ -1021,7 +1021,7 @@ impl Frontend for ReplFrontend {
             .send(AgentToReplEvent::McpElicitation { prompt, responder })
             .is_err()
         {
-            // REPL thread is gone — no human to ask. Decline so the server learns the elicitation
+            // REPL thread is gone: no human to ask. Decline so the server learns the elicitation
             // wasn't answered. (Same posture as the agent-disconnected case in
             // `request_permission`.)
             tracing::debug!("MCP elicitation dropped (REPL disconnected); declining");
@@ -1409,7 +1409,7 @@ mod tests {
     fn test_parse_skill_slash_captures_free_form_extra() {
         // The whole remainder after the skill name is captured verbatim (preserving inner
         // whitespace) and trimmed at the edges. This is free-form text the user wants prepended to
-        // the skill body — no positional argument parsing.
+        // the skill body: no positional argument parsing.
         match parse_slash_command("/skill demo only fetch UK news") {
             Some(SlashCommand::SkillInvoke { name, extra }) => {
                 assert_eq!(name, "demo");
@@ -1422,7 +1422,7 @@ mod tests {
     #[test]
     fn test_parse_skill_slash_trims_trailing_whitespace() {
         // Trailing whitespace after the skill name should produce an empty extra, not a
-        // whitespace-padded one — equivalent to the bare-name invocation.
+        // whitespace-padded one, equivalent to the bare-name invocation.
         match parse_slash_command("/skill demo   ") {
             Some(SlashCommand::SkillInvoke { name, extra }) => {
                 assert_eq!(name, "demo");
@@ -1446,7 +1446,7 @@ mod tests {
         }
     }
 
-    /// Short debug label — SlashCommand doesn't implement Debug so we map the few variants we care
+    /// Short debug label: SlashCommand doesn't implement Debug so we map the few variants we care
     /// about manually to keep assertion messages readable.
     fn option_label(cmd: &Option<SlashCommand>) -> &'static str {
         match cmd {

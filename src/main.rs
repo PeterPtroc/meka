@@ -1,11 +1,11 @@
-//! `meka` — a general-purpose AI agent harness where you describe what you want in natural language
+//! `meka`: a general-purpose AI agent harness where you describe what you want in natural language
 //! and an LLM-backed agent decides which tools to run.
 //!
 //! The binary wires together: a [`provider`] (Claude or OpenAI), a [`session`] store backed by
 //! SQLite, a [`tools`] registry, an MCP client manager, and a [`repl`] input loop. The [`agent`]
 //! module owns the per-turn loop that streams provider output and dispatches tool calls.
 
-// Production code shouldn't panic on unexpected input — the `Cargo.toml` `[lints.clippy]` block
+// Production code shouldn't panic on unexpected input; the `Cargo.toml` `[lints.clippy]` block
 // enforces that with `unwrap_used` / `expect_used` / `panic` at warn level (CI promotes warnings to
 // errors). Tests use `.unwrap()` and `.expect()` heavily on purpose: a failed test should panic
 // with a clear message rather than thread `Result` through every fixture. The cfg_attr below scopes
@@ -78,10 +78,10 @@ fn main() -> anyhow::Result<()> {
     // joins that thread and hangs the process after a clean rollback.
     runtime.shutdown_background();
 
-    // User-initiated interrupts are already acknowledged by the rollback warn log ("interrupted —
-    // rolling back …") and the shell typically echoes `^C` itself; anyhow's default "Error: agent
-    // interrupted by user" on top of that is just noise. Exit with the conventional SIGINT code
-    // (128 + 2) silently instead.
+    // User-initiated interrupts are already acknowledged by the rollback warn log ("interrupted;
+    // rolling back …") and the shell typically echoes `^C` itself; anyhow's default "Error:
+    // agent interrupted by user" on top of that is just noise. Exit with the conventional
+    // SIGINT code (128 + 2) silently instead.
     if let Err(error) = &result
         && let Some(crate::error::MekaError::Interrupted) =
             error.downcast_ref::<crate::error::MekaError>()
@@ -149,7 +149,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
         ));
     }
 
-    // If --skill is set, validate and render the body upfront so an invalid name fails fast —
+    // If --skill is set, validate and render the body upfront so an invalid name fails fast
     // before any session/MCP setup. The combined string (extra + body, mirroring the REPL's `/skill
     // <name> [extra...]`) then takes the place of cli.prompt as the first-turn input.
     let skill_prompt = runtime.block_on(build_skill_prompt(&cli))?;
@@ -169,7 +169,7 @@ fn run_on_runtime(runtime: &tokio::runtime::Runtime, cli: cli::Cli) -> anyhow::R
 /// Render a `--skill <name>` invocation into the user-message string that drives the first turn.
 /// Returns `Ok(None)` when `--skill` is not set so callers can leave `cli.prompt` untouched.
 ///
-/// Mirrors the REPL handler at `SlashCommand::SkillInvoke` — same lookup, same `user_invocable`
+/// Mirrors the REPL handler at `SlashCommand::SkillInvoke`: same lookup, same `user_invocable`
 /// gate, same `format!("{extra}\n\n{body}")` order when the positional `[PROMPT]` is supplied.
 async fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
     let Some(name) = cli.skill.as_deref() else {
@@ -191,8 +191,8 @@ async fn build_skill_prompt(cli: &cli::Cli) -> anyhow::Result<Option<String>> {
 
 /// Build the `tracing` filter for meka.
 ///
-/// When the user sets `RUST_LOG` we honour it verbatim — no hidden
-/// overrides, so debugging with `RUST_LOG=rmcp=debug` works as expected.
+/// When the user sets `RUST_LOG`, we honour it verbatim; no hidden
+/// overrides. Debugging with `RUST_LOG=rmcp=debug` works as expected.
 /// Otherwise we start from `log_level` (derived from `-v` / `-vv`) and
 /// add a single directive that downgrades rmcp's SSE-reconnect warning
 /// to `error`:
@@ -354,7 +354,7 @@ async fn async_main(
 /// [`build_shared_deps`]; sessions hold an [`Arc<SharedDeps>`] and read fields by reference.
 /// Cheap to clone (every field is either an `Arc`, an owned-but-small value, or a clonable handle).
 ///
-/// The REPL / oneshot paths don't use this — they go through [`create_agent_from_config`] which
+/// The REPL / oneshot paths don't use this; they go through [`create_agent_from_config`] which
 /// bundles shared + per-session work into one call.
 #[derive(Clone)]
 pub struct SharedDeps {
@@ -456,7 +456,7 @@ pub async fn build_shared_deps(
     mcp_context.set_provider(Arc::clone(&provider));
 
     // Kick off the MCP background connector once for the whole process. The connector writes tool
-    // discoveries through `update_server_tools`, which fans them out to every attached registry —
+    // discoveries through `update_server_tools`, which fans them out to every attached registry,
     // so per-session registries built later via `build_session_agent` see the tools as servers
     // come online. Idempotent on second call.
     if let Some(manager) = &mcp_manager {
@@ -504,7 +504,7 @@ struct AgentAssembly<'a> {
 /// finally constructs the `Agent` itself.
 ///
 /// **MCP attach-before-connector invariant**: the caller is expected to either (a) already have run
-/// `start_connector` (ACP path — `build_shared_deps` does this once) or (b) call
+/// `start_connector` (ACP path: `build_shared_deps` does this once) or (b) call
 /// `start_connector` *after* this returns (REPL path). Either way, the registry must be attached
 /// before any connector activity, so initial tool-list discoveries reach this session's registry.
 async fn assemble_agent(
@@ -559,12 +559,12 @@ async fn assemble_agent(
     }
 
     if let Some(manager) = bundle.mcp_manager {
-        // Register MCP resource meta-tools upfront — they delegate through
+        // Register MCP resource meta-tools upfront; they delegate through
         // `ServerEntry::require_connected` so they tolerate Pending / Failed servers until a
         // specific one is called.
         crate::tools::mcp_resources::register_all(&tool_registry, Arc::clone(manager));
         // Attach this session's registry so the MCP connector and tools/list_changed handler
-        // propagate updates into it. Must happen before the connector kicks off — otherwise initial
+        // propagate updates into it. Must happen before the connector kicks off; otherwise initial
         // server-state updates miss the registry.
         manager.attach_registry(tool_registry.clone()).await;
     }
@@ -593,7 +593,7 @@ async fn assemble_agent(
 /// session gets a fresh todo list, scratchpad slot, tool registry (with the session's cwd /
 /// permission / frontend baked into its builtin tools), and an Agent that owns those.
 ///
-/// The returned `ToolRegistry` is the one already attached to the MCP manager — callers (the ACP
+/// The returned `ToolRegistry` is the one already attached to the MCP manager; callers (the ACP
 /// `session/new` handler) keep a handle so they can pass it to
 /// [`crate::mcp::McpClientManager::detach_registry`] on `session/close`.
 pub async fn build_session_agent(
@@ -678,7 +678,7 @@ async fn create_agent_from_config(
     // Discover skills once at startup. Any malformed `SKILL.md` emits its `tracing::warn!` here
     // (tracing is already initialized), so the user sees parse errors above the first prompt rather
     // than interleaved with their first turn's output. The cache also drives mid-session auto-
-    // reload — `SkillCache::current()` re-snapshots on each turn and re-discovers only when the
+    // reload; `SkillCache::current()` re-snapshots on each turn and re-discovers only when the
     // on-disk state changes.
     let skills = crate::skills::SkillCache::discover();
 
@@ -754,7 +754,7 @@ async fn create_agent_from_config(
 /// Run one agent turn with Ctrl+C wired to a fresh cancellation token. Spawns a `ctrl_c()` listener
 /// for the turn's duration and aborts it afterward, so a SIGINT during the turn cancels it (and
 /// every tool and sub-agent it spawned), while a SIGINT between turns is not consumed by a leaked
-/// listener. Every `run_turn` callsite in the REPL / CLI path must go through here — a bare
+/// listener. Every `run_turn` callsite in the REPL / CLI path must go through here; a bare
 /// `CancellationToken` with no signal source silently swallows Ctrl+C.
 async fn run_turn_interruptible(
     agent: &Agent,
@@ -775,7 +775,7 @@ async fn run_turn_interruptible(
         .run_turn(session_id, messages, input, cancellation)
         .await;
     signal_handle.abort();
-    // REPL / `meka -p` callers don't surface a stop reason — they only care whether the turn
+    // REPL / `meka -p` callers don't surface a stop reason; they only care whether the turn
     // succeeded. Drop the `TurnOutcome`.
     result.map(|_| ())
 }
@@ -799,7 +799,7 @@ async fn run_oneshot(
     let session_stats = Arc::new(stats::SessionStats::default());
     // Oneshot has no REPL, so approval requests can't reach a human. The channel below is
     // intentionally disconnected on the receiver side: `ReplFrontend::request_permission`'s `send`
-    // will fail, and the agent surfaces a `cancelled` tool result — same end behavior as the
+    // will fail, and the agent surfaces a `cancelled` tool result, same end behavior as the
     // pre-refactor `None` approval sender.
     let (noninteractive_sender, _) = std::sync::mpsc::channel::<repl::AgentToReplEvent>();
     let oneshot_frontend: Arc<dyn frontend::Frontend> =
@@ -908,13 +908,13 @@ async fn run_interactive(
 
     // If a prompt or skill was given without `--oneshot`, queue it as a synthetic user input so the
     // first turn runs immediately. The REPL takes over afterwards for follow-up turns. The send
-    // cannot fail — the receiver was just constructed above. Tracking the flag separately tells the
-    // REPL to wait for the synthetic turn's events before drawing its first prompt — otherwise
+    // cannot fail; the receiver was just constructed above. Tracking the flag separately tells the
+    // REPL to wait for the synthetic turn's events before drawing its first prompt; otherwise
     // reedline's prompt collides with the agent's output.
     let initial_turn_pending = initial_prompt.is_some();
     if let Some(prompt) = initial_prompt {
         // Channel was constructed two lines above and the receiver is still live (we own it in
-        // `input_receiver` below) — `send` cannot fail under any runtime condition.
+        // `input_receiver` below); `send` cannot fail under any runtime condition.
         #[allow(clippy::expect_used)]
         input_sender
             .send(ReplEvent::UserInput(prompt))
@@ -1134,7 +1134,7 @@ async fn run_interactive(
                             }
                             match mcp::get_prompt(&entry, prompt_name.clone(), arguments).await {
                                 Ok(result) => {
-                                    // Render the prompt messages as a single user turn — same shape
+                                    // Render the prompt messages as a single user turn, same shape
                                     // as the `get_mcp_prompt` tool output.
                                     let mut body = String::new();
                                     for message in &result.messages {
@@ -1184,7 +1184,7 @@ async fn run_interactive(
                     }
                     repl::SlashCommand::SkillInvoke { name, extra } => 'invoke: {
                         // Labeled block so the early-exit error paths can `break 'invoke` out of
-                        // the arm body without skipping the `AgentToReplEvent::Done` send below —
+                        // the arm body without skipping the `AgentToReplEvent::Done` send below;
                         // `continue` would short-circuit the outer `while let`, leaving the REPL
                         // stuck in `wait_for_agent` and never drawing the next prompt.
                         let installed = agent.skills().current().await;
@@ -2004,7 +2004,7 @@ mod tests {
         );
     }
 
-    /// When the user sets `RUST_LOG` we honour it verbatim — no hidden directive overlay — so
+    /// When the user sets `RUST_LOG`, we honour it verbatim (no hidden directive overlay), so
     /// debugging rmcp internals with e.g. `RUST_LOG=rmcp=debug` works as expected.
     #[test]
     fn explicit_rust_log_is_not_overridden() {

@@ -182,7 +182,7 @@ impl Provider for ClaudeApiProvider {
         // Surface the redaction notice as the first stream event so the frontend renders it before
         // any provider text appears. The agent's `run_streaming` translates it to
         // `FrontendEvent::Notice`. Send-error here means the consumer hung up between this call
-        // and now — `drive_claude_sse_stream` will surface that on its own.
+        // and now; `drive_claude_sse_stream` will surface that on its own.
         if let Some(notice) = redaction_notice
             && let Err(error) = event_sender.send(StreamEvent::Notice(notice)).await
         {

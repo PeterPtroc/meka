@@ -3,7 +3,7 @@
 //! `GET /v1/docs`.
 //!
 //! Keeping the spec inline in the binary (via derive macros rather than a hand-written JSON
-//! file) means it can never drift from the implementation — wire-shape changes that forget the
+//! file) means it can never drift from the implementation: wire-shape changes that forget the
 //! annotation fail to compile or surface in the spec as missing fields.
 
 use axum::Router;

@@ -1,4 +1,4 @@
-//! `Frontend` — the swappable driver for agent output and approval round-trips.
+//! `Frontend`: the swappable driver for agent output and approval round-trips.
 //!
 //! `Agent::run_turn` emits its user-facing output (streamed assistant text, thinking blocks,
 //! tool-call indicators, todo lists, token usage) and its tool-approval requests through `Arc<dyn
@@ -7,14 +7,14 @@
 //! impls without touching the agent core.
 //!
 //! This module owns the trait, the event/permission types, and the two UI-agnostic impls
-//! ([`SilentFrontend`], [`PermissionForwardingFrontend`]). Concrete UI impls live with their UI —
-//! `ReplFrontend` in `crate::repl`, `AcpFrontend` in `crate::acp` — so the abstraction layer never
+//! ([`SilentFrontend`], [`PermissionForwardingFrontend`]). Concrete UI impls live with their UI
+//! (`ReplFrontend` in `crate::repl`, `AcpFrontend` in `crate::acp`) so the abstraction layer never
 //! depends on a specific frontend by name.
 //!
-//! The event-based shape mirrors ACP's `session/update` notification — one channel for every kind
+//! The event-based shape mirrors ACP's `session/update` notification: one channel for every kind
 //! of agent-emitted output, discriminated by the [`FrontendEvent`] variant.
 
-// `Mutex` is consumed only by the `#[cfg(test)] mod testing` block below — gating its import
+// `Mutex` is consumed only by the `#[cfg(test)] mod testing` block below; gating its import
 // keeps non-test builds warning-clean now that `ReplFrontend` (the production user of
 // `std::sync::Mutex`) has moved into `crate::repl`.
 #[cfg(test)]
@@ -42,14 +42,14 @@ pub trait Frontend: Send + Sync {
 
     /// Round-trip request for user approval of a tool call. Used only when
     /// [`crate::permission::Permission::Ask`] is active. [`PermissionOutcome::Cancelled`] is
-    /// distinct from [`PermissionOutcome::Deny`] — it indicates the user cancelled the enclosing
+    /// distinct from [`PermissionOutcome::Deny`]; it indicates the user cancelled the enclosing
     /// turn (Ctrl+C, `session/cancel`), which ACP will surface later. Today's REPL collapses it to
     /// deny semantics.
     async fn request_permission(&self, request: PermissionRequest) -> PermissionOutcome;
 
     /// Delegate a file read to whatever filesystem the frontend owns (typically the ACP client's
     /// in-buffer view of the file). `Some(Ok(content))` means the frontend handled it;
-    /// `Some(Err(_))` means delegation was attempted and failed (surface the error to the user —
+    /// `Some(Err(_))` means delegation was attempted and failed (surface the error to the user;
     /// don't silently fall back); `None` means "no delegate available, do it locally".
     ///
     /// `line` and `limit` follow ACP's 1-based line / line-count convention.
@@ -95,14 +95,14 @@ pub trait Frontend: Send + Sync {
 
     /// Handle an MCP `elicitation/create` request: the server asked the user for input (either a
     /// structured form or a URL-consent flow). The frontend is responsible for prompting the user
-    /// and returning their response. The default impl declines — the safe behavior when no human
+    /// and returning their response. The default impl declines: the safe behavior when no human
     /// is reachable (non-interactive subcommands, sub-agents under `PermissionForwardingFrontend`,
     /// `SilentFrontend`, the test-only `RecordingFrontend`).
     ///
     /// Called via the task-local installed in `Agent::run_tool`; see
     /// [`crate::mcp::current_session_frontend`]. Concrete impls today:
     /// [`crate::repl::ReplFrontend`] (routes through the REPL thread), `crate::acp::AcpFrontend`
-    /// (auto-declines with a warn — no ACP protocol primitive for forms yet).
+    /// (auto-declines with a warn: no ACP protocol primitive for forms yet).
     async fn handle_elicitation(
         &self,
         _prompt: crate::mcp::elicitation::ElicitationPrompt,
@@ -146,7 +146,7 @@ pub struct DelegatedExecSpec {
     /// meka forwards a filtered subset of the agent's env so things like `PATH` / `LANG` are
     /// preserved.
     pub env: Vec<(String, String)>,
-    /// Working directory for the spawned process. Almost always `Some(_)` — meka's per-session cwd
+    /// Working directory for the spawned process. Almost always `Some(_)`: meka's per-session cwd
     /// snapshot at the call site.
     pub cwd: Option<PathBuf>,
     /// Hard timeout. The frontend should attempt to kill the process and return whatever output
@@ -198,12 +198,12 @@ pub enum FrontendEvent {
         #[allow(dead_code)]
         signature: Option<String>,
     },
-    /// A tool call is about to be dispatched. `id` is the `tool_use_id` assigned by the provider —
+    /// A tool call is about to be dispatched. `id` is the `tool_use_id` assigned by the provider;
     /// frontends use it to correlate this announcement with the matching
     /// [`Self::ToolCallCompleted`]. `display_summary` is the agent-resolved primary argument for
     /// display (e.g. the path for `read_file`, the command for `execute_command`), pre-computed via
     /// [`crate::render::resolve_primary_param`] so frontends don't need the tool's JSON Schema to
-    /// render the indicator. `None` means "no obvious primary arg" — render the bare tool name.
+    /// render the indicator. `None` means "no obvious primary arg". Render the bare tool name.
     ToolCallStarted {
         id: String,
         name: String,
@@ -235,7 +235,7 @@ pub enum FrontendEvent {
     /// transcript records the side-effect. `SilentFrontend` drops them.
     Notice(crate::provider::Notice),
     /// Incremental progress from an in-flight MCP tool (`notifications/progress`). Routed
-    /// per-session via the task-local frontend installed in `Agent::run_tool` — see
+    /// per-session via the task-local frontend installed in `Agent::run_tool`. See
     /// [`crate::mcp::current_session_frontend`]. `ReplFrontend` renders an inline status line
     /// (carriage-return overwrite); `AcpFrontend` logs at `info!` today (no protocol primitive
     /// yet). `SilentFrontend` drops them.
@@ -281,10 +281,10 @@ pub enum PermissionOutcome {
 }
 
 /// Frontend wrapper used by sub-agents when the parent is interactive enough to host permission
-/// prompts. Streaming output (text, tool indicators, todos, token usage) is dropped — sub-agents'
+/// prompts. Streaming output (text, tool indicators, todos, token usage) is dropped; sub-agents'
 /// final reports flow back through the parent's `spawn_agent` tool result, not through this
-/// frontend. The exceptions are `Notice` (provider-side advisories that the user should still see
-/// — e.g. a redaction during a sub-agent's turn) and `request_permission` (forwarded so the user
+/// frontend. The exceptions are `Notice` (provider-side advisories that the user should still see,
+/// e.g. a redaction during a sub-agent's turn) and `request_permission` (forwarded so the user
 /// is prompted in their original UI: REPL approval line or ACP `session/request_permission`).
 ///
 /// Constructed in [`crate::tools::subagent::SpawnAgentTool`] with the parent agent's frontend as
@@ -302,7 +302,7 @@ impl PermissionForwardingFrontend {
 #[async_trait]
 impl Frontend for PermissionForwardingFrontend {
     async fn emit(&self, event: FrontendEvent) {
-        // Forward Notice — provider advisories about the sub-agent's request belong in the user's
+        // Forward Notice: provider advisories about the sub-agent's request belong in the user's
         // primary UI. Everything else (text deltas, thinking, tool indicators, todos, token usage,
         // session lifecycle) is sub-agent chrome that the user shouldn't see.
         if matches!(event, FrontendEvent::Notice(_)) {
@@ -311,9 +311,9 @@ impl Frontend for PermissionForwardingFrontend {
     }
 
     fn client_disconnected(&self) -> bool {
-        // Sub-agents must observe the parent's disconnect so their own run_turn loop short-circuits
-        // — without this forward, a sub-agent under a dropped ACP connection keeps burning provider
-        // tokens.
+        // Sub-agents must observe the parent's disconnect so their own run_turn loop
+        // short-circuits; without this forward, a sub-agent under a dropped ACP connection
+        // keeps burning provider tokens.
         self.delegate.client_disconnected()
     }
 
@@ -347,7 +347,7 @@ impl Frontend for PermissionForwardingFrontend {
 }
 
 /// Fully-silent frontend: drops every emit and denies every permission request. Used by tests and
-/// `meka tools list`'s reference registry — both want a frontend that never reaches out to a user.
+/// `meka tools list`'s reference registry. Both want a frontend that never reaches out to a user.
 /// Sub-agents use [`PermissionForwardingFrontend`] instead so their permission prompts surface in
 /// the parent's UI.
 pub struct SilentFrontend;
@@ -357,7 +357,7 @@ impl Frontend for SilentFrontend {
     async fn emit(&self, _event: FrontendEvent) {}
 
     async fn request_permission(&self, _request: PermissionRequest) -> PermissionOutcome {
-        // No human to ask — safest default.
+        // No human to ask: safest default.
         PermissionOutcome::Deny
     }
 }
@@ -504,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn test_permission_forwarding_frontend_drops_sub_agent_chrome() {
         // Sub-agent chrome (text, lifecycle, tool indicators) must NOT bubble up to the parent's
-        // UI — the sub-agent's report flows back via the spawn_agent tool result instead.
+        // UI; the sub-agent's report flows back via the spawn_agent tool result instead.
         let recorder = Arc::new(RecordingFrontend::new());
         let delegate: Arc<dyn Frontend> = recorder.clone();
         let forwarder = PermissionForwardingFrontend::new(delegate);
@@ -521,7 +521,7 @@ mod tests {
     }
 
     /// Notices are the one event that *does* forward through `PermissionForwardingFrontend`. Image
-    /// redaction during a sub-agent's provider call is a side-effect the *user* needs to see — the
+    /// redaction during a sub-agent's provider call is a side-effect the *user* needs to see; the
     /// sub-agent's report has no place to surface it, and silent redaction without operator
     /// awareness is exactly the bypass this whole refactor is meant to close.
     #[tokio::test]

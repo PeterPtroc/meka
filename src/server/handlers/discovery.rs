@@ -1,5 +1,5 @@
 //! Health-probe endpoints: `/v1/health/live` (process-up) and `/v1/health/ready`
-//! (subsystems-healthy). The other discovery endpoints — `/v1/info`, `/v1/skills`, `/v1/mcp` —
+//! (subsystems-healthy). The other discovery endpoints (`/v1/info`, `/v1/skills`, `/v1/mcp`)
 //! live in [`super::info`].
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -13,9 +13,9 @@ pub struct LiveResponse {
     pub status: String,
 }
 
-/// Liveness probe. Always returns 200 if the process is up and the listener is accepting —
-/// the response handler running at all is sufficient proof. Used by Kubernetes / systemd to
-/// distinguish "process crashed" from "process degraded".
+/// Liveness probe. Always returns 200 if the process is up and the listener is accepting; the
+/// response handler running at all is sufficient proof. Used by Kubernetes / systemd to distinguish
+/// "process crashed" from "process degraded".
 #[utoipa::path(
     get,
     path = "/v1/health/live",
@@ -37,7 +37,7 @@ pub struct ReadyResponse {
     pub provider_configured: bool,
     /// `true` when all configured MCP servers are connected (or none are configured).
     /// Per-server detail (names, connection states) is available via `GET /v1/mcp`
-    /// (requires auth) — deliberately omitted here because `/v1/health/ready` is
+    /// (requires auth). It is deliberately omitted here because `/v1/health/ready` is
     /// unauthenticated and server names leak infrastructure topology.
     pub mcp_servers_healthy: bool,
 }

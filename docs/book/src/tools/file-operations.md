@@ -13,7 +13,7 @@ Read the contents of a file at a given path. Supports text files and images.
 | `path` | string | yes | The file path to read |
 | `offset` | integer | no | Line number to start reading from (0-based) |
 | `limit` | integer | no | Maximum number of lines to read |
-| `regex` | string | no | Return matching lines (capped — exact value advertised in the tool's parameter schema) instead of a line range. Skipped for image files. |
+| `regex` | string | no | Return matching lines (capped, exact value advertised in the tool's parameter schema) instead of a line range. Skipped for image files. |
 | `scratchpad` | string | no | Save output to the scratchpad under this name |
 
 ### Behavior
@@ -32,7 +32,7 @@ Recognized image extensions are returned as base64-encoded multimodal content:
 
 Images are rejected if the final payload exceeds 3.75 MB (~5 MB base64). Conversion can enlarge an image, so a small TIFF may produce a too-large PNG.
 
-Only read image files when the current model supports vision input — text-only models will either error or silently drop the image block.
+Only read image files when the current model supports vision input; text-only models will either error or silently drop the image block.
 
 ### Examples
 
@@ -73,7 +73,7 @@ Exactly one of `new_string`, `insert_before`, or `insert_after` must be provided
 
 ### Behavior
 
-- If `old_string` matches more than once and `replace_all` is not set, the edit is **rejected** — add surrounding context to make the anchor unique, or set `replace_all` to change every occurrence.
+- If `old_string` matches more than once and `replace_all` is not set, the edit is **rejected**. Add surrounding context to make the anchor unique, or set `replace_all` to change every occurrence.
 - To delete text, use replace mode with an empty `new_string`.
 - The file must have been previously read with `read_file` on the same path. This prevents blind edits. Set `force` to bypass this requirement.
 - If `old_string` is not found, the tool returns an error (without modifying the file).

@@ -23,7 +23,7 @@ use crate::{
 /// by [`redact_oldest_images`] before they're posted.
 pub(super) const MAX_REQUEST_BYTES: usize = 30 * 1024 * 1024;
 
-/// When redaction fires, drop the body to roughly this size — leaves a ~6 MiB buffer below
+/// When redaction fires, drop the body to roughly this size, which leaves a ~6 MiB buffer below
 /// [`MAX_REQUEST_BYTES`] so the next several turns don't re-trigger redaction. Mirrors Claude
 /// Code's `apiMicrocompact` watermark (180k → 140k = ~78% of trigger). Stable cache prefix between
 /// redactions matters more than minimum-impact redaction per event.
@@ -36,12 +36,12 @@ pub(super) const IMAGE_REDACTION_PLACEHOLDER: &str = "[image redacted to fit req
 /// Anthropic accepts up to 8000 px per axis on a *single*-image request, but rejects anything over
 /// 2000 px on either axis once the request contains more than one image. We always downscale to fit
 /// so a session can freely accumulate images without tripping the multi-image cap. This is enforced
-/// at the Claude provider layer only — non-Claude providers don't need it (and shouldn't pay the
+/// at the Claude provider layer only; non-Claude providers don't need it (and shouldn't pay the
 /// resize cost).
 pub(super) const MAX_IMAGE_DIMENSION_PX: u32 = 2000;
 
 /// Extract a `TokenUsage` from an Anthropic `usage` object. Used by both the non-streaming response
-/// parser and the SSE driver — Anthropic emits the same shape (`input_tokens`, `output_tokens`,
+/// parser and the SSE driver. Anthropic emits the same shape (`input_tokens`, `output_tokens`,
 /// `cache_creation_input_tokens`, `cache_read_input_tokens`) in both places. Missing fields default
 /// to 0 (older API responses, or providers that don't surface cache stats).
 pub(super) fn parse_usage_object(usage: &serde_json::Value) -> TokenUsage {
@@ -287,7 +287,7 @@ pub(super) fn parse_claude_stop_reason(reason: &str) -> StopReason {
         "max_tokens" => StopReason::MaxTokens,
         // Claude does not include the refusal text alongside the streaming `stop_reason` delta; the
         // model's text content is what the user sees as the refusal. Surface an empty refusal
-        // payload — the assistant message blocks carry the human-readable explanation already.
+        // payload; the assistant message blocks carry the human-readable explanation already.
         "refusal" => StopReason::Refusal(String::new()),
         other => StopReason::Unknown(other.to_string()),
     }
@@ -666,12 +666,12 @@ pub(super) struct RedactionStats {
 
 /// Walk `messages` oldest-first and replace `ToolResultContent::Image` payloads with
 /// [`IMAGE_REDACTION_PLACEHOLDER`] until at least `bytes_to_drop` base64 bytes have been removed.
-/// The LAST message is never touched — it carries the moving `cache_control` breakpoint set in
+/// The LAST message is never touched; it carries the moving `cache_control` breakpoint set in
 /// [`convert_messages_to_claude_content`] and disturbing it would invalidate the cache for the new
 /// turn unnecessarily.
 ///
 /// Returns `Cow::Borrowed` if no work was needed (`bytes_to_drop == 0`). Otherwise returns
-/// `Cow::Owned` with whatever redaction was possible — even when the budget couldn't be met, the
+/// `Cow::Owned` with whatever redaction was possible. Even when the budget couldn't be met, the
 /// cloned messages are still returned so the caller can re-serialize and decide whether the body
 /// fits.
 pub(super) fn redact_oldest_images(
@@ -715,7 +715,7 @@ pub(super) fn redact_oldest_images(
 ///
 /// Anthropic-specific: the 2000 px cap only matters for Anthropic's multi-image requests; this
 /// helper is intentionally not applied to non-Claude providers. Decode/resize cost is incurred per
-/// turn for each oversized image — typical sessions have few oversized images, and the cheap
+/// turn for each oversized image, but typical sessions have few oversized images, and the cheap
 /// [`crate::image::read_image_dimensions`] header read short-circuits the common case.
 pub(super) fn downscale_oversized_images(messages: &[Message]) -> Cow<'_, [Message]> {
     use base64::Engine;
@@ -725,7 +725,7 @@ pub(super) fn downscale_oversized_images(messages: &[Message]) -> Cow<'_, [Messa
         ImageFormat::from_mime_type(media_type)
     }
 
-    // First pass: detect whether any image needs downscaling. Cheap — just base64-decode to peek at
+    // First pass: detect whether any image needs downscaling. Cheap: just base64-decode to peek at
     // header bytes. If nothing's oversized, skip the clone+rewrite entirely and return
     // Cow::Borrowed.
     let needs_work = messages.iter().any(|message| {
@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn test_redact_drops_oldest_image_first() {
         // Two images: one in msg[0] (older), one in msg[1] (last). The helper must only touch the
-        // older one — the last message carries the moving cache_control marker.
+        // older one; the last message carries the moving cache_control marker.
         let payload_a = "A".repeat(1024);
         let payload_b = "B".repeat(1024);
         let messages = vec![
@@ -1018,7 +1018,7 @@ mod tests {
         // Three images each 1 KiB. Target = 1500 bytes. Only the FIRST image should be redacted;
         // the second remains because we hit the budget after one (1024 >= 1500 is false, but
         // saturating_add gets us past after the first redaction since we then loop-check before the
-        // second image is considered? — no: the check is `bytes_dropped >= bytes_to_drop`, so 1024
+        // second image is considered? No: the check is `bytes_dropped >= bytes_to_drop`, so 1024
         // < 1500 means we redact the second too). Clarify by setting target = 1024.
         let payload = "X".repeat(1024);
         let messages = vec![

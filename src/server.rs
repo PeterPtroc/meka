@@ -99,7 +99,7 @@ pub async fn run_serve(
         new_inner
             .mcp_context
             .set_provider(Arc::clone(&new_inner.provider));
-        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
+        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1, using scripted mock provider");
         Arc::new(new_inner)
     } else {
         shared
@@ -145,7 +145,7 @@ pub async fn run_serve(
     gc_handle.abort();
     pruner_handle.abort();
     // Flush the SQLite WAL before exit so a quick restart doesn't pay WAL-replay cost.
-    // Best-effort — SQLite recovers from an unflushed WAL automatically.
+    // Best-effort, SQLite recovers from an unflushed WAL automatically.
     if let Err(error) = state.shared.session_manager.checkpoint().await {
         tracing::warn!("meka serve: WAL checkpoint on shutdown failed: {}", error);
     } else {
@@ -157,7 +157,7 @@ pub async fn run_serve(
             .map_err(|error| anyhow::anyhow!("server error: {}", error))?,
         Err(_elapsed) => {
             tracing::warn!(
-                "meka serve: drain exceeded {}s — forcing exit",
+                "meka serve: drain exceeded {}s, forcing exit",
                 shutdown_drain_timeout.as_secs()
             );
             // Non-zero exit so systemd / container orchestrators can distinguish forced
@@ -231,7 +231,7 @@ fn build_router(state: ServerState, auth: AuthRegistry, max_body_bytes: usize) -
 }
 
 /// Convert tower-http's plain-text 413 response to a Problem Detail. Runs as a middleware so the
-/// rewrite happens once for every layered route — handlers themselves never produce 413, so any
+/// rewrite happens once for every layered route, handlers themselves never produce 413, so any
 /// 413 the middleware observes came from the body-limit layer.
 async fn rewrite_payload_too_large(
     axum::extract::State(max_body_bytes): axum::extract::State<usize>,
@@ -288,7 +288,7 @@ async fn inject_problem_instance(
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     // Problem Details are sub-KB in practice; the 64 KB cap is a safety net.
     // On failure (body exceeds the limit or the stream errors), we return
-    // the status + headers with an empty body — the original stream is already
+    // the status + headers with an empty body; the original stream is already
     // consumed and can't be replayed. This is acceptable because meka never
     // produces a Problem Detail anywhere near this size.
     const PROBLEM_DETAIL_BUFFER_LIMIT: usize = 64 * 1024;

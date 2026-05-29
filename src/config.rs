@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// In-memory shape of `config.toml`. Each top-level `[section]` deserializes into its own
-/// sub-struct; missing sections fall back to `Default`. This is the raw deserialized form —
+/// sub-struct; missing sections fall back to `Default`. This is the raw deserialized form;
 /// `resolve_config` merges it with CLI flags and env vars to produce a [`ResolvedConfig`].
 #[derive(Debug, Deserialize, Default)]
 pub struct ConfigFile {
@@ -34,11 +34,11 @@ pub struct ConfigFile {
 }
 
 /// `[serve]` table: HTTP server config for `meka serve`. All fields optional with sensible
-/// defaults, but at least one `[[serve.tokens]]` entry is required — the server refuses to
+/// defaults, but at least one `[[serve.tokens]]` entry is required; the server refuses to
 /// start without one.
 #[derive(Debug, Deserialize, Default)]
 pub struct ServeConfig {
-    /// Listen address. Default `127.0.0.1:8080` — bind to loopback so a fresh deploy isn't
+    /// Listen address. Default `127.0.0.1:8080`: bind to loopback so a fresh deploy isn't
     /// accidentally world-reachable. Operators front with a reverse proxy (nginx, caddy) for
     /// TLS termination and put a public address there.
     pub bind: Option<String>,
@@ -65,7 +65,7 @@ pub struct ServeConfig {
     /// Request body size limit (bytes). Default 10 MiB.
     pub max_body_bytes: Option<usize>,
     /// Bearer tokens configured for this deployment. An empty list means no caller can
-    /// authenticate — the server runs but every request is rejected with 401.
+    /// authenticate; the server runs but every request is rejected with 401.
     pub tokens: Option<Vec<ServeTokenConfig>>,
 }
 
@@ -118,7 +118,7 @@ pub struct ThinkingConfig {
 pub struct McpConfig {
     /// Fallback permission for MCP tools when nothing more specific applies (no `tool_permissions`
     /// override, no server-level `permission`, no `readOnlyHint` from the server). If this is also
-    /// unset the hardcoded fallback is `Write` — i.e. strict.
+    /// unset the hardcoded fallback is `Write`, i.e. strict.
     pub default_permission: Option<String>,
     pub servers: Option<Vec<McpServerConfig>>,
     /// When true (default), every turn is gated on all enabled MCP servers being `Connected`. If
@@ -154,7 +154,7 @@ pub struct McpServerConfig {
     /// `mcp__<server>__<tool>` namespaced form). When set and non-empty, only these tools from
     /// this server are registered.
     pub allowed_tools: Option<Vec<String>>,
-    /// Optional block-list of raw tool names. Applied after [`Self::allowed_tools`] — tools listed
+    /// Optional block-list of raw tool names. Applied after [`Self::allowed_tools`]. Tools listed
     /// here are never registered.
     pub disabled_tools: Option<Vec<String>>,
     /// Raw tool names (server-advertised, not the `mcp__<server>__<tool>` namespaced form) that
@@ -174,7 +174,7 @@ pub struct McpServerConfig {
     /// Cap on the number of sampling calls this server may issue per meka session. Only meaningful
     /// when `sampling = true`. Default: 10.
     pub sampling_limit: Option<u32>,
-    /// When true, this server is skipped at startup — no process is spawned, no HTTP connect
+    /// When true, this server is skipped at startup: no process is spawned, no HTTP connect
     /// attempt is made. Lets users mute a flaky or in-development server without removing the
     /// entry.
     #[serde(default)]
@@ -248,7 +248,7 @@ pub struct WebConfig {
     /// Path to a PEM file containing one or more root CAs to trust on top of the system trust
     /// store. Used for corporate MITM proxies or self-signed internal services.
     pub ca_cert_file: Option<String>,
-    /// Reject plain `http://` URLs — only `https://` allowed.
+    /// Reject plain `http://` URLs: only `https://` allowed.
     pub https_only: Option<bool>,
     /// Minimum TLS version: `"1.0"`, `"1.1"`, `"1.2"`, or `"1.3"`. Anything else logs a warn and
     /// falls back to reqwest's default.
@@ -444,7 +444,7 @@ pub struct ProviderConfig {
     pub reasoning_effort: Option<String>,
     pub device_id: Option<String>,
     /// `claude-oauth` only: value emitted as `output_config.effort`. Mirrors Claude Code's effort
-    /// knob — see `temp/claude-code/src/utils/effort.ts`. Accepted values: `"low" | "medium" |
+    /// knob. See `temp/claude-code/src/utils/effort.ts`. Accepted values: `"low" | "medium" |
     /// "high"`. Defaults to `"high"`.
     pub effort: Option<String>,
     /// `claude-oauth` only: when true, meka sends the `redact-thinking-2026-02-12` beta header so
@@ -455,7 +455,7 @@ pub struct ProviderConfig {
 }
 
 /// Merged + validated runtime view of [`ConfigFile`], CLI flags, and env vars. This is what the
-/// rest of the binary reads — `ConfigFile` is for deserialization only. Resolution lives in
+/// rest of the binary reads; `ConfigFile` is for deserialization only. Resolution lives in
 /// `resolve_config` (Linux) and the non-Linux variant below it.
 #[derive(Debug)]
 pub struct ResolvedConfig {
@@ -486,7 +486,7 @@ pub struct ResolvedConfig {
     pub sandbox_backend: SandboxBackend,
     /// True when [`Self::sandbox_backend`] was auto-resolved (i.e. the user did not pin a value in
     /// `[shell].sandbox_backend`). Used to gate the "stronger sandbox available; install bwrap"
-    /// startup warn — we don't want to nag users who explicitly chose landlock.
+    /// startup warn. We don't want to nag users who explicitly chose landlock.
     pub sandbox_auto_resolved: bool,
     /// Cached probe of the resolved backend. Consulted by `warn_if_sandbox_issues` and by the lazy
     /// hard-error path in `src/tools/shell.rs` when read-mode `execute_command` is invoked.
@@ -513,7 +513,7 @@ pub struct ResolvedConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     /// Parsed [`Permission`] from `[mcp].default_permission`, carried so per-turn tool-permission
     /// resolution in `src/mcp.rs` doesn't have to re-read the config file. `None` means "no
-    /// `[mcp]` default configured" — resolution falls through to the hardcoded Write.
+    /// `[mcp]` default configured"; resolution falls through to the hardcoded Write.
     pub mcp_default_permission: Option<Permission>,
     pub user_instructions: Option<String>,
     pub builtin_allowed_tools: Option<Vec<String>>,
@@ -553,7 +553,7 @@ pub struct ResolvedServeConfig {
 }
 
 /// Validated token entry. The `token` field carries the final secret value with `${ENV}`
-/// substitution applied and `token_file` contents loaded — call sites compare against this
+/// substitution applied and `token_file` contents loaded; call sites compare against this
 /// directly via constant-time equality.
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -584,7 +584,7 @@ impl std::fmt::Debug for ResolvedServeToken {
 /// (inline plaintext) or file-backed.
 #[derive(Debug, Clone)]
 pub enum TokenSource {
-    /// Literal value in `token = "..."` with no `${ENV}` markers — discouraged outside
+    /// Literal value in `token = "..."` with no `${ENV}` markers, discouraged outside
     /// development.
     Inline,
     /// `token = "${ENV_VAR}"` substituted at config-load time.
@@ -689,7 +689,7 @@ impl ResolvedServeToken {
 
 /// Log a warning if `path` is readable by group or others on Unix. No-op on non-Unix.
 /// Matches the advisory guidance ("chmod 0600 recommended") without
-/// refusing to start — the file has already been read successfully, so we just nudge.
+/// refusing to start; the file has already been read successfully, so we just nudge.
 fn warn_if_world_readable(path: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -731,11 +731,11 @@ where
 }
 
 /// Replace `${VAR}` occurrences with the corresponding environment variable. `$$` is an escape
-/// for a literal `$`. Unknown variables return an error rather than expanding to empty — silent
+/// for a literal `$`. Unknown variables return an error rather than expanding to empty; silent
 /// expansion to empty would produce a runtime auth-bypass-shaped configuration.
 ///
 /// Returns the substituted string plus a boolean indicating whether at least one `${VAR}`
-/// expansion happened — callers use this to classify token provenance (`TokenSource::EnvVar`
+/// expansion happened; callers use this to classify token provenance (`TokenSource::EnvVar`
 /// vs `TokenSource::Inline`) for the startup warning.
 fn substitute_env(input: &str) -> Result<(String, bool), String> {
     let mut out = String::with_capacity(input.len());
@@ -820,8 +820,8 @@ pub fn parse_input_style(raw: &str) -> nu_ansi_term::Style {
 }
 
 /// Returns the meka config directory (the directory that contains `config.toml` and `skills/`).
-/// Honours the `MEKA_CONFIG_DIR` env var — used by tests for per-run isolation and by power users
-/// who want a non-standard location — before falling back to the platform-native
+/// Honours the `MEKA_CONFIG_DIR` env var, used by tests for per-run isolation and by power users
+/// who want a non-standard location, before falling back to the platform-native
 /// `dirs::config_dir().join("meka")`. The env-var route is the only reliable way to isolate state
 /// on macOS and Windows, where `dirs::config_dir()` doesn't honour `XDG_CONFIG_HOME`.
 pub fn meka_config_dir() -> Option<PathBuf> {
@@ -912,10 +912,10 @@ pub(crate) fn write_config_atomic(path: &Path, content: &str) -> std::io::Result
     })
 }
 
-/// Write a freshly initialized `config.toml` from the setup wizard. No `[shell]` table is emitted —
-/// the sandbox backend auto-resolves at runtime (bubblewrap preferred, landlock fallback; see
-/// [`resolve_sandbox_backend`]), so a pinned value is only ever needed when the user wants to
-/// override that default by hand.
+/// Write a freshly initialized `config.toml` from the setup wizard. No `[shell]` table is
+/// emitted; the sandbox backend auto-resolves at runtime (bubblewrap preferred, landlock
+/// fallback; see [`resolve_sandbox_backend`]), so a pinned value is only ever needed when the user
+/// wants to override that default by hand.
 pub(crate) fn write_config_file(
     provider_name: &str,
     model: &str,
@@ -1079,8 +1079,8 @@ fn resolve_permission(
 
 /// Resolve the active Linux sandbox backend.
 ///
-/// When the user pinned `[shell].sandbox_backend = "..."` in `config.toml`, that choice is binding
-/// — no silent fallback at runtime; an unavailable explicit backend surfaces at use time via the
+/// When the user pinned `[shell].sandbox_backend = "..."` in `config.toml`, that choice is binding,
+/// no silent fallback at runtime; an unavailable explicit backend surfaces at use time via the
 /// `BackendProbe::Missing` / `UserNamespaceDenied` variants.
 ///
 /// When the value is unset (`None`), meka probes bubblewrap and picks it if available, falling back
@@ -1136,14 +1136,14 @@ fn resolve_sandbox_backend(
         },
         capability => BackendProbe::Ok(capability),
     };
-    // `SandboxBackend::Landlock` is a stand-in here — the field exists for Linux config parity but
+    // `SandboxBackend::Landlock` is a stand-in here; the field exists for Linux config parity but
     // is never consulted on this platform.
     (SandboxBackend::Landlock, false, probe)
 }
 
 /// Merge `--eager-load-tool SERVER:TOOL` CLI values into the matching server's
 /// [`McpServerConfig::eager_load_tools`] list. Malformed entries and unknown server names warn and
-/// are skipped — same philosophy as `warn_on_stale_tool_config`. Appends to (never replaces) the
+/// are skipped, same philosophy as `warn_on_stale_tool_config`. Appends to (never replaces) the
 /// configured list, and deduplicates so a CLI flag that overlaps with `config.toml` doesn't grow
 /// the list.
 fn apply_cli_eager_load_overrides(raw_pairs: &[String], servers: &mut [McpServerConfig]) {
@@ -1320,8 +1320,8 @@ impl ResolvedConfig {
         // Only probe the sandbox backend when sandboxing is actually enabled. Skipping the probe
         // for `sandbox = false` saves the smoke-test cost on every invocation of subcommands that
         // don't touch the shell (`meka list`, `meka export`, `meka mcp list`, etc.) when the user
-        // has disabled sandboxing globally. The placeholder probe is never consulted in that state
-        // — the shell tool short-circuits on `sandbox_enabled = false`, and the warn helper early-
+        // has disabled sandboxing globally. The placeholder probe is never consulted in that state;
+        // the shell tool short-circuits on `sandbox_enabled = false`, and the warn helper early-
         // returns on `!state.enabled`.
         let (sandbox_backend, sandbox_auto_resolved, backend_probe) =
             if file_shell.sandbox.unwrap_or(true) {
@@ -1453,7 +1453,7 @@ pub fn context_window_for_model(model: &str) -> u64 {
 }
 
 /// Stable per-device identity for `claude-oauth` (embedded in `metadata.user_id`). Other providers
-/// get an empty string — we don't write a stub config file just to hold an unused value.
+/// get an empty string; we don't write a stub config file just to hold an unused value.
 mod device_id {
     use std::path::Path;
 
@@ -1843,7 +1843,7 @@ danger_accept_invalid_hostnames = true
 
     #[test]
     fn test_web_client_config_rejects_bad_min_tls_falls_back() {
-        // Invalid min_tls_version string logs a warn but doesn't abort — we fall through to
+        // Invalid min_tls_version string logs a warn but doesn't abort; we fall through to
         // reqwest's default rather than failing startup on a typo.
         let file = WebConfig {
             min_tls_version: Some("1.5".to_string()),
@@ -1982,7 +1982,7 @@ name = "claude-oauth"
         assert_eq!(device_id::resolve(Some("openai-api"), None), "");
         assert_eq!(device_id::resolve(Some("claude-api"), None), "");
         assert_eq!(device_id::resolve(None, None), "");
-        // Even an explicit configured value is suppressed when the provider isn't claude-oauth —
+        // Even an explicit configured value is suppressed when the provider isn't claude-oauth;
         // the field is provider-scoped.
         assert_eq!(device_id::resolve(Some("openai-api"), Some("explicit")), "");
     }
@@ -2036,8 +2036,8 @@ name = "claude-oauth"
 
     #[test]
     fn test_read_user_id_from_empty_string_returns_none() {
-        // An empty `userID` in claude.json shouldn't override meka's own random-generation fallback
-        // — treat it as "not configured".
+        // An empty `userID` in claude.json shouldn't override meka's own random-generation
+        // fallback; treat it as "not configured".
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("claude.json");
         std::fs::write(&path, r#"{"userID": ""}"#).expect("write");
@@ -2054,7 +2054,7 @@ name = "claude-oauth"
 
     #[test]
     fn test_read_user_id_from_non_string_returns_none() {
-        // A non-string `userID` (number, object, …) shouldn't crash — just decline to use the
+        // A non-string `userID` (number, object, …) shouldn't crash; just decline to use the
         // value.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("claude.json");
@@ -2379,7 +2379,7 @@ auth_token = "bearer-token"
 
     #[test]
     fn test_parse_input_style_unknown_falls_back_to_default() {
-        // Invalid keywords warn but must not panic — fall back to the same preset used when the key
+        // Invalid keywords warn but must not panic; fall back to the same preset used when the key
         // is unset.
         assert_eq!(parse_input_style("superbold"), default_input_style());
     }
@@ -2421,7 +2421,7 @@ read_file = "ask"
 
     #[test]
     fn test_tools_config_invalid_permission_drops_entry() {
-        // Drive the post-parse filter directly — ResolvedConfig::from_cli runs this loop. Checks
+        // Drive the post-parse filter directly; ResolvedConfig::from_cli runs this loop. Checks
         // that a bad level string is filtered out without panicking and that valid entries still
         // land.
         let raw: HashMap<String, String> = [
@@ -2559,7 +2559,7 @@ Rule 2.
         let cli = crate::cli::Cli::parse_from(["meka"]);
         let resolved = ResolvedConfig::from_cli(&cli);
 
-        // SAFETY: same as above — ENV_LOCK held for the full set→read→clear cycle.
+        // SAFETY: same as above, ENV_LOCK held for the full set→read→clear cycle.
         unsafe {
             std::env::remove_var("MEKA_CONFIG_DIR");
             std::env::remove_var("MEKA_INSTRUCTIONS");
@@ -2746,7 +2746,7 @@ enabled = ["read", "write"]
     }
 
     /// `sandbox_backend = "bubblewrap"` and `"landlock"` deserialize cleanly. Any other value,
-    /// including the prior internal alias `"bwrap"`, must be rejected — we don't want alias creep
+    /// including the prior internal alias `"bwrap"`, must be rejected; we don't want alias creep
     /// that would silently desync `meka setup`-generated configs from hand-edited ones.
     #[test]
     fn test_sandbox_backend_deserializes_strict_values() {
@@ -2763,7 +2763,7 @@ enabled = ["read", "write"]
     }
 
     /// When the user pins `sandbox_backend = "..."` explicitly, the resolver returns that choice
-    /// with `auto_resolved == false` — no silent fallback even if the probe would suggest
+    /// with `auto_resolved == false`: no silent fallback even if the probe would suggest
     /// otherwise.
     #[cfg(target_os = "linux")]
     #[test]
@@ -2804,7 +2804,7 @@ enabled = ["read", "write"]
     fn test_resolve_sandbox_backend_uses_platform_sandbox_on_non_linux() {
         use crate::sandbox::{BackendProbe, SandboxCapability};
 
-        // Explicit `Some(...)` is ignored on non-Linux — the field is documented as Linux-only.
+        // Explicit `Some(...)` is ignored on non-Linux; the field is documented as Linux-only.
         let (_backend, auto_resolved, probe) =
             resolve_sandbox_backend(Some(SandboxBackend::Bubblewrap));
         assert!(!auto_resolved);
@@ -2812,7 +2812,7 @@ enabled = ["read", "write"]
         // the consumer can drop into the platform's spawn path.
         match probe {
             BackendProbe::Ok(SandboxCapability::Unavailable) => {
-                panic!("Ok(Unavailable) is incoherent — expected a real capability or Missing")
+                panic!("Ok(Unavailable) is incoherent: expected a real capability or Missing")
             }
             BackendProbe::Ok(_) | BackendProbe::Missing { .. } => {}
             other => panic!("unexpected probe variant on non-Linux: {:?}", other),

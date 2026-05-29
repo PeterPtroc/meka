@@ -215,7 +215,7 @@ impl ToolOutput {
 }
 
 /// A callable tool surfaced to the model. Built-in tools live under `src/tools/`; MCP tools are
-/// wrapped at registration time. Implementors must be safe to invoke concurrently — the dispatch
+/// wrapped at registration time. Implementors must be safe to invoke concurrently; the dispatch
 /// loop runs all tool calls in a single assistant message in parallel via `join_all`.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -256,7 +256,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Empty registry with the default filter — no built-ins, no MCP tools. Used by out-of-band CLI
+    /// Empty registry with the default filter: no built-ins, no MCP tools. Used by out-of-band CLI
     /// commands that spin up a manager for a single RPC (`meka mcp reconnect`, `meka mcp tools`)
     /// and don't need a populated registry. The `dead_code` allow keeps the helper available for
     /// future CLI subcommands that need a throwaway registry.
@@ -369,7 +369,7 @@ impl ToolRegistry {
     }
 
     /// Returns tool definitions for the API call, excluding deferred tools. Permission-filtered
-    /// view — used by sub-agents which run at a fixed permission. The main agent uses
+    /// view, used by sub-agents which run at a fixed permission. The main agent uses
     /// [`Self::definitions_active_with_loaded`] so the tools array remains byte-identical across
     /// mid-session `/permission` toggles, keeping the Claude prompt cache warm on subsequent turns.
     pub fn definitions_for_permission(&self, permission: Permission) -> Vec<ToolDefinition> {
@@ -407,7 +407,7 @@ impl ToolRegistry {
 
     /// Returns every active tool definition regardless of the caller's current permission. The
     /// active set is the union of non-deferred tools and deferred tools whose schema has been
-    /// loaded via the `load_tool` meta-tool — `loaded` is computed by the caller (via
+    /// loaded via the `load_tool` meta-tool. `loaded` is computed by the caller (via
     /// [`crate::conversation::extract_loaded_tool_names_from_events`] for the agent loop,
     /// [`extract_loaded_tool_names`] for tests).
     ///
@@ -522,8 +522,8 @@ impl ToolRegistry {
             );
             return;
         }
-        // A collision here means two builtin tools share a name — a coding bug, not a runtime
-        // condition. Panic so the test suite catches it on the first build instead of letting the
+        // A collision here means two builtin tools share a name (a coding bug, not a runtime
+        // condition). Panic so the test suite catches it on the first build instead of letting the
         // second registration silently fail.
         #[allow(clippy::expect_used)]
         self.register(tool).expect("builtin tool name collision");
@@ -654,7 +654,7 @@ impl ToolRegistry {
 
     /// Build a tool registry for sub-agents. Sub-agents get the same session-scoped tools as the
     /// parent (load_tool, skill, render_image, todo_*, scratchpad_*) scoped to their own ephemeral
-    /// child session. `spawn_agent` remains absent — sub-agents cannot recursively spawn further
+    /// child session. `spawn_agent` remains absent; sub-agents cannot recursively spawn further
     /// sub-agents.
     ///
     /// `parent_session_id` + `inherited_scratchpad_names` enable read-only scratchpad inheritance:
@@ -870,7 +870,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_extract_loaded_tool_names_malformed_input() {
-        // load_tool called with no `name` field — must not panic, must not pollute the active set.
+        // load_tool called with no `name` field: must not panic, must not pollute the active set.
         let messages = vec![
             Message {
                 role: Role::Assistant,
@@ -903,7 +903,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_extract_loaded_tool_names_multi_block_message() {
-        // The model can emit several `tool_use` blocks in one assistant message — the matching
+        // The model can emit several `tool_use` blocks in one assistant message; the matching
         // `tool_result`s come back as separate blocks of one user message. Both must be processed.
         let assistant = Message {
             role: Role::Assistant,
@@ -1051,7 +1051,7 @@ pub(crate) mod tests {
         assert!(active.iter().any(|t| t.name == "write_file"));
         assert!(active.iter().any(|t| t.name == "edit_file"));
         assert!(active.iter().any(|t| t.name == "execute_command"));
-        // All five scratchpad tools ship default — no `load_tool` round-trip.
+        // All five scratchpad tools ship default: no `load_tool` round-trip.
         assert!(active.iter().any(|t| t.name == "scratchpad_write"));
         assert!(active.iter().any(|t| t.name == "scratchpad_read"));
         assert!(active.iter().any(|t| t.name == "scratchpad_edit"));
@@ -1096,8 +1096,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_definitions_active_errored_load_stays_hidden() {
-        // A load_tool call that ended in an error tool_result must NOT expose the deferred tool —
-        // the model's parameter shape was wrong, the schema was not delivered.
+        // A load_tool call that ended in an error tool_result must NOT expose the deferred tool:
+        // the model's parameter shape was wrong, so the schema was not delivered.
         let registry = test_registry().await;
         register_deferred_fixture(&registry, "fixture_alpha");
 
@@ -1111,8 +1111,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_definitions_active_load_tool_itself_always_visible() {
-        // load_tool is the bootstrap meta-tool — it must appear in the active set for an empty
-        // conversation, otherwise the model has no way to discover deferred tools.
+        // load_tool is the bootstrap meta-tool. It must appear in the active set for an empty
+        // conversation; otherwise the model has no way to discover deferred tools.
         let registry = test_registry().await;
         let active = registry.definitions_active(&[]);
         assert!(active.iter().any(|t| t.name == "load_tool"));
@@ -1122,7 +1122,7 @@ pub(crate) mod tests {
     async fn test_definitions_active_unknown_load_silently_dropped() {
         // load_tool was called for a tool that isn't registered. The scanner records the (errored)
         // result as not loaded, and even if it were loaded, the registry just doesn't contain a
-        // tool by that name — no crash, no spurious entry.
+        // tool by that name: no crash, no spurious entry.
         let registry = test_registry().await;
         let messages = vec![
             load_tool_use("u1", "no_such_tool"),

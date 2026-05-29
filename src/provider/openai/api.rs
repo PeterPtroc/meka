@@ -71,7 +71,7 @@ impl OpenAiProvider {
                             } = block
                             {
                                 // Chat Completions deliberately restricts the `tool` role's content
-                                // to text-only — the Chat reference defines
+                                // to text-only. The Chat reference defines
                                 // `ChatCompletionToolMessageParam.content` as `string | array of
                                 // ChatCompletionContentPartText` and notes "for tool messages, only
                                 // type `text` is supported." Vision is on `user`-role messages

@@ -44,13 +44,13 @@ In **none** mode, no tools are available. The agent can only respond with text.
 
 ## Filtering Built-in Tools
 
-Any built-in can be allow-listed, blocked, or have its required permission overridden via the `[tools]` table in `config.toml`. See [`[tools]` — built-in tool filters](../configuration/config-file.md#tools--built-in-tool-filters). Run `meka tools list` to see every built-in with its effective permission and current status.
+Any built-in can be allow-listed, blocked, or have its required permission overridden via the `[tools]` table in `config.toml`. See [`[tools]`: built-in tool filters](../configuration/config-file.md#tools-built-in-tool-filters). Run `meka tools list` to see every built-in with its effective permission and current status.
 
 ## MCP Tools
 
-When [MCP servers](../configuration/config-file.md#mcp-servers-mcp) are configured, their tools are registered under a namespaced name of the form `mcp__<server>__<tool>` (e.g. `mcp__notion__notion-search`). The `mcp__` prefix matches [Claude Code](https://github.com/anthropics/claude-code)'s convention and keeps MCP tools from colliding with built-in names. They appear in the system prompt catalogue alongside the built-ins — with their resolved permission level annotated inline — and are called the same way.
+When [MCP servers](../configuration/config-file.md#mcp-servers-mcp) are configured, their tools are registered under a namespaced name of the form `mcp__<server>__<tool>` (e.g. `mcp__notion__notion-search`). The `mcp__` prefix matches [Claude Code](https://github.com/anthropics/claude-code)'s convention and keeps MCP tools from colliding with built-in names. They appear in the system prompt catalogue alongside the built-ins, with their resolved permission level annotated inline, and are called the same way.
 
-meka also exposes seven built-in **MCP meta-tools** for browsing server-side resources and prompts. All are deferred by default — call `load_tool` with the exact name to make the schema available on the next turn:
+meka also exposes seven built-in **MCP meta-tools** for browsing server-side resources and prompts. All are deferred by default; call `load_tool` with the exact name to make the schema available on the next turn:
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
@@ -87,13 +87,13 @@ A built-in tool for managing a structured task list during a session. The agent 
 
 ## `todo_read`
 
-Reads the current task list and returns it as plain text. The main agent normally sees the latest list via the per-turn context block, so `todo_read` mostly matters for sub-agents (whose context isn't re-injected mid-loop) — but it's available to any agent that wants to fetch its current list explicitly.
+Reads the current task list and returns it as plain text. The main agent normally sees the latest list via the per-turn context block, so `todo_read` mostly matters for sub-agents (whose context isn't re-injected mid-loop), but it's available to any agent that wants to fetch its current list explicitly.
 
 ## `spawn_agent`
 
-Spawns a sub-agent to perform research, analysis, or any other delegated task. The sub-agent inherits the parent's permission level, gets its own private todo list (`todo_write` / `todo_read` operate on the sub-agent's own state), and cannot recursively spawn further sub-agents. The sub-agent runs silently — its tool calls are not surfaced to the terminal — and returns a single text report. Use this to keep exploratory or speculative work out of the main conversation context.
+Spawns a sub-agent to perform research, analysis, or any other delegated task. The sub-agent inherits the parent's permission level, gets its own private todo list (`todo_write` / `todo_read` operate on the sub-agent's own state), and cannot recursively spawn further sub-agents. The sub-agent runs silently (its tool calls are not surfaced to the terminal) and returns a single text report. Use this to keep exploratory or speculative work out of the main conversation context.
 
-Multiple `spawn_agent` calls in one assistant turn run in parallel — useful when independent investigations can proceed concurrently.
+Multiple `spawn_agent` calls in one assistant turn run in parallel; useful when independent investigations can proceed concurrently.
 
 ## `skill`
 
@@ -101,7 +101,7 @@ Loads a named skill's instructions. Skills are user-defined knowledge packages s
 
 ## `render_image`
 
-Displays an image the agent has in memory — as base64 bytes or in a scratchpad entry — as a multimodal content block. Complements `fetch_url` (network) and `read_file` (local file) by covering the third case: image data produced on the fly by a command pipeline.
+Displays an image the agent has in memory, as base64 bytes or in a scratchpad entry, as a multimodal content block. Complements `fetch_url` (network) and `read_file` (local file) by covering the third case: image data produced on the fly by a command pipeline.
 
 Typical workflow:
 
@@ -117,7 +117,7 @@ Parameters:
 | `from_scratchpad` | string | one of two | Name of a scratchpad entry containing base64-encoded image bytes |
 | `base64` | string | one of two | Base64-encoded image bytes, passed inline |
 
-Exactly one of `from_scratchpad` or `base64` must be provided. Prefer `from_scratchpad` for large images — inline base64 inflates tool-call JSON.
+Exactly one of `from_scratchpad` or `base64` must be provided. Prefer `from_scratchpad` for large images; inline base64 inflates tool-call JSON.
 
 The bytes must decode to a supported raster image. PNG, JPEG, GIF, WebP, and BMP pass through unchanged; TIFF, ICO, HDR, EXR, TGA, PNM, QOI, DDS, and Farbfeld are auto-converted to PNG. Size cap is ~3.75 MB on the final payload.
 
@@ -125,4 +125,4 @@ Only call `render_image` when the current model supports vision input.
 
 ## Redirecting output to the scratchpad
 
-Several tools — `execute_command`, `find_files`, `search_contents`, `fetch_url`, `spawn_agent` — accept an optional `scratchpad` parameter that redirects their output to a named scratchpad entry instead of returning it inline. When this parameter is set, the tool produces its **full, untruncated output**: internal result-count caps (`find_files` 200, `search_contents` 100) and length caps (`fetch_url` `max_length`) are lifted for the scratchpad-bound result.
+Several tools (`execute_command`, `find_files`, `search_contents`, `fetch_url`, `spawn_agent`) accept an optional `scratchpad` parameter that redirects their output to a named scratchpad entry instead of returning it inline. When this parameter is set, the tool produces its **full, untruncated output**: internal result-count caps (`find_files` 200, `search_contents` 100) and length caps (`fetch_url` `max_length`) are lifted for the scratchpad-bound result.

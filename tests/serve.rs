@@ -69,7 +69,7 @@ impl ServeTestHarness {
         // Startup is retried: a parallel test can re-claim our just-freed ephemeral port before
         // the server binds it, so the server fails to bind and exits. That surfaces here as a
         // `Disconnected` recv (stderr EOFs) rather than a timeout, and waiting longer wouldn't
-        // help — only a fresh port does. Retry a few times before giving up.
+        // help; only a fresh port does. Retry a few times before giving up.
         const MAX_ATTEMPTS: usize = 5;
         let mut last_logs = String::new();
         for _ in 0..MAX_ATTEMPTS {
@@ -151,7 +151,7 @@ scopes = [{scopes_str}]
             });
 
             // Wait for the server to bind. `Ok` means ready; any error (timeout, or the server
-            // exited and dropped the sender) means this attempt failed — kill it, collect its
+            // exited and dropped the sender) means this attempt failed: kill it, collect its
             // logs, and retry with a fresh port.
             if ready_rx.recv_timeout(Duration::from_secs(20)).is_ok() {
                 let client = reqwest::blocking::Client::builder()
@@ -574,7 +574,7 @@ fn streaming_turn_emits_turn_started_text_delta_and_finished() {
         "SSE responses must set X-Accel-Buffering: no so nginx (and friends) don't buffer",
     );
     let body = response.text().expect("body");
-    // The body is an SSE stream — coarse-grained string assertions are enough here.
+    // The body is an SSE stream; coarse-grained string assertions are enough here.
     assert!(
         body.contains("event: turn.started"),
         "stream must include turn.started; body was:\n{}",
@@ -820,7 +820,7 @@ fn patch_without_write_scope_returns_403() {
     // Create a session via a *second* token that has write scope, then PATCH via the read-
     // only token. The harness only supports a single token, so this test exercises the
     // negative path by attempting PATCH on a session ID the read-only token couldn't even
-    // have created — but since session IDs aren't owner-scoped, a nonexistent ID still hits
+    // have created, but since session IDs aren't owner-scoped, a nonexistent ID still hits
     // the scope check before the lookup. The check should reject with 403, not 404.
     let response = harness
         .request(
@@ -1384,7 +1384,7 @@ fn unknown_session_returns_404_on_every_mutating_endpoint() {
     let harness = ServeTestHarness::spawn("", mock_simple_turn());
     let unknown = uuid::Uuid::new_v4();
 
-    // DELETE is idempotent — a second DELETE (or a DELETE on a never-existed id) returns
+    // DELETE is idempotent: a second DELETE (or a DELETE on a never-existed id) returns
     // 204 No Content. PATCH, POST /turn, GET /messages all still 404 on a non-existent id.
     for (method, path, body) in [
         (
@@ -1480,17 +1480,17 @@ fn malformed_turn_body_missing_message_returns_422() {
 }
 
 /// Two concurrent turns on two different sessions complete in roughly the same wall time
-/// as a single turn — i.e. the agent loop doesn't serialize across sessions.
+/// as a single turn; i.e. the agent loop doesn't serialize across sessions.
 #[test]
 fn multi_session_parallel_happy_path() {
     let script = serde_json::json!([
         [
-            { "kind": "sleep", "ms": 800 },
+            { "kind": "sleep", "ms": 2000 },
             { "kind": "text", "text": "done" },
             { "kind": "message_end", "stop_reason": "end_turn" }
         ],
         [
-            { "kind": "sleep", "ms": 800 },
+            { "kind": "sleep", "ms": 2000 },
             { "kind": "text", "text": "done" },
             { "kind": "message_end", "stop_reason": "end_turn" }
         ]
@@ -1536,12 +1536,12 @@ fn multi_session_parallel_happy_path() {
         handle.join().expect("join");
     }
     let elapsed = started_at.elapsed();
-    // Each turn sleeps ~800ms. If they ran serialised, total wall time would be ≥1600ms.
-    // Give 1500ms of headroom for spawn + connection setup; if they ran in parallel the
-    // total should be well under that.
+    // Each turn sleeps ~2000ms, so a serialised run would take ≥4000ms. The 3500ms bound
+    // clears the ~2000ms parallel time plus process-spawn and connection overhead (notably
+    // higher on Windows CI) while staying well under the serial time.
     assert!(
-        elapsed < Duration::from_millis(1500),
-        "parallel turns should complete in <1500ms; elapsed={:?}",
+        elapsed < Duration::from_millis(3500),
+        "parallel turns should complete in <3500ms; elapsed={:?}",
         elapsed,
     );
 }
@@ -1904,7 +1904,7 @@ fn idempotency_key_in_flight_returns_409() {
             .expect("first")
     });
 
-    // Wait for the first request to enter its mock sleep — by then the Pending sentinel is
+    // Wait for the first request to enter its mock sleep; by then the Pending sentinel is
     // installed in the cache.
     std::thread::sleep(Duration::from_millis(250));
     let second = harness
@@ -1921,7 +1921,7 @@ fn idempotency_key_in_flight_returns_409() {
     let body: serde_json::Value = second.json().expect("parse");
     assert_eq!(body["type"], "https://meka.so/errors/idempotency");
 
-    // Let the first request finish — it commits the Pending entry into a Cached one.
+    // Let the first request finish; it commits the Pending entry into a Cached one.
     let first_response = first.join().expect("join");
     assert_eq!(first_response.status(), 200);
 }
@@ -2197,7 +2197,7 @@ fn patch_session_atomic_rejects_when_cwd_is_invalid() {
 /// holding any one of `sessions:r`, `mcp:r`, or `skills:r` must be admitted on all three.
 #[test]
 fn discovery_endpoints_share_read_scope_set() {
-    // Token scoped to `mcp:r` only — must be admitted on all three discovery endpoints.
+    // Token scoped to `mcp:r` only: must be admitted on all three discovery endpoints.
     let harness =
         ServeTestHarness::spawn_with("", mock_simple_turn(), "sk_test_mcp_only", &["mcp:r"]);
     for path in ["/v1/info", "/v1/skills", "/v1/mcp"] {
@@ -2258,7 +2258,7 @@ fn delete_on_idle_true_removes_db_row_on_eviction() {
     // Wait past the idle timeout for GC to fire.
     std::thread::sleep(Duration::from_secs(3));
 
-    // The DB row should now be gone — GET returns 404 (not a re-attach).
+    // The DB row should now be gone; GET returns 404 (not a re-attach).
     let get = harness
         .request(reqwest::Method::GET, &format!("/v1/sessions/{}", id))
         .send()
@@ -2274,7 +2274,7 @@ fn delete_on_idle_true_removes_db_row_on_eviction() {
 }
 
 /// A pre-attempt `turn-in-flight` 409 from `run_blocking_turn`'s `try_lock` must NOT be
-/// persisted in the idempotency cache — ticket Drop removes the Pending entry on 409.
+/// persisted in the idempotency cache; ticket Drop removes the Pending entry on 409.
 #[test]
 fn idempotency_cache_does_not_persist_turn_in_flight_409() {
     let script = serde_json::json!([
@@ -2447,7 +2447,7 @@ fn write_only_token_cannot_read_sessions() {
 
 /// `stop_reason = refusal` flows through the blocking response.  The mock provider emits
 /// `StopReason::Refusal("")` (empty refusal text), and `assemble_response` suppresses the
-/// `refusal_text` field via `skip_serializing_if` when empty — so this test asserts the
+/// `refusal_text` field via `skip_serializing_if` when empty, so this test asserts the
 /// stop_reason channel without exercising the refusal_text payload.
 #[test]
 fn refusal_stop_reason_propagates_through_blocking_response() {
@@ -2669,7 +2669,7 @@ fn sticky_allow_always_short_circuits_second_tool_call() {
     );
     assert_eq!(
         permission_required_count, 1,
-        "sticky allow_always must short-circuit the second tool prompt — saw {} \
+        "sticky allow_always must short-circuit the second tool prompt, saw {} \
          permission_required events; body was:\n{}",
         permission_required_count, body
     );
@@ -2782,7 +2782,7 @@ fn cancel_during_blocking_turn_returns_409_turn_cancelled() {
 
 /// Ask mode + `stream: false` is a non-functional combination (every tool would auto-deny).
 /// Ask-mode + blocking turn runs to completion; tool prompts are auto-denied with notices.
-/// (No tool calls in this fixture, so the turn succeeds cleanly — the auto-deny pathway is
+/// (No tool calls in this fixture, so the turn succeeds cleanly; the auto-deny pathway is
 /// exercised by `ask_mode_blocking_turn_auto_denies_with_notice`.)
 #[test]
 fn ask_mode_blocking_turn_succeeds() {
@@ -2881,8 +2881,8 @@ fn responses_body_unknown_field_returns_422() {
         .expect("id")
         .to_string();
     // Fire a stream so the permission_required event hits the channel, then post a
-    // request_id with an unknown extra field. The request_id doesn't even have to be valid
-    // — the body-parse rejection happens first.
+    // request_id with an unknown extra field. The request_id doesn't even have to be valid;
+    // the body-parse rejection happens first.
     let response = harness
         .request(
             reqwest::Method::POST,
@@ -3013,10 +3013,10 @@ fn openapi_spec_documents_403_409_and_no_stale_404_on_delete() {
         "DELETE should declare 409 for in-flight turn rejection",
     );
 
-    // DELETE returns 204 idempotently — no 404 in the spec.
+    // DELETE returns 204 idempotently; no 404 in the spec.
     assert!(
         paths["/v1/sessions/{id}"]["delete"]["responses"]["404"].is_null(),
-        "DELETE should no longer document 404 (idempotent — 204 for unknown ids)",
+        "DELETE should no longer document 404 (idempotent, 204 for unknown ids)",
     );
 }
 
@@ -3026,7 +3026,7 @@ fn openapi_spec_documents_403_409_and_no_stale_404_on_delete() {
 /// produces neither.
 #[test]
 fn option_fields_are_absent_not_null_when_unset() {
-    // mock_simple_turn produces a turn with no tool calls and no refusal — refusal_text
+    // mock_simple_turn produces a turn with no tool calls and no refusal; refusal_text
     // and display_summary should both be absent from the JSON.
     let harness = ServeTestHarness::spawn("", mock_simple_turn());
     let create = harness

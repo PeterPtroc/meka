@@ -37,7 +37,7 @@ const DEFAULT_BASE_URL: &str = "https://chatgpt.com";
 /// Default OAuth token endpoint. Refresh requests POST here as JSON.
 const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
-/// `originator` request header value. Mirrors Codex's `codex_cli_rs` slot — flagged as the calling
+/// `originator` request header value. Mirrors Codex's `codex_cli_rs` slot, flagged as the calling
 /// tool so OpenAI can attribute traffic.
 const ORIGINATOR: &str = "meka_cli";
 
@@ -250,7 +250,7 @@ impl OpenAiCodexProvider {
             MekaError::Provider("Codex refresh response missing access_token".to_string())
         })?;
 
-        // Re-extract `chatgpt_account_id` from the new id_token if the server returned one — the
+        // Re-extract `chatgpt_account_id` from the new id_token if the server returned one: the
         // workspace association can change.
         let account_id = match data.id_token.as_deref() {
             Some(id_token) => extract_account_id(id_token).ok().flatten(),

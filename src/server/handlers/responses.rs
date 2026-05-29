@@ -1,8 +1,8 @@
-//! `POST /v1/sessions/{id}/responses/{request_id}` — client responses to mid-turn
+//! `POST /v1/sessions/{id}/responses/{request_id}`: client responses to mid-turn
 //! `permission_required` SSE events. The HTTP API models only permission approvals; MCP
 //! elicitation auto-declines server-side without reaching the wire (service-to-service
 //! callers can't render interactive prompts). With only one outcome category the body has no
-//! `kind` discriminator — just `{"outcome": "..."}`.
+//! `kind` discriminator: just `{"outcome": "..."}`.
 
 use axum::{
     Extension,
@@ -78,7 +78,7 @@ pub async fn respond(
             format!("invalid response body: {}", error),
         )
     })?;
-    // A re-attached session has an empty pending parking lot — any `permission_required` request
+    // A re-attached session has an empty pending parking lot. Any `permission_required` request
     // emitted by the previous in-memory incarnation was already lost when the original SSE stream
     // disconnected. `resolve_permission` below will return `false` for unknown request ids in
     // that case, which surfaces to the client as 404 RequestNotFound.

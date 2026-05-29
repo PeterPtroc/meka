@@ -7,7 +7,7 @@
 - A script or orchestrator that embeds meka as a sub-agent backend.
 - Any cross-language client that speaks HTTP+JSON.
 
-All three entry points (`meka`, `meka acp`, `meka serve`) drive the same agent core — same tools, same providers, same session persistence. The HTTP API is a transport layer on top.
+All three entry points (`meka`, `meka acp`, `meka serve`) drive the same agent core: same tools, same providers, same session persistence. The HTTP API is a transport layer on top.
 
 ## Starting the server
 
@@ -93,7 +93,7 @@ data: {"turn_id":"...","session_id":"...","stop_reason":"end_turn","usage":{"inp
 
 ### Sessions
 
-A session is a persistent conversation with its own working directory, permission level, and message history. Sessions are stored in the same SQLite database as REPL and ACP sessions — they're interchangeable.
+A session is a persistent conversation with its own working directory, permission level, and message history. Sessions are stored in the same SQLite database as REPL and ACP sessions; they're interchangeable.
 
 ```
 POST   /v1/sessions          Create a session
@@ -128,7 +128,7 @@ Sessions persist server-side until explicitly deleted or evicted by the idle tim
 
 ### Turns
 
-A turn is one round-trip: you send a user message, the agent processes it (potentially calling tools in a loop), and returns a result. Turns are ephemeral — they're not stored as their own resource, but the messages they produce are persisted in the session's conversation history.
+A turn is one round-trip: you send a user message, the agent processes it (potentially calling tools in a loop), and returns a result. Turns are ephemeral: they're not stored as their own resource, but the messages they produce are persisted in the session's conversation history.
 
 ```
 POST   /v1/sessions/{id}/turn     Submit a turn
@@ -193,12 +193,12 @@ With `stream: false` (the default), the server holds the connection until the tu
 
 Key fields:
 
-- **`final_text`** — concatenated assistant text. This is what most bots display to the user.
-- **`messages`** — structured message array for clients that want richer rendering.
-- **`tool_calls`** — every tool the agent called during the turn, with inputs and outputs.
-- **`stop_reason`** — `end_turn`, `max_tokens`, or `refusal`.
-- **`notices`** — provider advisories and auto-deny warnings.
-- **`refusal_text`** — present only when `stop_reason` is `"refusal"`.
+- **`final_text`**: concatenated assistant text. This is what most bots display to the user.
+- **`messages`**: structured message array for clients that want richer rendering.
+- **`tool_calls`**: every tool the agent called during the turn, with inputs and outputs.
+- **`stop_reason`**: `end_turn`, `max_tokens`, or `refusal`.
+- **`notices`**: provider advisories and auto-deny warnings.
+- **`refusal_text`**: present only when `stop_reason` is `"refusal"`.
 
 ## Streaming response
 
@@ -215,7 +215,7 @@ With `stream: true`, the response is a `text/event-stream`. Every event has a mo
 | `turn.failed` | `error` (Problem Detail shape) | Turn failed mid-stream |
 | `turn.cancelled` | `reason` (`"client"` or `"server_shutdown"`) | Turn was cancelled |
 
-`turn.finished`, `turn.failed`, and `turn.cancelled` are **terminal** — the connection closes immediately after.
+`turn.finished`, `turn.failed`, and `turn.cancelled` are **terminal**; the connection closes immediately after.
 
 #### Content deltas
 
@@ -284,9 +284,9 @@ If no response arrives within 60 seconds, the permission defaults to `deny`.
 
 ### Ask mode with blocking turns
 
-When `stream: false` and the session is in `ask` mode, there is no SSE channel for permission prompts. The agent runs the turn with tool permissions **auto-denied** — each denied tool appends a `notice` to the response explaining what happened and suggesting `permission: "write"` or `stream: true`.
+When `stream: false` and the session is in `ask` mode, there is no SSE channel for permission prompts. The agent runs the turn with tool permissions **auto-denied**; each denied tool appends a `notice` to the response explaining what happened and suggesting `permission: "write"` or `stream: true`.
 
-**MCP elicitations** (interactive form prompts from MCP servers) are always auto-declined over HTTP — there is no channel for interactive input. A `notice` event is emitted when this happens.
+**MCP elicitations** (interactive form prompts from MCP servers) are always auto-declined over HTTP; there is no channel for interactive input. A `notice` event is emitted when this happens.
 
 **Recommendation:** non-interactive callers (bots, bridges, scripts) should create sessions with `permission: "read"` or `permission: "write"` so auto-deny never triggers. Use `stream: true` if you need approval flow.
 
@@ -312,25 +312,25 @@ Discovery endpoints (`/v1/info`, `/v1/skills`, `/v1/mcp`) accept any token with 
 Tokens are configured under `[[serve.tokens]]` in your config. Three forms are supported:
 
 ```toml
-# Inline plaintext — development only (a startup warning is logged)
+# Inline plaintext, development only (a startup warning is logged)
 [[serve.tokens]]
 token = "sk_dev_test123"
 scopes = ["sessions:r", "sessions:w"]
 
-# Environment variable substitution — recommended for CI/containers
+# Environment variable substitution, recommended for CI/containers
 [[serve.tokens]]
 token = "${MEKA_BRIDGE_TOKEN}"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 
-# File-based — recommended for production (chmod 0600)
+# File-based, recommended for production (chmod 0600)
 [[serve.tokens]]
 token_file = "/etc/meka/bridge.token"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 ```
 
-Token comparison uses constant-time equality to prevent timing side-channel attacks. Tokens never appear in logs — only a truncated SHA-256 fingerprint is used for diagnostics.
+Token comparison uses constant-time equality to prevent timing side-channel attacks. Tokens never appear in logs; only a truncated SHA-256 fingerprint is used for diagnostics.
 
 ## Idempotency
 
@@ -346,7 +346,7 @@ curl -X POST http://localhost:8080/v1/sessions/$ID/turn \
 
 If the same key is replayed, the server returns the cached response. If the same key is sent with a different body, it returns `409 Conflict`. Keys are scoped per-token and expire after 24 hours.
 
-Idempotency keys are **ignored for streaming responses** — streaming clients should reconnect by submitting a new turn.
+Idempotency keys are **ignored for streaming responses**; streaming clients should reconnect by submitting a new turn.
 
 ## Error handling
 
@@ -373,8 +373,8 @@ The `type` URI is the stable, machine-readable error code. Route error handling 
 | `/errors/auth` | 401 | Missing or invalid bearer token |
 | `/errors/auth-scope` | 403 | Token lacks the required scope |
 | `/errors/session-not-found` | 404 | Unknown session ID |
-| `/errors/session-locked` | 409 | Another meka process holds the session's DB lock (e.g. two `meka serve` instances sharing one DB) — wait or restart the other process |
-| `/errors/turn-in-flight` | 409 | A turn is already running on this session within *this* process — cancel it via `POST /cancel` first |
+| `/errors/session-locked` | 409 | Another meka process holds the session's DB lock (e.g. two `meka serve` instances sharing one DB); wait or restart the other process |
+| `/errors/turn-in-flight` | 409 | A turn is already running on this session within *this* process; cancel it via `POST /cancel` first |
 | `/errors/turn-cancelled` | 409 | Turn was cancelled |
 | `/errors/request-not-found` | 404 | Unknown or expired `request_id` |
 | `/errors/idempotency` | 409/429 | Key conflict (body mismatch: 409; cache cap: 429) |
@@ -393,8 +393,8 @@ These endpoints help clients inspect the server's capabilities at runtime.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `GET /v1/health/live` | None | Liveness probe — 200 if the process is up |
-| `GET /v1/health/ready` | None | Readiness probe — 200 if provider, DB, and MCP servers are healthy. Returns `status`, `session_db`, `provider_configured`, and `mcp_servers_healthy` (boolean, no server names). |
+| `GET /v1/health/live` | None | Liveness probe: 200 if the process is up |
+| `GET /v1/health/ready` | None | Readiness probe: 200 if provider, DB, and MCP servers are healthy. Returns `status`, `session_db`, `provider_configured`, and `mcp_servers_healthy` (boolean, no server names). |
 | `GET /v1/info` | Any read scope | Server version, model, capabilities |
 | `GET /v1/skills` | Any read scope | Installed skills |
 | `GET /v1/mcp` | Any read scope | MCP server connection status |
@@ -472,13 +472,13 @@ gc_scan_interval = "5m"
 delete_on_idle = false
 shutdown_drain_timeout = "30s"
 
-# Bridge token — env var substitution
+# Bridge token, env var substitution
 [[serve.tokens]]
 token = "${BRIDGE_TOKEN}"
 description = "telegram bridge"
 scopes = ["sessions:r", "sessions:w"]
 
-# Admin token — file-based
+# Admin token, file-based
 [[serve.tokens]]
 token_file = "/etc/meka/admin.token"
 description = "operator debugging"
@@ -569,16 +569,16 @@ location /v1/ {
 ```
 
 Key points:
-- **Disable buffering** — SSE events must not be buffered.
-- **Extend read timeout** — turns can take minutes; the default 60s is too short.
-- **Do not compress** — gzip/brotli on SSE responses swallow events. Exclude the `/turn` route from compression middleware.
+- **Disable buffering**: SSE events must not be buffered.
+- **Extend read timeout**: turns can take minutes; the default 60s is too short.
+- **Do not compress**: gzip/brotli on SSE responses swallow events. Exclude the `/turn` route from compression middleware.
 
 ## Endpoint reference
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/v1/health/live` | — | Liveness probe |
-| GET | `/v1/health/ready` | — | Readiness probe |
+| GET | `/v1/health/live` | None | Liveness probe |
+| GET | `/v1/health/ready` | None | Readiness probe |
 | GET | `/v1/info` | read | Server info |
 | GET | `/v1/skills` | read | Installed skills |
 | GET | `/v1/mcp` | read | MCP server status |
@@ -591,8 +591,8 @@ Key points:
 | POST | `/v1/sessions/{id}/turn` | `sessions:w` | Submit turn |
 | POST | `/v1/sessions/{id}/cancel` | `sessions:w` | Cancel turn |
 | POST | `/v1/sessions/{id}/responses/{request_id}` | `sessions:w` | Resolve permission prompt |
-| GET | `/v1/openapi.json` | — | OpenAPI spec |
-| GET | `/v1/docs` | — | Swagger UI |
+| GET | `/v1/openapi.json` | None | OpenAPI spec |
+| GET | `/v1/docs` | None | Swagger UI |
 
 For full request/response schemas, see `/v1/openapi.json` on a running server, or browse it interactively at `/v1/docs` (Swagger UI). Both endpoints are unauthenticated so CI pipelines and code generators can fetch the spec without a token.
 

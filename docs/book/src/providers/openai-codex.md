@@ -2,7 +2,7 @@
 
 The `openai-codex` provider talks to OpenAI's subscription endpoint using the OAuth tokens issued by ChatGPT login. It's the OpenAI counterpart to [`claude-oauth`](./claude-oauth.md): instead of paying per-token via an API key, you authenticate with your ChatGPT Plus / Pro / Team / Business / Enterprise account and your usage counts against your subscription.
 
-> **Note:** This provider replicates the wire shape that OpenAI's first-party [Codex CLI](https://github.com/openai/codex) sends. It targets `chatgpt.com/backend-api/codex/responses` using the **OpenAI Responses API** — a different protocol than [`openai-api`](./openai-api.md), which uses Chat Completions against `api.openai.com`. The two providers are not interchangeable.
+> **Note:** This provider replicates the wire shape that OpenAI's first-party [Codex CLI](https://github.com/openai/codex) sends. It targets `chatgpt.com/backend-api/codex/responses` using the **OpenAI Responses API**, a different protocol than [`openai-api`](./openai-api.md), which uses Chat Completions against `api.openai.com`. The two providers are not interchangeable.
 
 ## Configuration
 
@@ -38,7 +38,7 @@ The `effort` field maps to the Responses API `reasoning.effort` knob and is only
 
 ## Supported Models
 
-Whatever your ChatGPT subscription tier exposes — typically `gpt-5`, `gpt-5-codex`, `o3`, `o4-mini`, etc. The model field on the request body is forwarded verbatim; meka doesn't gate which model strings are valid.
+Whatever your ChatGPT subscription tier exposes: typically `gpt-5`, `gpt-5-codex`, `o3`, `o4-mini`, etc. The model field on the request body is forwarded verbatim; meka doesn't gate which model strings are valid.
 
 ## How It Works
 
@@ -46,7 +46,7 @@ Each request:
 
 1. **Auth header set**: `Authorization: Bearer <access_token>`, `ChatGPT-Account-ID: <workspace_id>` (extracted from the JWT id_token at login), `originator: meka_cli`, plus a `User-Agent` identifying meka.
 2. **Cookie jar enabled**: `chatgpt.com` is fronted by Cloudflare; bot-clearance cookies (`__cf_bm` etc.) persist across requests automatically.
-3. **Body**: standard Responses API JSON — `instructions`, `input` (an array of `message` / `function_call` / `function_call_output` items), `tools`, optional `reasoning.effort`.
+3. **Body**: standard Responses API JSON: `instructions`, `input` (an array of `message` / `function_call` / `function_call_output` items), `tools`, optional `reasoning.effort`.
 4. **Stream**: SSE events: `response.output_text.delta` for text, `response.output_item.added` / `…done` for tool calls, `response.reasoning_text.delta` for thinking, `response.completed` for end-of-turn with token usage.
 5. **Token refresh**: when the access token is within 5 minutes of expiry, meka transparently refreshes it against `auth.openai.com/oauth/token` before the next request.
 
@@ -61,8 +61,8 @@ Each request:
 
 If you have both a ChatGPT subscription and an OpenAI API key:
 
-- Use **`openai-codex`** for interactive work — it's billed against your subscription's usage cap rather than per-token, so heavy use is cheaper for most personal patterns.
-- Use **`openai-api`** for scripted / unattended work — API keys are stable, work with non-OpenAI Chat-Completions-compatible servers (Ollama, vLLM, OpenRouter), and don't depend on the Cloudflare cookie jar.
+- Use **`openai-codex`** for interactive work: it's billed against your subscription's usage cap rather than per-token, so heavy use is cheaper for most personal patterns.
+- Use **`openai-api`** for scripted / unattended work: API keys are stable, work with non-OpenAI Chat-Completions-compatible servers (Ollama, vLLM, OpenRouter), and don't depend on the Cloudflare cookie jar.
 
 ## Logging Out
 

@@ -27,7 +27,7 @@ where
         if bytes[i] != b'$' || i + 1 >= bytes.len() || bytes[i + 1] != b'{' {
             // SAFETY: `input` is a valid &str, so slicing from a byte index that is a char boundary
             // yields a valid &str. `i` is always on a char boundary because we advance by
-            // `ch.len_utf8()` below or jump to `end + 1` (the byte after a `}` — ASCII, always a
+            // `ch.len_utf8()` below or jump to `end + 1` (the byte after a `}`, ASCII, always a
             // boundary).
             let rest = &input[i..];
             // The outer `while i < bytes.len()` guard ensures `rest` is non-empty, so
@@ -41,7 +41,7 @@ where
         // Find matching `}`.
         let start = i + 2;
         let Some(end_offset) = bytes[start..].iter().position(|&b| b == b'}') else {
-            // Unterminated `${` — emit verbatim and stop scanning.
+            // Unterminated `${`: emit verbatim and stop scanning.
             out.push_str(&input[i..]);
             break;
         };
@@ -53,7 +53,7 @@ where
             None => (body.trim(), None),
         };
         if var_name.is_empty() {
-            // `${}` — emit verbatim.
+            // `${}`: emit verbatim.
             out.push_str(&input[i..=end]);
         } else {
             match lookup(var_name) {
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn multiple_vars_same_missing_dedup() {
         let (_out, missing) = expand_env_vars("${X} ${X} ${Y}", fixed(&[]));
-        // Not deduped at this layer — caller dedupes across fields.
+        // Not deduped at this layer; the caller dedupes across fields.
         assert_eq!(missing, vec![
             "X".to_string(),
             "X".to_string(),

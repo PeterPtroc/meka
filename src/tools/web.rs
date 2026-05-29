@@ -22,7 +22,7 @@ use crate::{
 
 /// Build the shared `reqwest::Client` for `fetch_url` + `web_search` from the resolved
 /// [`WebClientConfig`]. Errors propagate so startup fails cleanly on a bad proxy URL or unreadable
-/// CA file — safer than silently falling back to an unconfigured client that ignores user intent.
+/// CA file, safer than silently falling back to an unconfigured client that ignores user intent.
 pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(&cfg.user_agent)
@@ -51,7 +51,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
             builder = builder.no_proxy();
         }
         Some(url) => {
-            // Pre-validate the scheme before handing off — `reqwest::Proxy::all` is lenient (it'll
+            // Pre-validate the scheme before handing off; `reqwest::Proxy::all` is lenient (it'll
             // accept `"not-a-url"` as `http://not-a-url/`), which silently routes traffic through a
             // non-existent host. A typo in the config should fail loudly.
             const ALLOWED_SCHEMES: &[&str] = &[
@@ -92,9 +92,9 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
                 error
             ))
         })?;
-        // `from_pem_bundle` silently returns an empty Vec when the file contains no PEM blocks —
-        // that's not what the user asked for. Reject explicitly so typos don't ship a client with
-        // zero added CAs.
+        // `from_pem_bundle` silently returns an empty Vec when the file contains no PEM blocks.
+        // That's not what the user asked for. Reject explicitly so typos don't ship a client
+        // with zero added CAs.
         if certs.is_empty() {
             return Err(MekaError::Config(format!(
                 "[web].ca_cert_file '{}': no PEM certificates found in file",
@@ -122,14 +122,14 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
 
     if cfg.danger_accept_invalid_certs {
         tracing::warn!(
-            "[web].danger_accept_invalid_certs is enabled — TLS certificate \
+            "[web].danger_accept_invalid_certs is enabled. TLS certificate \
              validation is OFF; any HTTPS response could be spoofed"
         );
         builder = builder.danger_accept_invalid_certs(true);
     }
     if cfg.danger_accept_invalid_hostnames {
         tracing::warn!(
-            "[web].danger_accept_invalid_hostnames is enabled — TLS hostname \
+            "[web].danger_accept_invalid_hostnames is enabled. TLS hostname \
              verification is OFF; any HTTPS response could be spoofed"
         );
         builder = builder.danger_accept_invalid_hostnames(true);
@@ -142,7 +142,7 @@ pub(crate) fn build_web_client(cfg: &WebClientConfig) -> Result<reqwest::Client>
 
 // Static CSS selectors for search result parsing (parsed once, reused on every call).
 // `expect()` is correct here: the selector strings are compile-time literals, so a parse failure
-// would mean we shipped a typo — caught on the first test run, not in production.
+// would mean we shipped a typo, caught on the first test run, not in production.
 #[allow(clippy::expect_used)]
 static DDG_RESULT: LazyLock<scraper::Selector> =
     LazyLock::new(|| scraper::Selector::parse(".result").expect("static CSS selector"));
@@ -199,8 +199,8 @@ impl Tool for FetchUrlTool {
                           to true to return untreated HTML. If the URL resolves to a \
                           supported raster image (PNG, JPEG, GIF, WebP, BMP, TIFF, \
                           ICO, HDR, EXR, TGA, PNM, QOI, DDS, or Farbfeld), the image \
-                          is returned as a multimodal content block directly — \
-                          non-native formats are transparently converted to PNG. \
+                          is returned as a multimodal content block directly. \
+                          Non-native formats are transparently converted to PNG. \
                           `max_length`, `regex`, and `raw` do not apply to image \
                           responses. Only fetch image URLs if the current model \
                           supports vision input."
@@ -344,7 +344,7 @@ impl Tool for FetchUrlTool {
         };
 
         // When the caller redirects to the scratchpad we produce full content regardless of
-        // max_length — the scratchpad is the overflow buffer.
+        // max_length; the scratchpad is the overflow buffer.
         let max_length = if redirects_to_scratchpad(&input) {
             0
         } else {
@@ -468,17 +468,17 @@ impl Tool for WebSearchTool {
 }
 
 /// Distinguishes the three meaningful states of a DuckDuckGo HTML response. Before this enum, a
-/// CAPTCHA page was indistinguishable from a legitimate zero-hit query — both produced `""` and the
-/// agent saw `"No search results found."` — which encouraged blind retries against the same
+/// CAPTCHA page was indistinguishable from a legitimate zero-hit query; both produced `""` and the
+/// agent saw `"No search results found."`, which encouraged blind retries against the same
 /// rate-limited endpoint.
 enum DdgOutcome {
     /// At least one result was parsed. The inner string is the rendered, numbered,
     /// markdown-formatted result list.
     Results(String),
-    /// The page parsed cleanly but contained zero `.result` blocks and no CAPTCHA marker — a
+    /// The page parsed cleanly but contained zero `.result` blocks and no CAPTCHA marker, a
     /// legitimate zero-hit query.
     Empty,
-    /// `#anomaly-modal` or `data-testid="anomaly-modal"` found in the DOM — DDG gated us with their
+    /// `#anomaly-modal` or `data-testid="anomaly-modal"` found in the DOM. DDG gated us with their
     /// bot challenge.
     Captcha,
 }
@@ -516,9 +516,9 @@ fn render_snippet(snippet_el: scraper::ElementRef<'_>) -> String {
             Node::Text(text) => out.push_str(text),
             Node::Element(element) => {
                 // Collect the inner text and wrap in `**` iff this is a `<b>` or `<strong>`. Other
-                // elements (rare — e.g. `<a>` inside snippets) fall through as plain text so we
+                // elements (rare, e.g. `<a>` inside snippets) fall through as plain text so we
                 // don't miss content. `ElementRef::wrap` returns `Some` for any node whose
-                // `value()` is `Node::Element` — which is exactly the arm we're in, so the
+                // `value()` is `Node::Element`, which is exactly the arm we're in, so the
                 // `expect` documents an unconditionally-true invariant rather than a runtime check.
                 #[allow(clippy::expect_used)]
                 let inner_el =
@@ -556,10 +556,10 @@ fn clip_snippet(text: &str, max_chars: usize) -> String {
 /// both; any match filters the block out. Confirmed in
 /// `tests/fixtures/ddg_with_ad.html`:
 ///
-/// 1. **Wrapper class** — ads carry `result--ad` on the outer `<div class="result …">`. Organic
+/// 1. **Wrapper class**: ads carry `result--ad` on the outer `<div class="result …">`. Organic
 ///    results use `web-result`.
-/// 2. **Resolved link target** — after decoding DDG's `/l/?uddg=…` redirect, the ad's destination
-///    is `duckduckgo.com/y.js?ad_domain=…` (their ad-click tracker). This catches ads even if DDG
+/// 2. **Resolved link target**: after decoding DDG's `/l/?uddg=…` redirect, the ad's destination is
+///    `duckduckgo.com/y.js?ad_domain=…` (their ad-click tracker). This catches ads even if DDG
 ///    drops the `result--ad` class without warning.
 fn is_ad_result(block: scraper::ElementRef<'_>, resolved_url: Option<&str>) -> bool {
     if block.value().classes().any(|c| c == "result--ad") {
@@ -578,7 +578,7 @@ fn is_ad_result(block: scraper::ElementRef<'_>, resolved_url: Option<&str>) -> b
 
 /// Decode DDG's legacy `/l/?uddg=<percent-encoded-url>` redirect into the direct URL. Current DDG
 /// usually puts the direct URL on the href already, but older cached pages (and the /lite/
-/// endpoint) can still emit the redirect wrapper — keep the decode as a fallback so we don't
+/// endpoint) can still emit the redirect wrapper; keep the decode as a fallback so we don't
 /// regress.
 fn resolve_result_href(href: &str) -> String {
     if let Some(pos) = href.find("uddg=") {
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_parse_duckduckgo_detects_captcha_fixture() {
-        // The saved CAPTCHA response — `#anomaly-modal` is the primary marker. Any future
+        // The saved CAPTCHA response: `#anomaly-modal` is the primary marker. Any future
         // regression in detection fails this test against the real DDG bot-challenge page.
         let html = include_str!("../../tests/fixtures/ddg_captcha.html");
         assert!(matches!(
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_parse_duckduckgo_skips_ad_by_y_js_url() {
-        // Ad without the `result--ad` class — caught via the resolved-URL signal. Guards against
+        // Ad without the `result--ad` class, caught via the resolved-URL signal. Guards against
         // DDG silently renaming the class but keeping the y.js ad-click tracker.
         let html = r#"<html><body>
             <div class="result web-result">
@@ -924,7 +924,7 @@ mod tests {
         }
         assert!(
             !text.contains("11. **"),
-            "too many results — ad wasn't dropped: {}",
+            "too many results; ad wasn't dropped: {}",
             text
         );
     }
@@ -957,7 +957,7 @@ mod tests {
             proxy: Some("socks5h://127.0.0.1:1080".to_string()),
             ..WebClientConfig::default()
         };
-        // We don't actually connect — just verify reqwest accepts the proxy URL shape.
+        // We don't actually connect; we just verify reqwest accepts the proxy URL shape.
         assert!(build_web_client(&cfg).is_ok());
     }
 

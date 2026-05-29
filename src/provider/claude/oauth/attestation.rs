@@ -1,6 +1,6 @@
 //! Claude Code anti-cheat machinery: request fingerprint, xxHash64-based `cch` attestation, billing
-//! header synthesis, and Stainless-SDK-matching HTTP headers. All of this is OAuth-specific —
-//! direct API-key requests (`claude-api`) don't send billing headers, so there's no caller.
+//! header synthesis, and Stainless-SDK-matching HTTP headers. All of this is OAuth-specific.
+//! Direct API-key requests (`claude-api`) don't send billing headers, so there's no caller.
 //!
 //! References:
 //! - Claude Code source: `src/constants/system.ts`, `src/utils/fingerprint.ts`,
@@ -231,7 +231,7 @@ fn claude_user_agent() -> String {
 }
 
 /// Stainless SDK / runtime versions. Must match the release corresponding to `CC_VERSION`. Values
-/// verified against wire captures of real Claude Code traffic — the runtime reports as `node`
+/// verified against wire captures of real Claude Code traffic. The runtime reports as `node`
 /// (Bun's Node.js compat layer) with a fixed version string.
 const STAINLESS_RUNTIME: &str = "node";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
@@ -576,7 +576,7 @@ mod tests {
         assert!(header.contains("cch=00000"));
         assert!(header.ends_with("cch=00000;"));
 
-        // Fingerprint suffix is dynamic per first user message — different first message →
+        // Fingerprint suffix is dynamic per first user message: different first message →
         // different suffix.
         let other =
             generate_billing_header(&[Message::user("totally different first user message text")]);

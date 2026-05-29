@@ -75,7 +75,7 @@ pub(super) async fn run_connector(
 
 /// Connect a single `Pending` server: wrap the existing `connect_server` in a per-server timeout,
 /// capture instructions, discover + register tools into the registry, and flip the entry's state to
-/// `Connected` on success or `Failed` on error. Never panics — errors are logged and reflected in
+/// `Connected` on success or `Failed` on error. Never panics; errors are logged and reflected in
 /// [`ServerState::Failed`] so the turn gate can surface them.
 async fn connect_one(
     entry: Arc<ServerEntry>,
@@ -88,7 +88,7 @@ async fn connect_one(
     // connect_server's future can be `!Send` for OAuth-authenticated servers (rmcp 1.5 holds a
     // `form_urlencoded::Serializer` across an await in its auth module, whose `Option<&dyn Fn(&str)
     // -> Cow<[u8]>>` closure slot is not `Sync`). Drive it on a `spawn_blocking` thread using the
-    // outer runtime's `Handle` — same approach `reconnect` uses.
+    // outer runtime's `Handle`, the same approach `reconnect` uses.
     let handle = tokio::runtime::Handle::current();
     let entry_for_connect = Arc::clone(&entry);
     let server_name_for_task = server_name.clone();
@@ -170,7 +170,7 @@ async fn connect_one(
         service: Arc::clone(&service_arc),
     };
 
-    // Discover + register tools. Any error here doesn't undo the Connected state — the server is
+    // Discover + register tools. Any error here doesn't undo the Connected state. The server is
     // reachable, just its tool list failed. Surface it as a warn and leave tool set empty.
     match discover_and_register_tools(&entry, mcp_default_permission, &manager).await {
         Ok(count) => {
@@ -198,7 +198,7 @@ async fn discover_and_register_tools(
     use crate::tools::Tool as _;
     let adapters = build_mcp_adapters(entry, mcp_default_permission).await?;
     // Decide which adapters should ship deferred BEFORE we erase the concrete type into `Arc<dyn
-    // Tool>` — `tool_should_eager_load` needs the raw name, which the trait object doesn't expose.
+    // Tool>`: `tool_should_eager_load` needs the raw name, which the trait object doesn't expose.
     let deferred_names: Vec<String> = adapters
         .iter()
         .filter(|adapter| {
@@ -336,7 +336,7 @@ async fn build_mcp_adapters(
 }
 
 /// Connect to an MCP server, dispatching to the auth or no-auth path. This function is only called
-/// from top-level startup code (e.g. `connect_all`) where a `Send` future isn't required — the
+/// from top-level startup code (e.g. `connect_all`) where a `Send` future isn't required: the
 /// OAuth path pulls in an rmcp auth future that is `!Send`. Connect to an MCP server. The returned
 /// future is `!Send` when the server config uses OAuth (rmcp 1.5's auth module holds a `!Sync`
 /// closure across an await). Callers that need a `Send` future (e.g. `Tool::execute` during

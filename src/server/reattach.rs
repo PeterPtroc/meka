@@ -10,7 +10,7 @@
 //!
 //! Permission and per-session capabilities are persisted on the `sessions` row
 //! (`src/session.rs::SessionSummary`), so a session created with `permission = "read"` re-attaches
-//! with `permission = "read"` — not the process default.
+//! with `permission = "read"`, not the process default.
 
 use std::sync::{Arc, RwLock};
 
@@ -65,7 +65,7 @@ pub async fn ensure_session_loaded(
             .with("session_id", id.to_string())
         })?;
 
-    // Resolve persisted permission. NULL on legacy rows (REPL / ACP / pre-0.27 HTTP) — fall back
+    // Resolve persisted permission. NULL on legacy rows (REPL / ACP / pre-0.27 HTTP): fall back
     // to the process default. The HTTP `create_session` handler validates against the enabled set
     // at insert time, but a stored permission could in principle become disabled by an operator
     // editing config; defensively re-check.
@@ -99,7 +99,7 @@ pub async fn ensure_session_loaded(
     };
 
     // When no persisted `cwd` exists (legacy rows), default to the server's process working
-    // directory. Propagate `current_dir()` failure as 500 — the operator can fix it.
+    // directory. Propagate `current_dir()` failure as 500: the operator can fix it.
     let cwd_path = match summary.cwd.clone() {
         Some(path) => path,
         None => std::env::current_dir().map_err(|error| {
@@ -121,7 +121,7 @@ pub async fn ensure_session_loaded(
         .session_manager
         .lock_session(id)
         .map_err(|error| {
-            // `session-locked` (not `turn-in-flight`) — this is a cross-process file-lock
+            // `session-locked` (not `turn-in-flight`): this is a cross-process file-lock
             // conflict, not an in-process turn concurrency issue.
             ProblemDetail::new(
                 ErrorKind::SessionLocked,
@@ -165,7 +165,7 @@ pub async fn ensure_session_loaded(
     };
 
     // Use DB-persisted timestamps so GC + re-attach doesn't reset creation time.
-    // Fall back to `Utc::now()` on parse failure (shouldn't happen — we wrote the RFC 3339).
+    // Fall back to `Utc::now()` on parse failure (shouldn't happen; we wrote the RFC 3339).
     let now = chrono::Utc::now();
     let parsed_created_at = chrono::DateTime::parse_from_rfc3339(&summary.created_at)
         .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -195,7 +195,7 @@ pub async fn ensure_session_loaded(
         in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
-    // Acquire the write lock to insert. Re-check the map under the write lock — a concurrent
+    // Acquire the write lock to insert. Re-check the map under the write lock: a concurrent
     // request may have reconstructed the same session between our read and write acquisitions; if
     // so, drop ours and return theirs so the DB-row lock + agent isn't duplicated. The
     // `session_lock` and `agent` we built are dropped here, releasing the OS file lock cleanly.

@@ -8,7 +8,7 @@
 //!
 //! When no in-flight call from the originating server is registered (the server somehow elicited
 //! outside of a tool call, or the call's progress guard already dropped), the request is auto-
-//! declined — the safe default, matching the pre-refactor "no shell sink installed" behaviour.
+//! declined: the safe default, matching the pre-refactor "no shell sink installed" behaviour.
 
 use rmcp::model::{CreateElicitationResult, ElicitationAction};
 

@@ -5,7 +5,7 @@
 //! Activated by `meka acp` only when the `MEKA_ACP_MOCK_PROVIDER` environment variable is set to
 //! `1`. The variable also names the file containing the JSON-encoded script (see
 //! [`crate::provider::mock::load_script_from_env`]). Anything else (production, REPL, oneshot) is
-//! unaffected — this module is only reachable via the env-gated path.
+//! unaffected; this module is only reachable via the env-gated path.
 //!
 //! The mock is intentionally minimal: text deltas, thinking deltas, tool-use lifecycle,
 //! `MessageEnd`, plus a synthetic `Fail` event that returns an error from [`Provider::stream`] so
@@ -26,7 +26,7 @@ use crate::{
 
 /// Serialized event used by [`MockProvider`]. Mirrors the runtime [`StreamEvent`] enum but uses
 /// owned struct-tagged variants so scripts can be loaded from JSON (`serde`'s internally-tagged
-/// enums don't accept tuple/newtype variants). `Sleep` is the one non-stream-event variant — it
+/// enums don't accept tuple/newtype variants). `Sleep` is the one non-stream-event variant. It
 /// stalls the mock so a test can fire `session/cancel` mid-turn; the sleep races against the
 /// cancellation token, so cancel cuts it short cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +179,7 @@ impl Provider for MockProvider {
                         }
                     };
                     if event_sender.send(stream_event).await.is_err() {
-                        // Receiver dropped — test ended early; not an error.
+                        // Receiver dropped; the test ended early. Not an error.
                         return Ok(());
                     }
                 }

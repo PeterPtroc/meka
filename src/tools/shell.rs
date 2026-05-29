@@ -44,9 +44,9 @@ impl Tool for ExecuteCommandTool {
         ToolDefinition {
             name: "execute_command".to_string(),
             description: "Execute a shell command and return its output. On Unix the \
-                command runs via `sh -c <command>` — POSIX `$VAR` expansion applies; \
+                command runs via `sh -c <command>`. POSIX `$VAR` expansion applies; \
                 quote with single quotes or `\\$` to pass a literal `$`. On Windows \
-                the command runs via `powershell.exe -Command <command>` — use \
+                the command runs via `powershell.exe -Command <command>`. Use \
                 PowerShell syntax directly (e.g. `$var = ...`, `$env:PATH`); do NOT \
                 wrap with another `powershell -Command` or the outer PowerShell will \
                 expand your inner `$var` references to empty strings. In read mode \
@@ -110,7 +110,7 @@ impl Tool for ExecuteCommandTool {
             // a tool result it could try to recover from.
             if let Some(reason) = crate::sandbox::backend_unavailable_reason(&self.backend_probe) {
                 // `sandbox_backend` is Linux-only; on other platforms there's nothing to
-                // reconfigure — the only escape hatch is write mode.
+                // reconfigure. The only escape hatch is write mode.
                 #[cfg(target_os = "linux")]
                 let message = format!(
                     "configured sandbox backend ({}) is unavailable: {}. \
@@ -133,7 +133,7 @@ impl Tool for ExecuteCommandTool {
         }
 
         // Delegate to the editor's hosted terminal when offered. `Read` mode skips delegation to
-        // preserve the local sandbox jail — the editor's terminal has no equivalent.
+        // preserve the local sandbox jail; the editor's terminal has no equivalent.
         if !matches!(permission, Permission::Read) {
             let (program, args) = shell_invocation(&command);
             let spec = crate::frontend::DelegatedExecSpec {
@@ -170,7 +170,7 @@ impl Tool for ExecuteCommandTool {
         #[cfg(windows)]
         let mut command_builder = {
             // Wrap with the UTF-8 output prelude so pipe output matches what the sandboxed path
-            // produces — both on Rust's side this is decoded as UTF-8. Without the wrap, PowerShell
+            // produces; both on Rust's side this is decoded as UTF-8. Without the wrap, PowerShell
             // 5.1 defaults to the legacy console code page and mangles non-ASCII characters into
             // `?`.
             let wrapped = crate::sandbox::wrap_command_with_utf8_output(&command);
@@ -209,7 +209,7 @@ impl Tool for ExecuteCommandTool {
             // Bubblewrap path: `--ro-bind /` enforces "no writes", `--unshare-*` cuts off PID /
             // user / UTS / IPC views, tmpfs masks over `/run`, `/tmp`, `/var/tmp`, and
             // `$XDG_RUNTIME_DIR` make the dbus and systemd-user sockets unreachable so the agent
-            // can't `dbus-send` state-changing methods. `--unshare-net` is intentionally absent —
+            // can't `dbus-send` state-changing methods. `--unshare-net` is intentionally absent;
             // network must stay open for `curl | pdftotext` and similar pipelines.
             let mut cmd = tokio::process::Command::new(bwrap_path);
             cmd.args([
@@ -250,7 +250,7 @@ impl Tool for ExecuteCommandTool {
         // Unix: place the child in its own session/process group via `setsid` so timeouts and
         // cancellation can kill the whole tree (including backgrounded grandchildren such as
         // `(sleep 3600 &)`) via `kill(-pgid, …)`. On Linux the Landlock setup runs in the same
-        // closure — `pre_exec` overwrites rather than chains, so we fold both steps into one.
+        // closure; `pre_exec` overwrites rather than chains, so we fold both steps into one.
         // Landlock is applied ONLY for the Landlock capability; under Bubblewrap, the `--ro-bind /`
         // mount layer already enforces "no writes" and layering both is fragile to test across
         // kernels.
@@ -272,7 +272,7 @@ impl Tool for ExecuteCommandTool {
             unsafe {
                 command_builder.pre_exec(move || {
                     // SAFETY: `setsid(2)` is async-signal-safe and has no preconditions beyond "the
-                    // caller isn't already a process group leader" — which is guaranteed for a
+                    // caller isn't already a process group leader", which is guaranteed for a
                     // freshly forked child process.
                     if libc::setsid() == -1 {
                         return Err(std::io::Error::last_os_error());
@@ -373,7 +373,7 @@ impl Tool for ExecuteCommandTool {
     }
 }
 
-/// Terminate the child and — on Unix — its entire process group. Called on timeout and on
+/// Terminate the child and, on Unix, its entire process group. Called on timeout and on
 /// cancellation. On Unix we rely on the `setsid()` done in `pre_exec`: the child's pid is also its
 /// pgid, so `kill(-pgid, …)` reaches every backgrounded descendant it spawned (e.g. `(sleep 3600
 /// &)` survives a plain `child.kill()` but is caught here). The fallback `child.kill().await` is a
@@ -472,7 +472,7 @@ fn assemble_command_output(stdout: &str, stderr: &str, exit_code: i32) -> ToolOu
 /// On Windows there is no atomic "kill process tree" primitive available in this code path (a
 /// future refactor could wrap the child in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
 /// Consequently, a grandchild that inherits the pipe write handles can keep the pipe alive past the
-/// direct child's exit — the drain tasks would then block on `ReadFile` until the grandchild
+/// direct child's exit; the drain tasks would then block on `ReadFile` until the grandchild
 /// finally exits. To bound the tool-call wall time we cap every drain await with [`DRAIN_TIMEOUT`];
 /// on timeout the drain task is aborted, any output already read is lost, and we attach a
 /// diagnostic note so the model can reason about truncation.
@@ -594,7 +594,7 @@ async fn join_drain_with_timeout(
 }
 
 /// Abort any pending `JoinHandle` after `timeout`. Used on cancel/timeout cleanup paths where we
-/// don't need the task's output — just its termination.
+/// don't need the task's output, just its termination.
 #[cfg(windows)]
 async fn abort_after_timeout<T: 'static>(
     mut handle: tokio::task::JoinHandle<T>,
@@ -615,13 +615,13 @@ fn append_drain_truncation_note(
 ) {
     let note = match (stdout_timed_out, stderr_timed_out) {
         (true, true) => {
-            "\n(stdout/stderr drain timed out; output may be truncated — a background process likely held the pipe open past the child's exit)"
+            "\n(stdout/stderr drain timed out; output may be truncated: a background process likely held the pipe open past the child's exit)"
         }
         (true, false) => {
-            "\n(stdout drain timed out; output may be truncated — a background process likely held the pipe open past the child's exit)"
+            "\n(stdout drain timed out; output may be truncated: a background process likely held the pipe open past the child's exit)"
         }
         (false, true) => {
-            "\n(stderr drain timed out; output may be truncated — a background process likely held the pipe open past the child's exit)"
+            "\n(stderr drain timed out; output may be truncated: a background process likely held the pipe open past the child's exit)"
         }
         (false, false) => return,
     };
@@ -766,7 +766,7 @@ mod tests {
         assert!(text.contains("timed out"), "got: {:?}", text);
 
         // Wait well past the grandchild's sleep-3s. If the marker materializes, the grandchild
-        // wasn't killed — the bug is back.
+        // wasn't killed; the bug is back.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         assert!(
             !marker.exists(),
@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// When the configured sandbox backend isn't usable, read-mode `execute_command` must return
-    /// `Err(MekaError::ToolExecution)` — *not* `Ok(ToolOutput { is_error: true })`. The hard error
+    /// `Err(MekaError::ToolExecution)`, *not* `Ok(ToolOutput { is_error: true })`. The hard error
     /// path is how the model is forced to surface the failure to the user rather than just retrying
     /// or describing it as a tool result.
     #[tokio::test]
@@ -841,7 +841,7 @@ mod tests {
     }
 
     /// When the tool is invoked at Write permission, an unavailable sandbox backend must NOT
-    /// short-circuit the spawn — the user has explicitly opted out of sandboxing for this command.
+    /// short-circuit the spawn; the user has explicitly opted out of sandboxing for this command.
     #[tokio::test]
     async fn test_execute_command_runs_without_sandbox_when_write_mode() {
         let write_perm = crate::permission::SharedPermission::new(
@@ -872,12 +872,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_large_output_not_truncated() {
-        // Output well over the old 30 KB cap — the tool must return it in full. The agent layer
+        // Output well over the old 30 KB cap: the tool must return it in full. The agent layer
         // handles oversize downstream.
         let tool = test_tool(test_shared_permission(), true);
         let result = tool
             .execute(
-                // 50 000 "x" characters. POSIX-portable — uses `head` and `tr` instead of bash
+                // 50 000 "x" characters. POSIX-portable: uses `head` and `tr` instead of bash
                 // brace expansion so it works under `dash` (Debian/Ubuntu's default `/bin/sh`) as
                 // well as `bash`.
                 serde_json::json!({
@@ -910,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_large_output_no_deadlock() {
         let tool = test_tool(test_shared_permission(), true);
-        // 5 MiB of 'x' — two orders of magnitude past any pipe buffer.
+        // 5 MiB of 'x', two orders of magnitude past any pipe buffer.
         let result = tool
             .execute(
                 serde_json::json!({
@@ -1008,7 +1008,7 @@ mod tests {
         async fn test_windows_sandbox_large_output_under_sandbox() {
             let tool = windows_test_tool(read_permission());
             // PowerShell builds a 262144-char string in memory then emits it as one line. Total
-            // output is ~256 KB — well past any plausible pipe buffer.
+            // output is ~256 KB, well past any plausible pipe buffer.
             let result = tool
                 .execute(
                     serde_json::json!({

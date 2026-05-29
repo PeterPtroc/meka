@@ -25,10 +25,10 @@ meka requires three settings to function. If any are missing, it prints an error
 
 Configuration is layered. Higher-priority layers override lower ones:
 
-1. **CLI flags** -- per-invocation overrides (`--provider`, `--model`, `--base-url`, `-p`)
-2. **Environment variables** -- useful for CI, containers, or temporary overrides (`MEKA_PROVIDER`, etc.)
-3. **Config file** -- persistent settings in `~/.config/meka/config.toml`
-4. **Built-in defaults** -- permission defaults to `read`, streaming defaults to on
+1. **CLI flags**: per-invocation overrides (`--provider`, `--model`, `--base-url`, `-p`)
+2. **Environment variables**: useful for CI, containers, or temporary overrides (`MEKA_PROVIDER`, etc.)
+3. **Config file**: persistent settings in `~/.config/meka/config.toml`
+4. **Built-in defaults**: permission defaults to `read`, streaming defaults to on
 
 For example, `--model gpt-4o-mini` on the command line overrides both `MEKA_MODEL` and `provider.model` in the config file.
 

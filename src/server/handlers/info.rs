@@ -18,7 +18,7 @@ fn has_any_read_scope(principal: &Principal) -> bool {
 }
 
 // `ProblemDetail` is ~128 bytes and only constructed on the rejection path of an auth check.
-// Same trade-off as `extract_bearer` in auth.rs — see the rationale there.
+// Same trade-off as `extract_bearer` in auth.rs. See the rationale there.
 #[allow(clippy::result_large_err)]
 fn require_any_read_scope(principal: &Principal) -> Result<(), ProblemDetail> {
     if has_any_read_scope(principal) {
@@ -41,7 +41,7 @@ pub struct InfoResponse {
     pub enabled_permissions: Vec<String>,
 }
 
-/// `GET /v1/info` — server identity + model surface. Authenticated; admits any token holding
+/// `GET /v1/info`: server identity + model surface. Authenticated; admits any token holding
 /// at least one of `sessions:r`, `mcp:r`, or `skills:r`. Tokens with only write scopes get 403.
 /// The broad-read fallback is intentional: a token configured for `sessions:r` to surface
 /// session listings can also see the server's own version/model identity without operators
@@ -81,7 +81,7 @@ pub struct SkillView {
     pub description: String,
 }
 
-/// `GET /v1/skills` — installed skill palette. Mirrors what the REPL `/skill` command and
+/// `GET /v1/skills`: installed skill palette. Mirrors what the REPL `/skill` command and
 /// the ACP `available_commands_update` notification surface.
 #[utoipa::path(
     get,
@@ -115,7 +115,7 @@ pub struct McpServerView {
     pub state: String,
 }
 
-/// `GET /v1/mcp` — configured MCP servers and their current connection state.
+/// `GET /v1/mcp`: configured MCP servers and their current connection state.
 #[utoipa::path(
     get,
     path = "/v1/mcp",

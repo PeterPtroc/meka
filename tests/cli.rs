@@ -84,7 +84,7 @@ fn unknown_subcommand_exits_nonzero() {
 
 /// Run `meka` with an isolated config + data directory so host state (e.g.
 /// `~/.config/meka/config.toml`) doesn't leak in, and the test's writes don't spill out. Sets
-/// `MEKA_CONFIG_DIR` and `MEKA_DATA_DIR` — the only env vars that work on every platform
+/// `MEKA_CONFIG_DIR` and `MEKA_DATA_DIR`, the only env vars that work on every platform
 /// (`dirs::config_dir()` and `dirs::data_dir()` ignore `XDG_*` on macOS/Windows). Without the
 /// data-dir override, parallel CLI tests collide on a shared `%APPDATA%/meka/sessions.db` on
 /// Windows and hit SQLite lock contention.
@@ -124,7 +124,7 @@ fn mcp_list_with_empty_config_prints_no_servers_and_exits_zero() {
 #[test]
 fn mcp_add_http_positional_url_persists_server() {
     // Notion-style happy path: positional URL, transport auto-detected from the URL scheme, no
-    // --url flag required. `--no-login` keeps the test hermetic — we just want to confirm `add`
+    // --url flag required. `--no-login` keeps the test hermetic; we just want to confirm `add`
     // wrote the entry, not that we can drive an end-to-end OAuth flow.
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_isolated(dir.path(), &[
@@ -256,7 +256,7 @@ fn mcp_add_http_without_url_fails() {
     let output = run_isolated(dir.path(), &["mcp", "add", "broken", "--transport", "http"]);
     assert!(
         !output.status.success(),
-        "http without URL must be rejected — stdout: {}",
+        "http without URL must be rejected, stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -271,7 +271,7 @@ fn mcp_add_http_without_url_fails() {
 fn mcp_add_no_login_prints_skip_hint_when_probe_says_auth_required() {
     // Probing the real Notion endpoint classifies as AuthRequired; `--no-login` must surface the
     // "run `meka mcp login` later" hint rather than entering the OAuth flow. The hint goes to
-    // tracing at info level — default filter is `warn`, so we pass `-v` to lift the floor and read
+    // tracing at info level; default filter is `warn`, so we pass `-v` to lift the floor and read
     // the message from stderr.
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_isolated(dir.path(), &[
@@ -314,7 +314,7 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut child = meka()
-        // `-v` so the `running OAuth authorisation` info log is visible — we use it as the
+        // `-v` so the `running OAuth authorisation` info log is visible; we use it as the
         // "auto-login has started" signal before sending SIGINT.
         .args(["-v", "mcp", "add", "notion", "https://mcp.notion.com/mcp"])
         .env("MEKA_CONFIG_DIR", dir.path().join("meka"))
@@ -358,7 +358,7 @@ fn mcp_add_rollback_on_sigint_during_auto_login() {
         captured
     );
 
-    // Send SIGINT to the child — same signal a user gets from Ctrl-C.
+    // Send SIGINT to the child, same signal a user gets from Ctrl-C.
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGINT);
     }

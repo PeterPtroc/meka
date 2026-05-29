@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 /// Why an [`Agent::run_turn`] invocation finished cleanly. Callers that drive a user-facing
 /// protocol (e.g. the ACP `session/prompt` response) use this to map to a protocol-level stop
-/// reason; REPL and one-shot callers discard it. `Interrupted` is not represented here — it
+/// reason; REPL and one-shot callers discard it. `Interrupted` is not represented here. It
 /// surfaces as `Err(MekaError::Interrupted)` so the success-path return type stays straightforward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
-    /// The model returned a natural end-of-turn (or an unrecognised stop reason — treated as
+    /// The model returned a natural end-of-turn (or an unrecognised stop reason, treated as
     /// end-of-turn since we have nothing better to surface).
     EndTurn,
     /// The provider stopped because the model hit its maximum output tokens. The assistant message
@@ -117,7 +117,7 @@ pub struct AgentOptions {
     pub mcp_grace: std::time::Duration,
     /// When `Some`, `run_turn` uses this string verbatim instead of invoking
     /// [`crate::context::build_system_prompt`]. Sub-agents set this to their stripped-down prompt
-    /// from `build_subagent_system_prompt`. The override is static — it does not see per-turn todo
+    /// from `build_subagent_system_prompt`. The override is static; it does not see per-turn todo
     /// updates or permission changes, which is fine for one-shot sub-agents whose tool list and
     /// permission level are fixed at spawn time.
     pub system_prompt_override: Option<String>,
@@ -128,7 +128,7 @@ pub struct AgentOptions {
 /// session. A turn fans out tool calls (in parallel via `join_all`) and persists every assistant
 /// and tool-result message to the session store.
 ///
-/// `Agent` is held across turns but not across providers — switching providers requires a fresh
+/// `Agent` is held across turns but not across providers; switching providers requires a fresh
 /// instance.
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -140,7 +140,7 @@ pub struct Agent {
     shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
     /// Shared skill cache. Re-checks the on-disk snapshot at the top of each turn and re-discovers
     /// when something changed, so adds / removes / frontmatter edits land without restart.
-    /// Body-only edits take effect even sooner — `load_skill_body` re-reads from disk on every
+    /// Body-only edits take effect even sooner; `load_skill_body` re-reads from disk on every
     /// invocation regardless of cache state.
     skills: Arc<SkillCache>,
     /// Where streaming output, todo-list renders, token-usage summaries,
@@ -202,7 +202,7 @@ impl Agent {
     /// Swap the provider after construction. Used by the ACP integration test path
     /// (`MEKA_ACP_MOCK_PROVIDER=1`) so the test can drive a scripted
     /// [`crate::provider::mock::MockProvider`] without going through the credential / HTTP-client
-    /// setup that `create_agent_from_config` performs for real providers. Debug builds only —
+    /// setup that `create_agent_from_config` performs for real providers. Debug builds only;
     /// release builds don't include it.
     #[cfg(debug_assertions)]
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
@@ -228,9 +228,10 @@ impl Agent {
     ///
     /// `frontend` decides where the sub-agent's output and permission requests go. The standard
     /// caller (the `spawn_agent` tool) uses [`crate::frontend::PermissionForwardingFrontend`]
-    /// wrapping the parent's frontend — that drops emits (the sub-agent's report flows back via the
-    /// tool result) but forwards permission prompts so the user is asked in their original UI.
-    /// Tests can pass [`crate::frontend::SilentFrontend`] for fully-isolated sub-agent runs.
+    /// wrapping the parent's frontend. That wrapper drops emits (the sub-agent's report flows back
+    /// via the tool result) but forwards permission prompts so the user is asked in their original
+    /// UI. Tests can pass [`crate::frontend::SilentFrontend`] for fully-isolated sub-agent
+    /// runs.
     ///
     /// Doesn't call `set_mcp_manager`. MCP tool dispatch from the sub-agent's registry works
     /// without an attached manager because the adapters delegate through `Arc<ServerEntry>`
@@ -264,7 +265,7 @@ impl Agent {
             system_prompt_override: Some(sub_system_prompt),
         };
         // Snapshot the parent's cwd at spawn time. The sub-agent has no `/cd` of its own (no REPL)
-        // so this `Arc` is effectively immutable — but giving the sub-agent its own `Arc` rather
+        // so this `Arc` is effectively immutable, but giving the sub-agent its own `Arc` rather
         // than sharing the parent's prevents a parent `/cd` mid-sub-agent-turn from changing the
         // sub-agent's resolution mid-flight.
         let parent_path = parent_cwd
@@ -324,7 +325,7 @@ impl Agent {
             return self.handle_mcp_not_ready(not_ready);
         }
 
-        // Best-effort grace wait — we re-check readiness below regardless of whether
+        // Best-effort grace wait. We re-check readiness below regardless of whether
         // `await_settled` returned in time. The timeout result is intentionally discarded.
         let _ = tokio::time::timeout(self.options.mcp_grace, manager.await_settled()).await;
 
@@ -487,7 +488,7 @@ impl Agent {
                 };
 
                 // Recompute the active tool set every iteration so a `load_tool` call earlier in
-                // this turn becomes visible to the model on the very next request — without
+                // this turn becomes visible to the model on the very next request, without
                 // mutating any registry state. Append-only growth keeps the tools array's cache
                 // prefix stable.
                 //
@@ -588,7 +589,7 @@ impl Agent {
                             tracing::warn!("failed to save explicit scratchpad results: {}", error);
                         }
 
-                        // Take the per-turn hints — this both snapshots them for the call below and
+                        // Take the per-turn hints. This both snapshots them for the call below and
                         // clears them, so a long session doesn't accumulate entries for tool calls
                         // that already ran. No clone needed.
                         let hints_snapshot =
@@ -611,7 +612,7 @@ impl Agent {
                         };
 
                         // Save assistant + tool-results together in one transaction.
-                        // Both rows commit or neither does — no dangling assistant-with-
+                        // Both rows commit or neither does: no dangling assistant-with-
                         // tool_use that the provider would reject on the next iteration.
                         let result_event =
                             crate::conversation::Event::Append(result_message.clone());
@@ -841,7 +842,7 @@ impl Agent {
         match stream_handle.await {
             Ok(Ok(())) => {}
             Ok(Err(MekaError::Interrupted)) => {
-                // Interrupted — fall through to return partial content. The caller detects
+                // Interrupted. Fall through to return partial content. The caller detects
                 // interruption via the cancellation token.
             }
             Ok(Err(error)) => return Err(error),
@@ -1019,8 +1020,8 @@ impl Agent {
     /// Invoke a tool, scoping the per-session cwd and frontend into task-locals so MCP-originated
     /// callbacks fired during the call (`roots/list`, `notifications/progress`,
     /// `elicitation/create`) reach the calling session's UI rather than the process default.
-    /// Built-in tools ignore both task-locals — they read cwd from their own `SharedCwd` field and
-    /// never produce MCP callbacks — so the wrap is cheap on those paths.
+    /// Built-in tools ignore both task-locals: they read cwd from their own `SharedCwd` field and
+    /// never produce MCP callbacks, so the wrap is cheap on those paths.
     async fn run_tool(
         tool: &dyn crate::tools::Tool,
         input: &serde_json::Value,

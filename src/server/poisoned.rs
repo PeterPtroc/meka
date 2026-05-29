@@ -2,7 +2,7 @@
 //! code holds these synchronous locks for microsecond-scale critical sections that never
 //! `.await` (poisoning requires a panic while holding the guard, which we don't expect), but
 //! "shouldn't happen" isn't "won't happen". If a panic does poison a lock the recovered guard
-//! still works — `into_inner()` exposes the inner value — but the underlying panic is
+//! still works (`into_inner()` exposes the inner value), but the underlying panic is
 //! invisible to operators. These helpers log a single high-priority line on each recovery so
 //! the root cause shows up in observability tooling.
 

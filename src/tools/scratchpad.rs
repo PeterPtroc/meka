@@ -82,7 +82,7 @@ fn build_large_output_preview(name: &str, text: &str) -> String {
 
     let mut replacement = format!(
         "<large-output name=\"{}\" size=\"{}\">\n\
-         Output too large ({}). Read with `scratchpad_read` — use \
+         Output too large ({}). Read with `scratchpad_read`. Use \
          `limit: {}` to load the full content in one call, or page \
          with `offset`/`limit` if a partial read is enough.\n\n\
          Preview (first {} bytes):\n\
@@ -148,7 +148,7 @@ pub async fn save_explicit_scratchpad_results(
 /// Check each text block in tool results. If oversized, persist to DB and replace with a preview +
 /// handle. Names are derived from the tool call's `scratchpad_hint` (MCP adapters) or the tool name
 /// otherwise, with a numeric suffix on collision. `hints` is typically the per-turn map owned by
-/// the agent — empty is fine.
+/// the agent; empty is fine.
 pub async fn persist_oversized_results(
     session_manager: &SessionManager,
     session_id: Uuid,
@@ -228,7 +228,7 @@ impl Tool for ScratchpadWriteTool {
                 Use this to save intermediate results, extracted text, accumulated data, or \
                 research notes. You can also save tool output directly by adding a 'scratchpad' \
                 parameter to any tool call. When you are a sub-agent, names inherited \
-                read-only from the parent are rejected here — use a different name (e.g. \
+                read-only from the parent are rejected here. Use a different name (e.g. \
                 'name_local') for your own state."
                 .to_string(),
             parameters: serde_json::json!({
@@ -297,7 +297,7 @@ pub(super) struct ScratchpadReadTool {
     pub session_id: Arc<RwLock<Option<Uuid>>>,
     /// Sub-agent fallback: when the read misses the active (child) session, retry against this
     /// parent session for names listed in [`Self::inherited_names`]. `None` on the primary agent's
-    /// registry — no fallback path is taken.
+    /// registry; no fallback path is taken.
     pub parent_session_id: Option<Uuid>,
     /// Allowlist of parent-scoped scratchpad names the sub-agent is permitted to read. Empty on
     /// the primary agent.
@@ -314,7 +314,7 @@ impl Tool for ScratchpadReadTool {
                  bytes from offset; pass a larger `limit` (no hard cap) to load the full \
                  entry in one call, or page with `offset`/`limit` for partial reads. Provide \
                  `regex` to return matching lines (max {}) instead of a byte range. Also \
-                 used to access content referenced by <large-output> tags — pass the `size` \
+                 used to access content referenced by <large-output> tags. Pass the `size` \
                  value from the tag as `limit` when you intend to read everything. When this \
                  is a sub-agent and the name is not found locally, looks up names from the \
                  parent's inherited allowlist (see the system-prompt section if any).",
@@ -374,7 +374,7 @@ impl Tool for ScratchpadReadTool {
             .await?;
 
         // Sub-agent inheritance: fall back to the parent's scratchpad if the child miss matches an
-        // allowlisted name. Read-only — writes still target the child session, so the parent's
+        // allowlisted name. Read-only: writes still target the child session, so the parent's
         // audit trail is untouched.
         if content.is_none()
             && let Some(parent_sid) = self.parent_session_id
@@ -440,7 +440,7 @@ impl Tool for ScratchpadEditTool {
             description: "Edit a scratchpad entry in place. Provide 'content' to fully \
                 overwrite, or 'old_string'/'new_string' for targeted string replacement \
                 (like edit_file). When you are a sub-agent, names inherited read-only \
-                from the parent are rejected — copy the content into your own entry first \
+                from the parent are rejected. Copy the content into your own entry first \
                 if you need to mutate it."
                 .to_string(),
             parameters: serde_json::json!({
@@ -623,7 +623,7 @@ impl Tool for ScratchpadListTool {
 
         let own = self.session_manager.list_tool_outputs(session_id).await?;
 
-        // Inherited (parent) entries — filtered to the allowlist so the sub-agent never sees parent
+        // Inherited (parent) entries, filtered to the allowlist so the sub-agent never sees parent
         // state it wasn't explicitly granted.
         let mut rows: Vec<(ToolOutputSummary, &'static str)> =
             own.into_iter().map(|entry| (entry, "own")).collect();
@@ -665,10 +665,10 @@ impl Tool for ScratchpadListTool {
 pub(super) struct ScratchpadMergeTool {
     pub session_manager: SessionManager,
     pub session_id: Arc<RwLock<Option<Uuid>>>,
-    /// See [`ScratchpadReadTool::parent_session_id`] — sources may be inherited from the parent's
+    /// See [`ScratchpadReadTool::parent_session_id`]. Sources may be inherited from the parent's
     /// scratchpad.
     pub parent_session_id: Option<Uuid>,
-    /// See [`ScratchpadWriteTool::inherited_names`] — the `target` is blocked if listed here;
+    /// See [`ScratchpadWriteTool::inherited_names`]. The `target` is blocked if listed here;
     /// sources are also matched against this set for the parent-fallback read.
     pub inherited_names: Vec<String>,
 }
@@ -758,7 +758,7 @@ impl Tool for ScratchpadMergeTool {
         let session_id = resolve_session_id(&self.session_id, "scratchpad_merge").await?;
 
         // Resolve each source. Inheritance-aware: child first, then parent if the name is
-        // allowlisted — same fallback path as ScratchpadReadTool. Any missing source aborts the
+        // allowlisted; same fallback path as ScratchpadReadTool. Any missing source aborts the
         // merge so we never partially write the target.
         let mut loaded: Vec<(String, String)> = Vec::with_capacity(sources.len());
         for name in &sources {
@@ -2513,14 +2513,14 @@ mod tests {
         let session_id = manager.create_session(None).await.expect("create");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("pic.png");
-        // Minimal PNG signature + IHDR chunk bytes — enough for `infer` to fingerprint without
+        // Minimal PNG signature + IHDR chunk bytes, enough for `infer` to fingerprint without
         // needing a syntactically valid image.
         let png_bytes: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk header
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1 dimensions
             0x08, 0x00, 0x00, 0x00, 0x00, // depth, type, etc.
-            0xFF, 0xFE, 0xFD, 0xFC, // CRC placeholder + body — non-UTF-8
+            0xFF, 0xFE, 0xFD, 0xFC, // CRC placeholder + body, non-UTF-8
         ];
         tokio::fs::write(&path, png_bytes).await.expect("write png");
 

@@ -1,7 +1,7 @@
 //! Background session GC. Periodically scans the in-memory session map and evicts entries
 //! whose `last_turn_at` is older than the configured `idle_timeout`. Eviction drops the
 //! `SessionEntry` (which in turn drops the `SessionLock`, releasing the OS file lock) but
-//! leaves the SQLite row in place by default — a later request with the same session ID can
+//! leaves the SQLite row in place by default; a later request with the same session ID can
 //! re-attach (mirroring ACP's `session/load` semantics).
 //!
 //! Set `[serve].delete_on_idle = true` to also delete the DB row.
@@ -29,7 +29,7 @@ pub fn spawn(state: ServerState) -> tokio::task::JoinHandle<()> {
     );
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(scan_interval);
-        // Skip the immediate first tick — give the server a moment to settle before we start
+        // Skip the immediate first tick: give the server a moment to settle before we start
         // scanning.
         ticker.tick().await;
         loop {
@@ -40,7 +40,7 @@ pub fn spawn(state: ServerState) -> tokio::task::JoinHandle<()> {
 }
 
 async fn evict_idle(state: &ServerState, idle_timeout: Duration, delete_on_idle: bool) {
-    // Collect candidates under a brief read lock — don't hold the write lock across the
+    // Collect candidates under a brief read lock: don't hold the write lock across the
     // per-row deletion logic.
     let candidates: Vec<uuid::Uuid> = {
         let sessions = state.sessions.read().await;
@@ -53,7 +53,7 @@ async fn evict_idle(state: &ServerState, idle_timeout: Duration, delete_on_idle:
     if candidates.is_empty() {
         return;
     }
-    // Truly evicted under the write lock — a turn may have started between read and write
+    // Truly evicted under the write lock. A turn may have started between read and write
     // acquisition, which would have refreshed `last_turn_at` (or bumped `in_flight`). Only
     // these IDs are eligible for the optional DB-row delete; iterating the original candidate
     // list there would silently destroy an entry whose recheck just decided to keep it.

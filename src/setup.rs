@@ -262,7 +262,7 @@ async fn run_oauth_login(token_store: &TokenStore) -> anyhow::Result<()> {
 
 /// Driver for the `openai-codex` PKCE + authorization-code flow against
 /// `auth.openai.com`. Differs from `run_oauth_login` (Claude) in that:
-/// 1. The redirect URI is `http://localhost:1455/auth/callback` — a real localhost listener, not a
+/// 1. The redirect URI is `http://localhost:1455/auth/callback`, a real localhost listener, not a
 ///    paste-the-code-back-in flow. Matches the first-party Codex CLI.
 /// 2. The token exchange is form-urlencoded (Claude uses JSON).
 /// 3. The id_token JWT is decoded post-exchange to pull `chatgpt_account_id`, which is sent on
@@ -303,7 +303,7 @@ async fn run_codex_oauth_login(token_store: &TokenStore) -> anyhow::Result<()> {
         accept_codex_callback(listener, CODEX_CALLBACK_TIMEOUT).await?;
 
     if received_state != state {
-        anyhow::bail!("OAuth state mismatch — possible CSRF; aborting");
+        anyhow::bail!("OAuth state mismatch, possible CSRF; aborting");
     }
 
     let credential =
@@ -533,7 +533,7 @@ async fn exchange_codex_code(
 }
 
 /// Decode an OpenAI id_token JWT and extract `chatgpt_account_id` from the nested
-/// `https://api.openai.com/auth` claim. Returns `None` on any failure — the absence of an
+/// `https://api.openai.com/auth` claim. Returns `None` on any failure; the absence of an
 /// account_id isn't fatal at login time.
 fn extract_codex_account_id(jwt: &str) -> Option<String> {
     let payload = jwt.split('.').nth(1)?;

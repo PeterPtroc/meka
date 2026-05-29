@@ -25,7 +25,7 @@ pub struct AddArgs<'a> {
     pub edit: bool,
 }
 
-/// `meka skill list` — print a tab-separated table of every installed skill. Empty case prints `(no
+/// `meka skill list`: print a tab-separated table of every installed skill. Empty case prints `(no
 /// skills installed)` so scripts grepping the output don't get a confusing zero-byte result.
 pub async fn run_list() -> Result<()> {
     let skills = skills::discover_skills();
@@ -57,7 +57,7 @@ fn print_list(skills: &[skills::Skill]) {
     );
 }
 
-/// `meka skill get <name>` — dump frontmatter as `key: value` lines.
+/// `meka skill get <name>`: dump frontmatter as `key: value` lines.
 pub async fn run_get(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
     let body_bytes = std::fs::metadata(&skill.body_path)
@@ -77,7 +77,7 @@ pub async fn run_get(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `meka skill show <name>` — print the rendered body with `${MEKA_SKILL_DIR}` substituted.
+/// `meka skill show <name>`: print the rendered body with `${MEKA_SKILL_DIR}` substituted.
 /// `${MEKA_SESSION_ID}` stays literal because there's no active session in the CLI context.
 pub async fn run_show(name: &str) -> Result<()> {
     let skill = require_skill(name)?;
@@ -88,7 +88,7 @@ pub async fn run_show(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `meka skill add <name> [flags]` — scaffold a new skill directory.
+/// `meka skill add <name> [flags]`: scaffold a new skill directory.
 pub async fn run_add(args: AddArgs<'_>) -> Result<()> {
     skills::validate_skill_name(args.name).map_err(MekaError::Config)?;
 
@@ -174,7 +174,7 @@ fn build_skill_body(args: &AddArgs<'_>) -> Result<String> {
     }
 }
 
-/// `meka skill remove <name>` — delete the skill directory. No prompt; matches `meka mcp remove`'s
+/// `meka skill remove <name>`: delete the skill directory. No prompt; matches `meka mcp remove`'s
 /// convention.
 pub async fn run_remove(name: &str) -> Result<()> {
     skills::validate_skill_name(name).map_err(MekaError::Config)?;
@@ -197,7 +197,7 @@ pub async fn run_remove(name: &str) -> Result<()> {
 /// Outcome of a single skill re-fetch.
 #[derive(Debug)]
 enum UpdateOutcome {
-    /// Fetched content was byte-identical to what's on disk — nothing written (avoids bumping mtime
+    /// Fetched content was byte-identical to what's on disk: nothing written (avoids bumping mtime
     /// / a spurious skill-cache reload).
     Unchanged,
     Updated {
@@ -210,7 +210,7 @@ fn version_label(version: &Option<String>) -> &str {
     version.as_deref().unwrap_or("unversioned")
 }
 
-/// `meka skill update [<name>] [--all] [--yes]` — re-fetch skills that declare a `source_url` and
+/// `meka skill update [<name>] [--all] [--yes]`: re-fetch skills that declare a `source_url` and
 /// replace them on disk.
 pub async fn run_update(name: Option<&str>, all: bool, yes: bool) -> Result<()> {
     match (name, all) {
@@ -289,7 +289,7 @@ async fn update_all(yes: bool) -> Result<()> {
 
 /// Fetch a skill's `source_url`, validate the response parses as a skill, and atomically replace
 /// the on-disk `SKILL.md`. A failed fetch or a malformed response leaves the existing file
-/// untouched — validation happens entirely in memory before any write.
+/// untouched; validation happens entirely in memory before any write.
 async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome> {
     let url = skill
         .source_url
@@ -332,7 +332,7 @@ async fn fetch_and_replace_skill(skill: &skills::Skill) -> Result<UpdateOutcome>
             ))
         })?;
 
-    // Validate in memory — never overwrite the on-disk skill with a 404 page, a non-skill file, or
+    // Validate in memory: never overwrite the on-disk skill with a 404 page, a non-skill file, or
     // malformed frontmatter.
     let parsed =
         skills::parse_skill_definition(&skill.name, &skill.source_dir, &skill.body_path, &fetched)
@@ -396,7 +396,7 @@ mod tests {
     /// Serializes tests that mutate the global `MEKA_CONFIG_DIR` env var. Without this, tokio's
     /// parallel test runner causes one test's tempdir to be observed by another test's
     /// `discover_skills()`. `tokio::sync::Mutex` (rather than `std::sync::Mutex`) so the guard is
-    /// awaitable — tests must hold it across `.await` calls.
+    /// awaitable; tests must hold it across `.await` calls.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Acquire the env-lock and point `MEKA_CONFIG_DIR` at `temp`. The returned guard must be held

@@ -1,4 +1,4 @@
-//! `POST /v1/sessions/{id}/turn` — submit a turn. Two response shapes:
+//! `POST /v1/sessions/{id}/turn`: submit a turn. Two response shapes:
 //!
 //! - **Blocking** (default, `stream: false`): `application/json` with the assembled
 //!   [`TurnResponse`] once `Agent::run_turn` returns. The client gets the full transcript, tool
@@ -7,7 +7,7 @@
 //!   `assistant_text.delta` / `tool_call.*` / `turn.finished` events (the full taxonomy is in the
 //!   HTTP API docs § SSE events). Lifecycle events are 0-based and monotonic per turn.
 //!
-//! Both modes share an idempotency cache (Stripe-style, `Idempotency-Key` header) — the cache
+//! Both modes share an idempotency cache (Stripe-style, `Idempotency-Key` header). The cache
 //! key is `(token_id, key)` and stores the *blocking* JSON envelope, so a replay of a
 //! previously-streaming request returns the cached blocking body. Mid-turn permission gates
 //! are handled out-of-band via `POST /v1/responses/{request_id}` on a side channel; the
@@ -75,7 +75,7 @@ pub struct TurnResponse {
     pub turn_id: Uuid,
     pub session_id: Uuid,
     pub stop_reason: String,
-    /// Concatenated assistant text produced this turn. **Excludes** refusal explanation —
+    /// Concatenated assistant text produced this turn. **Excludes** refusal explanation:
     /// when the model refuses, the refusal text rides on the dedicated `refusal_text` field
     /// instead. Clients that just want "what the user sees" should consume both:
     /// `final_text` for the normal response, `refusal_text` when `stop_reason == "refusal"`.
@@ -86,7 +86,7 @@ pub struct TurnResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal_text: Option<String>,
     /// Structured view of the assistant's message(s) produced this turn. Per the spec, this is
-    /// the "richer access" companion to `final_text` — clients that want the text plus its
+    /// the "richer access" companion to `final_text`. Clients that want the text plus its
     /// formatting context (text/thinking content blocks) consume this; clients that just want
     /// a single string consume `final_text`. Tool calls live in their own `tool_calls` array.
     pub messages: Vec<crate::server::handlers::messages::MessageView>,
@@ -205,7 +205,7 @@ pub async fn submit_turn(
                     return Err(ProblemDetail::new(
                         ErrorKind::Idempotency,
                         StatusCode::CONFLICT,
-                        "Idempotency-Key has been used with a different request body — replays \
+                        "Idempotency-Key has been used with a different request body; replays \
                          must be byte-identical",
                     ));
                 }
@@ -225,7 +225,7 @@ pub async fn submit_turn(
                          keys or wait for in-flight requests to complete",
                     )
                     .with_retry_after(60);
-                    // Override the generic "conflict" title — this is cache pressure, not a
+                    // Override the generic "conflict" title: this is cache pressure, not a
                     // body-mismatch conflict.
                     problem.title = "Idempotency-Key cache capacity exceeded".to_string();
                     return Err(problem);
@@ -328,7 +328,7 @@ pub async fn submit_turn(
                 if let Ok(bytes) = bytes {
                     ticket.commit(status.as_u16(), bytes).await;
                 }
-                // If serialization failed (extraordinarily unlikely — TurnResponse /
+                // If serialization failed (extraordinarily unlikely; TurnResponse /
                 // ProblemDetail are both pure-data serde types), drop the ticket without
                 // commit so the Pending entry is removed and clients can retry instead of
                 // hitting a permanent 409.
@@ -432,7 +432,7 @@ async fn run_blocking_turn(
     let _stale = entry.frontend.drain();
 
     // Publish the cancellation token *after* acquiring the mutex. Publishing before the lock
-    // would let a rejected Turn B overwrite a running Turn A's token — making Turn A
+    // would let a rejected Turn B overwrite a running Turn A's token, making Turn A
     // uncancellable. The brief window between lock-acquire and this publish is harmless:
     // POST /cancel reading the old (session-creation or prior-turn) token is a no-op on an
     // already-finished turn.
@@ -494,12 +494,12 @@ async fn run_streaming_turn(
         .with("session_id", session_id.to_string())
     })?;
 
-    // Subscribe to the broadcast BEFORE installing — install_stream returns a receiver that
+    // Subscribe to the broadcast BEFORE installing: install_stream returns a receiver that
     // captures the first event onwards.
     let _stale = entry.frontend.drain();
     let (receiver, ids) = entry.frontend.install_stream(256);
 
-    // Publish after the lock succeeds — same rationale as `run_blocking_turn`.
+    // Publish after the lock succeeds. Same rationale as `run_blocking_turn`.
     let cancellation = CancellationToken::new();
     {
         let mut guard = crate::server::poisoned::write(
@@ -566,7 +566,7 @@ async fn run_streaming_turn(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-cache, no-transform"),
     );
-    // No explicit `Connection: keep-alive` — it's forbidden on HTTP/2 (RFC 9113 §8.2.2)
+    // No explicit `Connection: keep-alive`: it's forbidden on HTTP/2 (RFC 9113 §8.2.2)
     // and hyper sets it automatically on HTTP/1.1.
     Ok(response)
 }
@@ -625,7 +625,7 @@ fn build_sse_stream(
                         Ok(sse) => yield Ok(sse.into_axum()),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(
-                                "SSE consumer lagged, skipped {} events — terminating stream",
+                                "SSE consumer lagged, skipped {} events; terminating stream",
                                 skipped
                             );
                             // Cancel the turn so the agent doesn't keep burning provider
@@ -815,8 +815,8 @@ fn terminal_event_for_outcome(
 }
 
 /// Drain the per-session recorder at end-of-turn and pluck the most recent `TokenUsage` event
-/// off the back. Mirrors what `run_blocking_turn` does explicitly via `entry.frontend.drain()` —
-/// both transport branches reset the recorder so the next turn starts clean. Returns `None`
+/// off the back. Mirrors what `run_blocking_turn` does explicitly via `entry.frontend.drain()`.
+/// Both transport branches reset the recorder so the next turn starts clean. Returns `None`
 /// when the turn never reported usage (mock provider tests, refused turns, server-shutdown
 /// cancel before the agent emitted anything).
 ///
@@ -961,7 +961,7 @@ fn assemble_response(
         vec![crate::server::handlers::messages::MessageView {
             role: "assistant".to_string(),
             content: content_blocks,
-            // Not available yet — the DB write may still be in progress.
+            // Not available yet: the DB write may still be in progress.
             created_at: None,
             // Only the current message is available; full history index lives on
             // `GET /v1/sessions/{id}/messages`.
@@ -994,7 +994,7 @@ impl From<Notice> for NoticeView {
     }
 }
 
-/// `POST /v1/sessions/{id}/cancel` — interrupt the in-flight turn (if any) by firing the
+/// `POST /v1/sessions/{id}/cancel`: interrupt the in-flight turn (if any) by firing the
 /// session's cancellation token. Always returns 204 even if no turn is in flight (the
 /// operation is idempotent and absence is observationally indistinguishable from a turn that
 /// finished microseconds before the cancel arrived).
@@ -1024,7 +1024,7 @@ pub async fn cancel_turn(
         ));
     }
     // Fast-path: look up the in-memory session map directly. If the session was GC-evicted
-    // (no in-memory entry), there's no in-flight turn to cancel — return 204 idempotently
+    // (no in-memory entry), there's no in-flight turn to cancel. Return 204 idempotently
     // instead of re-attaching from disk (which would build an unconnected cancellation token
     // and waste a file-lock + DB load).
     let entry = state.sessions.read().await.get(&session_id).cloned();
@@ -1034,7 +1034,7 @@ pub async fn cancel_turn(
             crate::server::poisoned::read(&entry.cancellation, "cancel::read_token").clone();
         token.cancel();
     }
-    // 204 whether or not there was anything to cancel — POST /cancel is idempotent.
+    // 204 whether or not there was anything to cancel: POST /cancel is idempotent.
     Ok(StatusCode::NO_CONTENT)
 }
 

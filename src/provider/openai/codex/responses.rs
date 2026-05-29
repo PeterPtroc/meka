@@ -74,7 +74,7 @@ pub(super) fn build_request_body(
 /// at least one image is present to preserve image data; otherwise we collapse to a string for the
 /// simpler wire shape.
 ///
-/// Sent unconditionally — non-vision models will return a clear API error rather than us trying to
+/// Sent unconditionally. Non-vision models will return a clear API error rather than us trying to
 /// detect model capabilities client-side. Mirrors our Claude path, which also sends images without
 /// a model gate.
 fn build_tool_result_output(content: &[ToolResultContent]) -> serde_json::Value {
@@ -183,7 +183,7 @@ fn encode_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Mutable state threaded through SSE event processing — tracks the in-flight tool call's
+/// Mutable state threaded through SSE event processing. Tracks the in-flight tool call's
 /// accumulated arguments so we can return a parsed `ToolUseEnd` even if the server elides the final
 /// `arguments` field.
 #[derive(Default)]
@@ -201,7 +201,7 @@ struct ActiveToolCall {
 
 /// Pure SSE-event handler. Inspects the named event + parsed JSON payload, updates `state`, and
 /// returns the meka-level [`StreamEvent`]s to forward to the agent. Returns `Err` when the server
-/// reports a fatal stream error — the driver propagates this back to the caller.
+/// reports a fatal stream error; the driver propagates this back to the caller.
 pub(super) fn process_event(
     event_name: &str,
     data: &serde_json::Value,
@@ -268,7 +268,7 @@ pub(super) fn process_event(
             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if item_type == "function_call" {
                 let buffered = state.active_tool_call.take();
-                // Prefer the final `arguments` string from the item over our accumulated buffer —
+                // Prefer the final `arguments` string from the item over our accumulated buffer;
                 // the server may normalise it.
                 let arguments_str = item
                     .get("arguments")
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn test_request_body_user_message_with_tool_result_only_no_text_block() {
         // A user turn that's *only* a tool_result must produce only a function_call_output input
-        // item — no empty user message.
+        // item, no empty user message.
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
@@ -613,7 +613,7 @@ mod tests {
                 Ok(events) => emitted.extend(events),
                 Err(error) => {
                     // process_event still yields a StreamEvent::Error before
-                    // returning — drain it via re-running with a fresh state
+                    // returning. Draining it via re-running with a fresh state
                     // would be wrong; instead we capture both outcomes by
                     // running once and then preserving the events that were
                     // emitted before the error. For the error path the caller

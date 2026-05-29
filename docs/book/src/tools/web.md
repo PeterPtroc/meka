@@ -27,7 +27,7 @@ Fetch a web page and return its content as markdown text.
 
 ### Image URLs
 
-If the response `Content-Type` is a supported raster image format, `fetch_url` returns a multimodal `Image` content block instead of markdown. No disk is touched — bytes are base64-encoded in memory.
+If the response `Content-Type` is a supported raster image format, `fetch_url` returns a multimodal `Image` content block instead of markdown. No disk is touched; bytes are base64-encoded in memory.
 
 **Provider-native formats** (passed through unchanged):
 - `image/png`, `image/jpeg` (and `image/jpg`), `image/gif`, `image/webp`, `image/bmp` (and `image/x-ms-bmp`)
@@ -41,7 +41,7 @@ If the response `Content-Type` is a supported raster image format, `fetch_url` r
 - Size cap of ~3.75 MB applies to the **output** bytes (after conversion). Conversion can enlarge an image, so a 1 MB TIFF may produce a larger PNG.
 - Detection uses the response's actual `Content-Type` header, so redirect chains and extension-less URLs are handled correctly.
 
-Only fetch image URLs when the current model supports vision input — text-only models will either error or silently drop the image block.
+Only fetch image URLs when the current model supports vision input; text-only models will either error or silently drop the image block.
 
 ---
 
@@ -76,4 +76,4 @@ DuckDuckGo served a CAPTCHA challenge (bot detection / rate limit).
 Retry later.
 ```
 
-If this happens often in your environment, configure a search-capable MCP server — see the [MCP configuration examples](../configuration/config-file.md) for patterns that work well.
+If this happens often in your environment, configure a search-capable MCP server; see the [MCP configuration examples](../configuration/config-file.md) for patterns that work well.

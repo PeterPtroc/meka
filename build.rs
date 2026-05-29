@@ -1,4 +1,4 @@
-/// Claude Code version string. Single source of truth — also emitted as
+/// Claude Code version string. Single source of truth; also emitted as
 /// `CC_VERSION` for use via `env!("CC_VERSION")` in the main crate.
 const CC_VERSION: &str = "2.1.118";
 

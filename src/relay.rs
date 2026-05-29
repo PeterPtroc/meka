@@ -2,7 +2,7 @@
 //!
 //! Without this layer, `tracing` writes directly to `std::io::stderr`. When reedline enters raw
 //! mode and redraws the prompt, anything just written to stderr risks getting overwritten by
-//! reedline's cursor positioning — the symptom users see is "an error log flashes by, then
+//! reedline's cursor positioning. The symptom users see is "an error log flashes by, then
 //! disappears."
 //!
 //! [`Relay`] holds an optional [`reedline::ExternalPrinter`] (a crossbeam channel reedline drains
@@ -68,7 +68,7 @@ impl<'a> MakeWriter<'a> for Relay {
     }
 }
 
-/// Per-write borrow handed back to the tracing formatter. Holds a clone of the printer (cheap —
+/// Per-write borrow handed back to the tracing formatter. Holds a clone of the printer (cheap:
 /// it's a pair of crossbeam channel handles) captured at the moment `make_writer` was called, so a
 /// printer install or clear racing with an in-flight write doesn't tear.
 pub struct RelayWriter {

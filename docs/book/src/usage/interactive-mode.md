@@ -86,7 +86,7 @@ meka [r] > write a python script that
 
 Press **Enter** on the last line to submit the entire multi-line input.
 
-Pasting multi-line content also works seamlessly — all pasted lines appear in the buffer for review, and you press **Enter** to submit.
+Pasting multi-line content also works seamlessly: all pasted lines appear in the buffer for review, and you press **Enter** to submit.
 
 ## Slash Commands
 
@@ -115,7 +115,7 @@ Replays prior messages in the current session so you can scroll back through con
 
 The renderer mimics the live REPL: assistant text flows through the same markdown highlighter, tool calls appear as `[tool ReadFile(...)]` indicators, and thinking blocks honour `[thinking].show_content`. User prompts are prefixed with a cyan `>` so they stand out from agent text.
 
-For users who always want extra context at resume time, set [`display.resume_show_recent`](../configuration/config-file.md#displayresume_show_recent) — the resume code path then renders the last N turns through the same function.
+For users who always want extra context at resume time, set [`display.resume_show_recent`](../configuration/config-file.md#displayresume_show_recent); the resume code path then renders the last N turns through the same function.
 
 ### `/status`
 
@@ -136,7 +136,7 @@ Session status
 
 The `/compact` command asks the LLM to summarize the entire conversation, then replaces the messages the model sees with a single summary message followed by the recent tail. This is useful for long sessions that are approaching the context window limit or becoming expensive.
 
-After compacting, the session continues with the summary as context. The pre-compaction messages stay in the underlying event log on disk — the model just no longer sees them — so `meka export` and resume continue to work exactly as if the compaction had wiped them.
+After compacting, the session continues with the summary as context. The pre-compaction messages stay in the underlying event log on disk (the model just no longer sees them), so `meka export` and resume continue to work exactly as if the compaction had wiped them.
 
 ## Shell Escape
 

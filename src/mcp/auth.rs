@@ -146,7 +146,7 @@ pub async fn revoke_stored_token(
 /// `resource_metadata` URL we can fetch to learn which authorization servers + scopes to use.
 #[derive(Debug, PartialEq, Eq)]
 pub enum McpAuthProbe {
-    /// Server answered 2xx — reachable and doesn't require auth.
+    /// Server answered 2xx: reachable and doesn't require auth.
     Open,
     /// Server answered 401 / 403 with a `Bearer` challenge. The optional URL is the RFC 9728
     /// protected-resource-metadata document.
@@ -162,7 +162,7 @@ pub enum McpAuthProbe {
 ///
 /// Runs an unauthenticated `GET` with a 3 s wall-clock timeout and redirects disabled; we never
 /// follow off-origin so a compromised DNS can't bait us into treating an attacker host as
-/// authoritative about the real server. The body is ignored — the verdict comes entirely from the
+/// authoritative about the real server. The body is ignored; the verdict comes entirely from the
 /// status line and the `WWW-Authenticate` header.
 pub async fn probe_http_auth(url: &str) -> McpAuthProbe {
     let http = match reqwest::Client::builder()
@@ -194,7 +194,7 @@ pub async fn probe_http_auth(url: &str) -> McpAuthProbe {
     classify_probe_response(status, www_authenticate.as_deref())
 }
 
-/// Pure classifier for the probe — takes the status code + optional `WWW-Authenticate` header and
+/// Pure classifier for the probe: takes the status code + optional `WWW-Authenticate` header and
 /// returns the [`McpAuthProbe`] verdict. Extracted so the RFC-6750 / RFC-9728 parsing can be
 /// unit-tested without a live HTTP server.
 fn classify_probe_response(status: u16, www_authenticate: Option<&str>) -> McpAuthProbe {
@@ -477,7 +477,7 @@ async fn authenticate_client_credentials_jwt(
 /// 0600-only policy already applied to the session DB and config.toml: if the key can be read by
 /// another local user, a local attacker can forge JWTs to the MCP server and impersonate us.
 ///
-/// Takes the open `File` so the permission check and the subsequent read share the same inode — a
+/// Takes the open `File` so the permission check and the subsequent read share the same inode. A
 /// stat-then-read pair on the path could be swapped between syscalls.
 ///
 /// No-op on non-Unix: Windows uses ACLs and we don't try to audit them.
@@ -599,7 +599,7 @@ async fn authenticate_oauth_authorization_code(
         return Ok(manager);
     }
 
-    // No stored credentials — run the interactive browser flow
+    // No stored credentials; run the interactive browser flow
     tracing::info!(
         "starting OAuth authorization flow for MCP server '{}'",
         server_name
@@ -663,7 +663,7 @@ async fn authenticate_oauth_authorization_code(
             oauth_state = OAuthState::Session(session);
         }
     } else {
-        // No client_id configured — use dynamic registration via start_authorization
+        // No client_id configured; use dynamic registration via start_authorization
         let scope_refs: Vec<&str> = scope_strings.iter().map(|s| s.as_str()).collect();
         oauth_state
             .start_authorization(&scope_refs, &redirect_uri, Some("meka"))
@@ -684,7 +684,7 @@ async fn authenticate_oauth_authorization_code(
             })?;
 
     // Print the URL exactly once and try to open the browser silently. Browser-launch failures are
-    // expected on headless hosts (SSH, CI, containers), so they stay at `debug` — the user has the
+    // expected on headless hosts (SSH, CI, containers), so they stay at `debug`. The user has the
     // URL and can copy it either way.
     eprintln!("open this URL in your browser to authorize:\n\n{auth_url}\n");
     if let Err(error) = open::that(&auth_url) {
@@ -731,7 +731,7 @@ const OAUTH_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 ///
 /// The common case is that the OAuth provider redirects the user's browser to our localhost
 /// listener and we pick the code out of the HTTP request. But when meka runs on a different host
-/// than the browser — SSH sessions, containers, remote Codespaces — the browser can't reach back,
+/// than the browser (SSH sessions, containers, remote Codespaces), the browser can't reach back,
 /// so we race the TCP accept against a stdin prompt that lets the user paste the full callback URL
 /// (it's visible in the browser's address bar even when the connection is refused). Paste mode is
 /// only offered when stdin is a TTY.
@@ -743,7 +743,7 @@ async fn await_oauth_callback(
 
     if paste_enabled {
         eprintln!(
-            "waiting up to {}s for the callback — or paste the callback URL here and press Enter:",
+            "waiting up to {}s for the callback, or paste the callback URL here and press Enter:",
             OAUTH_CALLBACK_TIMEOUT.as_secs()
         );
     } else {
@@ -897,7 +897,7 @@ async fn read_pasted_callback(
             OAUTH_CALLBACK_TIMEOUT.as_secs()
         )),
         Ok(Err(error)) => Err(format!("stdin read failed: {}", error)),
-        // `read_line` returning 0 means EOF — stdin was closed before the user pasted anything.
+        // `read_line` returning 0 means EOF: stdin was closed before the user pasted anything.
         // Don't treat this as a fatal error; let the TCP branch of the `select!` continue waiting.
         Ok(Ok(0)) => std::future::pending().await,
         Ok(Ok(_)) => parse_pasted_callback(&line),
@@ -1282,7 +1282,7 @@ mod tests {
         let mut f = std::fs::File::create(&key_path).expect("create key");
         f.write_all(b"---BEGIN---").expect("write");
         drop(f);
-        // 0644 — readable by other users.
+        // 0644: readable by other users.
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
             .expect("chmod 0644");
         let file = std::fs::File::open(&key_path).expect("open key");
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn classify_probe_401_without_bearer_is_unexpected() {
-        // A 401 with e.g. Basic / Digest auth is not MCP-spec compliant — surface it as Unexpected
+        // A 401 with e.g. Basic / Digest auth is not MCP-spec compliant. Surface it as Unexpected
         // rather than pretending it's OAuth.
         assert_eq!(
             classify_probe_response(401, Some("Basic realm=\"x\"")),

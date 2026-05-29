@@ -12,14 +12,14 @@ A general-purpose AI agent harness.
 
 ## Overview
 
-meka is a general-purpose AI agent harness that provides LLMs with a rich set of tools — web search, shell execution, file editing, and more — to accomplish complex tasks. Use it as a natural-language shell, a system diagnostic helper, a research or data-analysis assistant, for general Q&A, or to add agentic capabilities to other applications.
+meka is a general-purpose AI agent harness: it wraps a large language model with a tool set, working memory, persistent sessions, a permission model, and several front-ends (an interactive REPL, one-shot commands, an editor agent via ACP, and an HTTP service). Bring a provider (Claude or OpenAI, API key or subscription) and meka turns it into an agent that reads and edits files, runs commands, searches the web, calls MCP servers, and delegates to sub-agents to accomplish real tasks.
 
 Supported providers:
 
-- **OpenAI API** — bring your own API key. Also works with any OpenAI-compatible endpoint.
-- **OpenAI Codex** — authenticate with a ChatGPT subscription.
-- **Claude API** — bring your own API key.
-- **Claude OAuth** — authenticate with a Claude subscription.
+- **OpenAI API**: bring your own API key. Also works with any OpenAI-compatible endpoint.
+- **OpenAI Codex**: authenticate with a ChatGPT subscription.
+- **Claude API**: bring your own API key.
+- **Claude OAuth**: authenticate with a Claude subscription.
 
 ## Installation
 

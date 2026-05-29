@@ -1,6 +1,6 @@
 # Skills
 
-Skills are user-defined knowledge packages that give the agent non-standard knowledge -- manuals, procedures, tool-specific instructions, and experience the LLM doesn't have natively. Each skill is a directory containing a `SKILL.md` file with structured metadata.
+Skills are user-defined knowledge packages that give the agent non-standard knowledge: manuals, procedures, tool-specific instructions, and experience the LLM doesn't have natively. Each skill is a directory containing a `SKILL.md` file with structured metadata.
 
 ## How Skills Work
 
@@ -55,7 +55,7 @@ yt-dlp "https://example.com/video"
 
 | Field | Description |
 |-------|-------------|
-| `description` | Summary of what the skill does *and when to invoke it*. Shown in the system prompt — fold the trigger condition into this one line. |
+| `description` | Summary of what the skill does *and when to invoke it*. Shown in the system prompt. Fold the trigger condition into this one line. |
 
 Skills missing `description` are skipped at discovery with a warning log. Unknown frontmatter keys are ignored, so a skill authored for Claude Code (which carries extra keys like `when_to_use` or `allowed-tools`) still loads.
 
@@ -71,8 +71,8 @@ Skills missing `description` are skipped at discovery with a warning log. Unknow
 
 The skill body may reference these variables, which are expanded when the skill is loaded:
 
-- `${MEKA_SKILL_DIR}` -- the absolute path to the skill's directory. Use this to reference bundled helper files (e.g. `${MEKA_SKILL_DIR}/helper.sh`).
-- `${MEKA_SESSION_ID}` -- the current session UUID.
+- `${MEKA_SKILL_DIR}`: the absolute path to the skill's directory. Use this to reference bundled helper files (e.g. `${MEKA_SKILL_DIR}/helper.sh`).
+- `${MEKA_SESSION_ID}`: the current session UUID.
 
 ## Storage Location
 
@@ -101,7 +101,7 @@ skill(name: "download-videos")
 
 The tool returns the full body of `SKILL.md` (with variables expanded) as its output. The agent then follows the instructions.
 
-Whenever a skill body is loaded — by the `skill` tool, `--skill`, `/skill`, `spawn_agent`, or `meka skill show` — it is prefixed with a one-line header naming the skill's directory:
+Whenever a skill body is loaded (by the `skill` tool, `--skill`, `/skill`, `spawn_agent`, or `meka skill show`), it is prefixed with a one-line header naming the skill's directory:
 
 ```
 Base directory for this skill and its bundled files: /home/user/.config/meka/skills/download-videos
@@ -118,7 +118,7 @@ spawn_agent(skill: "summarize-financial-news")
 spawn_agent(skill: "summarize-financial-news", prompt: "focus on UK markets")
 ```
 
-`prompt` is optional when `skill` is given; if both are supplied, `prompt` is prepended to the skill body as extra direction — the same ordering as `meka --skill <name> [prompt]`.
+`prompt` is optional when `skill` is given; if both are supplied, `prompt` is prepended to the skill body as extra direction (the same ordering as `meka --skill <name> [prompt]`).
 
 ## Invoking a Skill from the CLI
 
@@ -128,7 +128,7 @@ Any skill can be triggered directly from the command line with `--skill <name>`.
 meka --skill download-videos "https://example.com/video"
 ```
 
-The positional `[PROMPT]` argument, if given, is prepended to the skill body as extra context — equivalent to typing `/skill download-videos https://example.com/video` in the REPL.
+The positional `[PROMPT]` argument, if given, is prepended to the skill body as extra context (equivalent to typing `/skill download-videos https://example.com/video` in the REPL).
 
 To run the skill and exit immediately (useful for scripts), pair with `--oneshot`:
 
@@ -153,18 +153,18 @@ meka skill update --all             # dry run: lists what would update
 meka skill update --all --yes       # apply the updates
 ```
 
-`source_url` should be an `https://` link to a raw `SKILL.md` (e.g. a GitHub raw URL or a gist raw URL). The fetch is validated — the response must parse as a valid skill — before the on-disk file is atomically replaced, so a 404 page or a malformed file leaves the existing skill untouched. If the fetched content is byte-identical to what's on disk, nothing is written.
+`source_url` should be an `https://` link to a raw `SKILL.md` (e.g. a GitHub raw URL or a gist raw URL). The fetch is validated (the response must parse as a valid skill) before the on-disk file is atomically replaced, so a 404 page or a malformed file leaves the existing skill untouched. If the fetched content is byte-identical to what's on disk, nothing is written.
 
-`meka skill update --all` without `--yes` is a dry run: it lists every skill that would be updated and applies nothing. This is the confirmation gate for a bulk remote fetch — re-run with `--yes` to apply.
+`meka skill update --all` without `--yes` is a dry run: it lists every skill that would be updated and applies nothing. This is the confirmation gate for a bulk remote fetch; re-run with `--yes` to apply.
 
-Only the `SKILL.md` file is fetched. Helper scripts bundled alongside it in the skill directory are **not** updated this way — `source_url`-based update is for single-file skills.
+Only the `SKILL.md` file is fetched. Helper scripts bundled alongside it in the skill directory are **not** updated this way; `source_url`-based update is for single-file skills.
 
-> **Trust note.** A skill body is instructions the agent follows. `meka skill update` replaces that content with whatever the `source_url` currently serves — review the source you point it at, and prefer `--all` (with its dry-run default) over blind updates.
+> **Trust note.** A skill body is a set of instructions the agent follows. `meka skill update` replaces that content with whatever the `source_url` currently serves. Review the source you point it at, and prefer `--all` (with its dry-run default) over blind updates.
 
 ## Tips
 
 - Use short, unambiguous skill names (e.g. `setup-postgres`, not `pg`). The name is what the agent sees and calls.
-- Write `description` concisely, and fold the "use when..." trigger into it -- it goes into every system prompt and consumes tokens.
+- Write `description` concisely, and fold the "use when..." trigger into it. It goes into every system prompt and consumes tokens.
 - Keep each skill focused on a single topic or procedure. Spawn multiple skills rather than one giant one.
 - Bundle supporting files in the skill directory and reference them with `${MEKA_SKILL_DIR}/file.ext`.
 - Skills are re-discovered on every prompt, so you can add, edit, or remove skills mid-session without restarting meka.

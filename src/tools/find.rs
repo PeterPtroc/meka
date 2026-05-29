@@ -97,10 +97,10 @@ impl Tool for FindFilesTool {
         );
 
         // Cap precedence:
-        //   1. explicit `limit` parameter — honoured verbatim
-        //   2. no limit + `scratchpad` set — unbounded (preserves the "collect everything" escape
+        //   1. explicit `limit` parameter: honoured verbatim
+        //   2. no limit + `scratchpad` set: unbounded (preserves the "collect everything" escape
         //      hatch)
-        //   3. otherwise — DEFAULT_INLINE_RESULTS
+        //   3. otherwise: DEFAULT_INLINE_RESULTS
         let explicit_limit = input
             .get("limit")
             .and_then(|value| value.as_u64())
@@ -114,7 +114,7 @@ impl Tool for FindFilesTool {
         let result = tokio::task::spawn_blocking(move || {
             let mut matches: Vec<String> = Vec::new();
             // Total continues past the storage cap so we can report the real count of matches in
-            // the truncation message — glob walks are FS-metadata only, so the extra iteration past
+            // the truncation message. Glob walks are FS-metadata only, so the extra iteration past
             // the cap is cheap.
             let mut total: usize = 0;
             match glob::glob(&full_pattern) {
@@ -297,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_files_explicit_limit_with_scratchpad_caps() {
-        // Regression: an explicit `limit` should beat the scratchpad "unbounded" default — the
+        // Regression: an explicit `limit` should beat the scratchpad "unbounded" default; the
         // agent might legitimately want a bounded scratchpad collection.
         let temp_dir = tempfile::tempdir().expect("tempdir");
         for i in 0..600 {

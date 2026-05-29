@@ -2,7 +2,7 @@
 //! frontend. The MCP protocol requires the client to announce a per-request `progressToken`; the
 //! server then emits progress notifications carrying that token. We keep a process-wide map from
 //! token → (entry, frontend) so the rmcp notification dispatch (which runs on a separately-spawned
-//! task — see `rmcp::service::spawn_service_task`) can find the per-session UI even though it
+//! task; see `rmcp::service::spawn_service_task`) can find the per-session UI even though it
 //! can't read the caller's task-local. RAII guards remove the entry when the in-flight call
 //! finishes so orphaned tokens don't pile up.
 
@@ -44,7 +44,7 @@ struct Entry {
     tool_use_id: Option<String>,
     /// The session's frontend that initiated this tool call. `None` outside an agent-driven call
     /// site (e.g. an MCP connection probe). When `None`, `dispatch` falls back to a tracing log
-    /// and the user sees nothing — same as the pre-refactor "no UI sink installed" behaviour.
+    /// and the user sees nothing, same as the pre-refactor "no UI sink installed" behaviour.
     frontend: Option<Arc<dyn Frontend>>,
 }
 
@@ -58,7 +58,7 @@ fn registry() -> &'static Registry {
 /// Register a freshly-generated progress token for an in-flight tool call. The frontend is sourced
 /// at the agent's call site (where the per-session task-local is in scope) and stored alongside
 /// the call context so the rmcp notification handler can later look it up by token. Returns a
-/// [`ProgressGuard`] that removes the entry when dropped — the standard `_progress_guard` binding
+/// [`ProgressGuard`] that removes the entry when dropped, the standard `_progress_guard` binding
 /// the MCP tool adapter holds for the duration of `peer.call_tool().await`.
 pub fn register(
     server_name: String,
@@ -145,7 +145,7 @@ pub async fn dispatch(params: ProgressNotificationParam) {
         update
             .message
             .as_deref()
-            .map(|m| format!(" — {}", m))
+            .map(|m| format!(", {}", m))
             .unwrap_or_default()
     );
     if let Some(frontend) = frontend {
@@ -154,14 +154,14 @@ pub async fn dispatch(params: ProgressNotificationParam) {
 }
 
 /// Best-effort lookup: find the frontend of any in-flight tool call targeting `server_name`. Used
-/// by the elicitation handler, which has no `progressToken` correlation of its own — the server's
+/// by the elicitation handler, which has no `progressToken` correlation of its own. The server's
 /// elicitation request lands on the rmcp handler task with only its own request id and the
 /// originating server identity. Scanning the registry for a matching in-flight call is the
 /// pragmatic best we can do without protocol-level help.
 ///
 /// Returns the first match (HashMap iteration order is arbitrary). In a multi-session ACP process
 /// where two sessions race calls to the same server, an elicitation arriving during both calls
-/// would route to whichever entry the scan picks — but each session's `AcpFrontend` resolves
+/// would route to whichever entry the scan picks, but each session's `AcpFrontend` resolves
 /// elicitation identically (auto-decline today), so the choice is observable only when a future
 /// per-session form-prompt path lands.
 pub(crate) fn find_frontend_for_server(server_name: &str) -> Option<Arc<dyn Frontend>> {
@@ -196,7 +196,7 @@ mod tests {
     fn guard_cleans_up_on_drop() {
         // Cargo runs unit tests in parallel and the registry is a shared global. Checking
         // `outstanding_count()` deltas races with other tests registering/dropping tokens
-        // concurrently — scan for this specific token's UUID key instead, which only this test
+        // concurrently. Scan for this specific token's UUID key instead, which only this test
         // knows about.
         let token_key: String;
         {
@@ -213,7 +213,7 @@ mod tests {
         }
         assert!(
             !is_registered(&token_key),
-            "token '{}' lingered after guard dropped — ProgressGuard::drop didn't clean up",
+            "token '{}' lingered after guard dropped: ProgressGuard::drop didn't clean up",
             token_key
         );
     }
@@ -273,7 +273,7 @@ mod tests {
 
     /// Multi-session isolation: two concurrent calls with distinct frontends must each receive
     /// only their own progress updates. This is the property that makes per-session ACP routing
-    /// safe — session A's MCP server progress can't leak to session B.
+    /// safe: session A's MCP server progress can't leak to session B.
     #[tokio::test]
     async fn dispatch_isolates_concurrent_calls() {
         let recorder_a: Arc<RecordingFrontend> = Arc::new(RecordingFrontend::new());

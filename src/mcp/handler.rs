@@ -89,14 +89,14 @@ impl ClientHandler for MekaClientHandler {
             tracing::info!("MCP server '{}' sent tools/list_changed", server_name);
             let Some(manager) = manager else {
                 tracing::debug!(
-                    "tool list refresh skipped — manager not yet wired for '{}'",
+                    "tool list refresh skipped: manager not yet wired for '{}'",
                     server_name
                 );
                 return;
             };
 
             // Tool-permission resolution reads the server config and `mcp_default_permission` from
-            // the manager itself — no explicit permission needs to be threaded here.
+            // the manager itself; no explicit permission needs to be threaded here.
             match manager.discover_tools_for_server(&server_name).await {
                 Ok(adapters) => {
                     // Match the initial-registration path: only mark non-eager tools deferred.
@@ -270,7 +270,7 @@ impl ClientHandler for MekaClientHandler {
             // Correlate the elicitation back to the in-flight call's frontend via the per-server
             // lookup on the progress registry. When no call from `server` is in flight (the server
             // elicited outside of a tool call, or the progress guard already dropped), there's no
-            // human to ask — auto-decline matches the safe pre-refactor "no shell sink installed"
+            // human to ask. Auto-decline matches the safe pre-refactor "no shell sink installed"
             // behaviour.
             let frontend = crate::mcp::progress::find_frontend_for_server(server.as_ref());
             let Some(frontend) = frontend else {
@@ -285,7 +285,7 @@ impl ClientHandler for MekaClientHandler {
             // 60-second user-response timeout so a distracted user can't stall an MCP tool call
             // forever. Matches the elicitation deadline used for the ToolApprovalRequest channel in
             // shell.rs. Elicitations are standard MCP *requests*, so a `Decline` response IS how
-            // the server learns the user didn't answer — no separate `notifications/cancelled` is
+            // the server learns the user didn't answer; no separate `notifications/cancelled` is
             // appropriate here (cancellation notifications are for long-running requests we
             // started, not for server-initiated elicitations).
             let response = match tokio::time::timeout(
@@ -320,7 +320,7 @@ impl ClientHandler for MekaClientHandler {
         async move {
             if !policy.allowed {
                 tracing::info!(
-                    "MCP server '{}' requested sampling/createMessage — rejected (sampling=false)",
+                    "MCP server '{}' requested sampling/createMessage: rejected (sampling=false)",
                     server_name
                 );
                 return Err(McpError::new(
@@ -368,7 +368,7 @@ impl ClientHandler for MekaClientHandler {
                 McpError::invalid_params(format!("sampling conversion failed: {}", error), None)
             })?;
 
-            // Sampling calls out to the provider with no MCP tools exposed — the server asked for
+            // Sampling calls out to the provider with no MCP tools exposed: the server asked for
             // pure reasoning, not tool-use. The empty tool list forces the provider into a plain
             // text completion. Bounded by `MCP_SAMPLING_PROVIDER_TIMEOUT` so a hung provider can't
             // pin the MCP request open indefinitely.
@@ -390,7 +390,7 @@ impl ClientHandler for MekaClientHandler {
                     (message, stop_reason, usage)
                 }
                 Ok(Err(error)) => {
-                    // Provider returned an error before the timeout elapsed — no quota was really
+                    // Provider returned an error before the timeout elapsed. No quota was really
                     // consumed on our side, so hand the sampling slot back.
                     policy.count.fetch_sub(1, Ordering::SeqCst);
                     return Err(McpError::internal_error(
@@ -422,7 +422,7 @@ impl ClientHandler for MekaClientHandler {
 
 /// Convert MCP `CreateMessageRequestParams` into the provider's `(system_prompt, Vec<Message>)`
 /// shape, flattening text content. Non-text sampling content (image, audio, tool_use, tool_result)
-/// is replaced with a placeholder string — none of meka's providers accept these inside sampling
+/// is replaced with a placeholder string: none of meka's providers accept these inside sampling
 /// calls.
 fn convert_sampling_params(
     params: &CreateMessageRequestParams,
@@ -524,7 +524,7 @@ impl McpToolAdapter {
     }
 
     /// Resolves a per-call tool-call timeout. Respects `MEKA_MCP_TOOL_TIMEOUT` (milliseconds) when
-    /// set, otherwise falls back to 600 seconds — long enough for a database index rebuild but
+    /// set, otherwise falls back to 600 seconds, long enough for a database index rebuild but
     /// short enough that a hung server isn't invisible.
     fn tool_call_timeout() -> std::time::Duration {
         std::env::var("MEKA_MCP_TOOL_TIMEOUT")
@@ -543,7 +543,7 @@ impl McpToolAdapter {
         // Per-call progress token: allows the server to emit `notifications/progress` updates that
         // route back to our shell UI. The frontend snapshot is taken from the task-local installed
         // by `Agent::run_tool` and stored on the registry entry so the rmcp notification handler
-        // (which runs on a separately-spawned task — see `rmcp::service::spawn_service_task`) can
+        // (which runs on a separately-spawned task; see `rmcp::service::spawn_service_task`) can
         // look it up by token. `None` outside an agent-driven call site falls through to a debug
         // log in `dispatch`.
         let frontend_for_progress = crate::mcp::current_session_frontend();
@@ -561,7 +561,7 @@ impl McpToolAdapter {
         }
         params.meta = Some(meta);
 
-        // Same error surface as an actually-closed transport — the upstream retry logic already
+        // Same error surface as an actually-closed transport. The upstream retry logic already
         // handles `TransportClosed` by attempting a reconnect.
         let peer: Peer<RoleClient> = self
             .entry
@@ -716,7 +716,7 @@ impl Tool for McpToolAdapter {
                         );
                     } else {
                         tracing::warn!(
-                            "MCP server '{}' returned 401 — marked as needing auth. Run 'meka mcp login {}' to re-authenticate.",
+                            "MCP server '{}' returned 401; marked as needing auth. Run 'meka mcp login {}' to re-authenticate.",
                             self.entry.server_name(),
                             self.entry.server_name()
                         );
@@ -831,7 +831,7 @@ fn convert_tool_result_content(
                     text_buf.push('\n');
                 }
                 text_buf.push_str(&format!(
-                    "[audio content: {}, {} base64 bytes — meka does not yet pass audio to the provider]",
+                    "[audio content: {}, {} base64 bytes; meka does not yet pass audio to the provider]",
                     audio.mime_type,
                     audio.data.len()
                 ));

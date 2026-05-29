@@ -259,14 +259,14 @@ impl Tool for ReadFileTool {
         let regex = input.get("regex").and_then(|v| v.as_str());
 
         // Plain text reads delegate to the editor when it offers `fs.read_text_file` (in-buffer
-        // view wins over on-disk). Regex / image reads have no `fs/*` analogue — always local.
+        // view wins over on-disk). Regex / image reads have no `fs/*` analogue; always local.
         if regex.is_none() {
             let delegate_line =
                 offset.map(|o| u32::try_from(o.saturating_add(1)).unwrap_or(u32::MAX));
             // Mirror the local fallback's `DEFAULT_LINE_LIMIT` so the delegate path can't
             // accidentally pull an unbounded file into the agent's context when the caller passed
             // no limit. Without this, an `fs.read_text_file`-capable client (e.g. Zed) returns the
-            // whole file while the local path would cap at 2000 lines with a truncation marker —
+            // whole file while the local path would cap at 2000 lines with a truncation marker:
             // divergent behavior + context-window risk.
             let delegate_limit = Some(
                 limit
@@ -339,9 +339,9 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Modify a file. Two modes: (1) Replace — provide \
+            description: "Modify a file. Two modes: (1) Replace: provide \
                           'new_string' to swap 'old_string' for it (an empty \
-                          'new_string' deletes 'old_string'). (2) Insert — provide \
+                          'new_string' deletes 'old_string'). (2) Insert: provide \
                           'insert_before' or 'insert_after' to place content adjacent to \
                           'old_string' while preserving the anchor itself; useful when you \
                           only need to add lines without rewriting surrounding context. \
@@ -463,9 +463,9 @@ impl Tool for EditFileTool {
             ));
         }
 
-        // Prefer the editor's in-buffer view when offered. A delegate error short-circuits —
-        // silently reading on-disk bytes risks diffing a different document than the one the editor
-        // will apply against.
+        // Prefer the editor's in-buffer view when offered. A delegate error short-circuits;
+        // silently reading on-disk bytes risks diffing a different document than the one the
+        // editor will apply against.
         let content =
             match self.frontend.delegate_fs_read(&canonical, None, None).await {
                 Some(Ok(text)) => text,
@@ -599,7 +599,7 @@ fn build_context_snippet(content: &str, change_byte_offset: usize, lines_around:
 pub(super) struct WriteFileTool {
     /// Shared with `ReadFileTool` / `EditFileTool`. After a successful write we insert the
     /// canonical target so a follow-up `edit_file` against the same path doesn't require a
-    /// redundant `read_file` or `force: true` — the agent obviously knows the content it just
+    /// redundant `read_file` or `force: true`; the agent obviously knows the content it just
     /// wrote.
     pub read_tracker: ReadTracker,
     pub cwd: crate::agent::SharedCwd,
@@ -687,7 +687,7 @@ impl Tool for WriteFileTool {
         // means the file did not exist (this is a create); we use the `not_found` ErrorKind to
         // distinguish from a permissions error so the latter surfaces normally.
         //
-        // When the client offers `fs.read_text_file`, ask the editor for its view first — buffers
+        // When the client offers `fs.read_text_file`, ask the editor for its view first; buffers
         // with unsaved changes give a more accurate `old_text` than the on-disk bytes. A delegate
         // error is non-fatal here (diff metadata is informational), so we fall back to the local
         // read on `Some(Err(_))` too.
@@ -698,7 +698,7 @@ impl Tool for WriteFileTool {
         // probe local metadata: if the file is absent on disk AND
         // the delegate returned an empty string, treat it as "new
         // file" (`None`). The probe is one stat; cost is negligible
-        // and the heuristic is conservative — a truly-empty existing
+        // and the heuristic is conservative: a truly-empty existing
         // file still loses `old_text`, but the diff content is
         // identical either way.
         let old_text = match self.frontend.delegate_fs_read(&target, None, None).await {
@@ -724,7 +724,7 @@ impl Tool for WriteFileTool {
         };
 
         // Delegate the write when the editor offers `fs.write_text_file`. A delegate error surfaces
-        // verbatim — silently falling back to a local write would diverge from the editor's view of
+        // verbatim; silently falling back to a local write would diverge from the editor's view of
         // the file.
         match self.frontend.delegate_fs_write(&target, &content).await {
             Some(Ok(())) => {}

@@ -1,5 +1,5 @@
-//! `meka acp` subcommand — speaks the Agent Client Protocol (ACP) on stdio so editor / web /
-//! messenger clients can drive an meka turn end to end.
+//! `meka acp` subcommand. Speaks the Agent Client Protocol (ACP) on stdio so editor / web /
+//! messenger clients can drive a meka turn end to end.
 //!
 //! # Capability surface
 //!
@@ -25,7 +25,7 @@
 //! Multi-session: any number of sessions can coexist in one `meka acp` process. Each session has
 //! its own cwd, permission cell, conversation, cancellation token, and per-session `Agent` +
 //! `AcpFrontend`. Sessions share process-wide dependencies (provider, MCP manager, session DB,
-//! skill cache) via `Arc`. Two sessions can run `session/prompt` calls in parallel — there is no
+//! skill cache) via `Arc`. Two sessions can run `session/prompt` calls in parallel; there is no
 //! global mutex serialising turns. Sub-agents reach the parent's client through
 //! [`crate::frontend::PermissionForwardingFrontend`], so their permission prompts, fs delegates,
 //! and terminal delegates all flow through the parent session's editor UI.
@@ -79,7 +79,7 @@ fn invalid_params_error(message: impl ToString) -> agent_client_protocol::Error 
     agent_client_protocol::Error::invalid_params().data(message.to_string())
 }
 
-/// Late-bound view of everything the connected client told us on `initialize` — its advertised
+/// Late-bound view of everything the connected client told us on `initialize`: its advertised
 /// capabilities and its self-identifying `Implementation` (name + version). Default is the
 /// all-`false` `ClientCapabilities` and a `None` identity, so an `AcpFrontend` constructed before
 /// `initialize` arrives correctly reports "delegation unavailable" and "client unknown" until the
@@ -159,8 +159,8 @@ pub struct AcpFrontend {
     ///
     /// This is correct *for stdio*: one closed pipe affects every session in the process, so the
     /// global signal carries no false positives. When a per-session transport (e.g. WebSocket-ACP
-    /// or a TCP-multiplexed successor) lands, this field needs a per-session sibling — read both
-    /// in `client_disconnected()` and OR them — so a single session's drop doesn't take the
+    /// or a TCP-multiplexed successor) lands, this field needs a per-session sibling (read both
+    /// in `client_disconnected()` and OR them) so a single session's drop doesn't take the
     /// process down with it. Grep for `transport_dead` to find the migration points.
     transport_dead: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -275,7 +275,7 @@ impl Frontend for AcpFrontend {
                 // No dedicated ACP primitive for advisories; surface inline as an assistant-message
                 // chunk with an `[meka]` prefix so editor transcripts record the side-effect and
                 // clients can filter or style by that prefix. `notice.level` is unused on the wire
-                // today — when ACP grows a typed notice variant, branch on it here.
+                // today; when ACP grows a typed notice variant, branch on it here.
                 let text = format!("[meka] {}", notice.text);
                 SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
                     agent_client_protocol::schema::TextContent::new(text),
@@ -296,7 +296,7 @@ impl Frontend for AcpFrontend {
                     update
                         .message
                         .as_deref()
-                        .map(|m| format!(" — {}", m))
+                        .map(|m| format!(", {}", m))
                         .unwrap_or_default()
                 );
                 return;
@@ -345,7 +345,7 @@ impl Frontend for AcpFrontend {
             ),
         ];
 
-        // Synthetic id — the permission round-trip is its own space, not correlated with the
+        // Synthetic id: the permission round-trip is its own space, not correlated with the
         // streaming tool_call lifecycle.
         let tool_call_id = format!("perm-{}", uuid::Uuid::new_v4());
         let title = match &request.primary_param {
@@ -361,7 +361,7 @@ impl Frontend for AcpFrontend {
         let req = RequestPermissionRequest::new(session_id, tool_call, options);
         // Race the round-trip against the per-turn cancellation token. If `session/cancel` fires
         // while we're waiting for the client to answer the permission prompt, we resolve as
-        // `Cancelled` instead of holding the runtime mutex forever — that would block
+        // `Cancelled` instead of holding the runtime mutex forever, which would block
         // `session/close` and `session/set_mode` too.
         let response = tokio::select! {
             biased;
@@ -373,7 +373,7 @@ impl Frontend for AcpFrontend {
                 Err(error) => {
                     tracing::debug!("request_permission send_request failed: {}", error);
                     // Spec-conformant clients always reply with a `Selected` or `Cancelled`
-                    // outcome, so an `Err` here is almost certainly transport-level — mark the
+                    // outcome, so an `Err` here is almost certainly transport-level. Mark the
                     // connection dropped so the agent loop short-circuits on the next pre-iteration
                     // check instead of running a tool, emitting a denied result, and only then
                     // discovering the client is gone via the next emit. The FS / execute delegates
@@ -467,7 +467,7 @@ impl Frontend for AcpFrontend {
         // lands is to auto-decline with an info-level log so editor users can see in their agent
         // stderr that an elicitation arrived and was passed back to the server. A future per-ACP
         // path could synthesize a `session/request_permission` round-trip (the only existing
-        // round-trip primitive) by mapping form fields to permission options — but that conflates
+        // round-trip primitive) by mapping form fields to permission options, but that conflates
         // tool approval and form input, which is the kind of overload the protocol is likely to
         // rule out as it grows a proper elicitation surface.
         tracing::warn!(
@@ -484,8 +484,8 @@ impl Frontend for AcpFrontend {
     }
 }
 
-/// Stable string IDs for the four permission options. The agent and the client must agree on these
-/// — picking them as `const`s keeps the match arm in [`translate_permission_outcome`] honest.
+/// Stable string IDs for the four permission options. The agent and the client must agree on these;
+/// picking them as `const`s keeps the match arm in [`translate_permission_outcome`] honest.
 const OPTION_ALLOW_ONCE: &str = "allow_once";
 const OPTION_ALLOW_ALWAYS: &str = "allow_always";
 const OPTION_REJECT_ONCE: &str = "reject_once";
@@ -566,7 +566,7 @@ fn tool_kind_for(name: &str) -> ToolKind {
 
 /// Compute the `locations` entries for a tool call. For tools whose primary argument is a path,
 /// resolve it against the agent's per-session cwd (ACP requires absolute paths). Anything else
-/// returns an empty list — clients fall back to the `raw_input` field.
+/// returns an empty list; clients fall back to the `raw_input` field.
 fn tool_locations(name: &str, input: &serde_json::Value, cwd: &SharedCwd) -> Vec<ToolCallLocation> {
     let raw = match name {
         "read_file" | "edit_file" | "write_file" | "find_files" | "search_contents" => {
@@ -614,10 +614,10 @@ fn build_completion_content(
         .collect()
 }
 
-/// Walk a hydrated [`Conversation`] and emit one `session/update` notification per content block —
-/// mirroring the streaming shape the client would have seen had it been connected during the
-/// original turn. Used by `session/load` so an editor that just reopened a session replays the full
-/// history into its UI.
+/// Walk a hydrated [`Conversation`] and emit one `session/update` notification per content
+/// block, mirroring the streaming shape the client would have seen had it been connected during
+/// the original turn. Used by `session/load` so an editor that just reopened a session replays the
+/// full history into its UI.
 ///
 /// `<context>...</context>` preambles meka prepends to each user message are stripped before emit
 /// so the client sees only what the user actually typed.
@@ -731,7 +731,7 @@ fn replay_session_updates(
         }
     }
 
-    // Tool calls without a matching result — close them as failed so the client's "tool running"
+    // Tool calls without a matching result: close them as failed so the client's "tool running"
     // indicator doesn't get stuck.
     for orphan_id in open_tools {
         let fields = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
@@ -766,7 +766,7 @@ async fn run_delegated_execute(
     spec: DelegatedExecSpec,
 ) -> Result<DelegatedExecOutput, FrontendError> {
     // Build CreateTerminalRequest. Empty `args` / `env` / unset `cwd` / unset `output_byte_limit`
-    // are all fine — the builder leaves them at defaults.
+    // are all fine; the builder leaves them at defaults.
     let mut create = CreateTerminalRequest::new(session_id.clone(), spec.command.clone());
     if !spec.args.is_empty() {
         create = create.args(spec.args.clone());
@@ -799,7 +799,7 @@ async fn run_delegated_execute(
     // Wait for exit, racing the agent's cancellation token + the spec's timeout. On race-loss we
     // kill the terminal first; the follow-up `terminal/output` still returns whatever was buffered.
     //
-    // Default cap of 15 minutes when the caller didn't supply one — interactive tools can override
+    // Default cap of 15 minutes when the caller didn't supply one; interactive tools can override
     // per-call. The agent's cancel token is still the primary escape hatch; the timeout is just the
     // worst-case bound if both the cancel path and the underlying process get wedged.
     let timeout = spec
@@ -860,7 +860,7 @@ async fn run_delegated_execute(
         }
     };
 
-    // Best-effort release; errors are non-fatal — the editor cleans up on disconnect anyway. Log at
+    // Best-effort release; errors are non-fatal (the editor cleans up on disconnect anyway). Log at
     // debug for diagnostics.
     if let Err(error) = connection
         .send_request(ReleaseTerminalRequest::new(session_id, terminal_id))
@@ -893,10 +893,10 @@ async fn run_delegated_execute(
     })
 }
 
-/// Map an meka [`Permission`] to its ACP [`SessionModeId`] string. The mapping is the lowercase
-/// debug name (`none` / `read` / `ask` / `write`) — same string `Permission::Display` produces,
-/// kept as a dedicated function so the inverse parser ([`parse_mode_id`]) reads as the obvious
-/// complement.
+/// Map a meka [`Permission`] to its ACP [`SessionModeId`] string. The mapping is the lowercase
+/// debug name (`none` / `read` / `ask` / `write`), the same string `Permission::Display` produces.
+/// It is kept as a dedicated function so the inverse parser ([`parse_mode_id`]) reads as the
+/// obvious complement.
 fn mode_id_for(permission: Permission) -> SessionModeId {
     SessionModeId::from(permission.to_string())
 }
@@ -913,7 +913,7 @@ fn parse_mode_id(id: &str) -> Option<Permission> {
     }
 }
 
-/// Human-readable label for a permission mode — shown in editor mode pickers next to each option.
+/// Human-readable label for a permission mode, shown in editor mode pickers next to each option.
 /// Kept in lock-step with the REPL's `/permission` output and the `[permissions]` keys in
 /// `config.toml` so users see the same vocabulary everywhere.
 fn mode_display_name(permission: Permission) -> &'static str {
@@ -937,7 +937,7 @@ fn mode_description(permission: Permission) -> &'static str {
 }
 
 /// Build the `SessionModeState` advertised on every session-creation response (`session/new`,
-/// `session/load`, `session/resume`). Only modes in [`SharedPermission::enabled`] are exposed —
+/// `session/load`, `session/resume`). Only modes in [`SharedPermission::enabled`] are exposed:
 /// picking a non-enabled mode through `session/set_mode` later would just error out, so we don't
 /// surface them in the first place.
 fn build_mode_state(permission: &SharedPermission) -> SessionModeState {
@@ -953,7 +953,7 @@ fn build_mode_state(permission: &SharedPermission) -> SessionModeState {
 }
 
 /// Emit a `session/update: available_commands_update` listing every installed skill as an
-/// [`AvailableCommand`]. Editor clients render these as slash commands in their prompt input —
+/// [`AvailableCommand`]. Editor clients render these as slash commands in their prompt input;
 /// picking one inserts `/<name> ` and lets the user type extra context after.
 ///
 /// `SkillCache::current` is mtime-cached, so calling this at the top of every prompt is cheap (one
@@ -1004,7 +1004,7 @@ impl std::fmt::Display for SlashInvocationError {
 }
 
 /// Split an ACP prompt that looks like `/<name> [extra]` into the command name and the remainder.
-/// Returns `None` if the input isn't in that shape — i.e. doesn't start with `/`, has only
+/// Returns `None` if the input isn't in that shape, i.e. doesn't start with `/`, has only
 /// whitespace after the slash, or contains a newline before the first whitespace (heuristic: a real
 /// slash command never spans lines, but pasted content might).
 fn split_acp_slash(prompt_text: &str) -> Option<(String, String)> {
@@ -1082,13 +1082,13 @@ struct SessionEntry {
     /// cancel handler reads-and-clones it without touching `runtime`.
     cancellation: Arc<std::sync::RwLock<CancellationToken>>,
     /// Latch for cancels that arrive between turns. The prompt handler checks-and-clears it under
-    /// the runtime lock after installing the new token, so a between-turn cancel signal isn't lost
-    /// — see `acp_session_cancel_between_turns_applied_to_next_prompt`.
+    /// the runtime lock after installing the new token, so a between-turn cancel signal isn't
+    /// lost. See `acp_session_cancel_between_turns_applied_to_next_prompt`.
     cancel_pending: Arc<std::sync::atomic::AtomicBool>,
     /// Hoisted out of `SessionRuntime` so `set_mode` can flip the permission without waiting on
     /// the runtime mutex.
     permission: SharedPermission,
-    /// Hoisted for the same reason as `permission` — `set_mode` / `close` need the connection to
+    /// Hoisted for the same reason as `permission`: `set_mode` / `close` need the connection to
     /// emit notifications without blocking on the runtime mutex.
     frontend: Arc<AcpFrontend>,
     /// Held purely for its `Drop` side-effect: dropping releases the OS file lock on the persisted
@@ -1102,7 +1102,7 @@ struct SessionEntry {
 /// `SessionEntry.frontend` so the agent (which only knows `Arc<dyn Frontend>`) can reach the
 /// connection.
 struct SessionRuntime {
-    /// Duplicates `frontend.session_id.0` — string form retained for handlers that need it without
+    /// Duplicates `frontend.session_id.0`; string form retained for handlers that need it without
     /// re-extracting from the schema.
     #[allow(dead_code)]
     session_id_str: String,
@@ -1148,7 +1148,7 @@ pub async fn run_acp(
         let mock = Arc::new(crate::provider::mock::MockProvider::from_rounds(rounds));
         // Replace just the provider field, inheriting the rest from the real SharedDeps.
         // `SharedDeps: Clone` keeps this one-line and means future field additions are picked up
-        // automatically — Rust still enforces the exhaustive struct literal at compile time on top.
+        // automatically; Rust still enforces the exhaustive struct literal at compile time on top.
         let new_inner = crate::SharedDeps {
             provider: mock,
             ..(*shared).clone()
@@ -1158,7 +1158,7 @@ pub async fn run_acp(
         new_inner
             .mcp_context
             .set_provider(Arc::clone(&new_inner.provider));
-        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1 — using scripted mock provider");
+        tracing::info!("MEKA_ACP_MOCK_PROVIDER=1: using scripted mock provider");
         Arc::new(new_inner)
     } else {
         shared
@@ -1192,7 +1192,7 @@ pub async fn run_acp(
                         req.client_info.clone(),
                     );
 
-                    // Advertise the optional session methods. Each marker is an empty struct —
+                    // Advertise the optional session methods. Each marker is an empty struct;
                     // presence signals support.
                     let session_caps = SessionCapabilities::new()
                         .list(Some(SessionListCapabilities::new()))
@@ -1201,7 +1201,7 @@ pub async fn run_acp(
                     // meka accepts only `ContentBlock::Text` in
                     // `session/prompt` today. Default
                     // `PromptCapabilities` is `{image: false, audio:
-                    // false, embedded_context: false}` — declared
+                    // false, embedded_context: false}`, declared
                     // explicitly so the contract is visible in the
                     // initialize response and any future SDK default
                     // change can't quietly flip it.
@@ -1211,15 +1211,15 @@ pub async fn run_acp(
                     // file and does not yet connect to servers passed
                     // through `session/new`'s `mcpServers` array.
                     // Advertising `{ http: true, sse: true }` while
-                    // ignoring client-provided servers was misleading
-                    // — the marker is dropped until client-MCP
+                    // ignoring client-provided servers was misleading;
+                    // the marker is dropped until client-MCP
                     // support lands.
                     let capabilities = AgentCapabilities::new()
                         .load_session(true)
                         .session_capabilities(session_caps)
                         .prompt_capabilities(PromptCapabilities::new());
                     // Reject the V0 sentinel explicitly. The schema uses V0 as the "couldn't parse
-                    // the requested version" fallback — a clamped `min(V0, LATEST)` would silently
+                    // the requested version" fallback; a clamped `min(V0, LATEST)` would silently
                     // echo it back and let the handshake proceed against a malformed input.
                     if req.protocol_version == agent_client_protocol::schema::ProtocolVersion::V0 {
                         return responder.respond_with_error(invalid_params_error(
@@ -1405,9 +1405,9 @@ pub async fn run_acp(
             {
                 let state = Arc::clone(&state);
                 async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
-                    // Cancel fires through the sibling `cancellation` cell on the `SessionEntry` —
-                    // we never touch the per-session runtime mutex, which the prompt handler holds
-                    // for the duration of the turn.
+                    // Cancel fires through the sibling `cancellation` cell on the `SessionEntry`;
+                    // we never touch the per-session runtime mutex, which the prompt handler
+                    // holds for the duration of the turn.
                     //
                     // We also set `cancel_pending`: if the cancel arrives between turns (the cell
                     // still holds a stale token from the previous turn, which is now a no-op), the
@@ -1491,7 +1491,7 @@ async fn run_prompt_turn(
         }
     }
 
-    // Look up the target session by id under the outer read lock, clone the entry (cheap — two
+    // Look up the target session by id under the outer read lock, clone the entry (cheap, two
     // `Arc`s), drop the outer guard. From here on, only the per-session runtime mutex is held; the
     // sibling cancellation cell is accessible to the cancel handler throughout the turn.
     let session_id_str = req.session_id.0.as_ref().to_string();
@@ -1509,7 +1509,7 @@ async fn run_prompt_turn(
     };
 
     // Acquire the runtime mutex non-blocking. If another prompt is already in flight for this
-    // session, reject explicitly — ACP models one prompt at a time per session and silent queueing
+    // session, reject explicitly: ACP models one prompt at a time per session and silent queueing
     // also enables a race against the sibling cancellation cell (the second prompt would overwrite
     // the first's token before the first finishes, so `session/cancel` would target the wrong
     // turn). The lock guard is held for the entire turn so the token written below cannot be
@@ -1546,7 +1546,7 @@ async fn run_prompt_turn(
         cancellation.cancel();
     }
 
-    // Refresh the slash-command palette before the prompt body resolves — uses the per-session
+    // Refresh the slash-command palette before the prompt body resolves. This uses the per-session
     // frontend so the notification routes to the right ACP connection.
     let frontend = Arc::clone(&runtime.frontend);
     emit_available_commands(
@@ -1570,7 +1570,7 @@ async fn run_prompt_turn(
             // a syntactically-valid skill name. That's deliberately a narrow filter, but it still
             // false-positives on pasted text like `/usr local lib` (parses as name=`usr`,
             // extra=`local lib`). Treat "no such skill" as "this wasn't a skill invocation after
-            // all" and feed the original text to the model — it can respond with "I don't know that
+            // all" and feed the original text to the model. It can respond with "I don't know that
             // command" if the user really meant `/<name>`. The alternative (hard-error) breaks
             // paste UX for any string starting with `/word`.
             tracing::debug!(
@@ -1582,7 +1582,7 @@ async fn run_prompt_turn(
         Err(error @ SlashInvocationError::SkillLoadFailed { .. }) => {
             // The skill name was valid and matched an installed skill; the failure is a server-side
             // problem reading the body (disk I/O, permission, etc.). JSON-RPC `InternalError` is
-            // the correct classification — `InvalidParams` would mislead the client into thinking
+            // the correct classification; `InvalidParams` would mislead the client into thinking
             // the user's request was malformed.
             return responder.respond_with_error(agent_client_protocol::util::internal_error(
                 error.to_string(),
@@ -1600,7 +1600,7 @@ async fn run_prompt_turn(
     // this `Option`. Pass it through anyway for API compatibility with the REPL path that does
     // lazy-create sessions on first prompt.
     let mut session_uuid_opt = Some(*session_uuid);
-    // Clone the cancellation token so we can probe `is_cancelled()` after the call returns — the
+    // Clone the cancellation token so we can probe `is_cancelled()` after the call returns. The
     // spec mandates that any cancel arriving during a turn must surface as `StopReason::Cancelled`,
     // even when the cancellation manifests as a provider / tool error rather than the clean
     // `MekaError::Interrupted` path.
@@ -1648,7 +1648,7 @@ async fn handle_load_session(
         }
     };
 
-    // Refuse if a session with the same id is already loaded — collisions between different
+    // Refuse if a session with the same id is already loaded. Collisions between different
     // connections aren't possible (one process serves one ACP client) but a re-load of the same
     // session would discard in-flight state.
     if state.sessions.read().await.contains_key(&session_id_str) {
@@ -1758,7 +1758,7 @@ async fn handle_load_session(
     };
     state.sessions.write().await.insert(session_id_str, entry);
 
-    // Refresh the palette + advertise the current mode set — the editor was reopened, so its UI
+    // Refresh the palette + advertise the current mode set: the editor was reopened, so its UI
     // starts blank.
     let modes = build_mode_state(&permission);
     emit_available_commands(&cx, &session_id, &state.shared.skills).await;
@@ -1767,7 +1767,7 @@ async fn handle_load_session(
 }
 
 /// `session/list`: paginated index of persisted sessions, filtered by cwd when the client asks.
-/// Sub-agent sessions are excluded — they're internal audit rows, not user-facing conversations.
+/// Sub-agent sessions are excluded; they're internal audit rows, not user-facing conversations.
 async fn handle_list_sessions(
     state: Arc<ServerState>,
     req: ListSessionsRequest,
@@ -1790,8 +1790,8 @@ async fn handle_list_sessions(
         }
     };
     // Fallback cwd for legacy rows that predate the cwd column. The process cwd matches what the
-    // agent would use for relative-path resolution if the client picked one of these to load —
-    // better than refusing to surface them.
+    // agent would use for relative-path resolution if the client picked one of these to load. That
+    // is better than refusing to surface them.
     let fallback_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let sessions = rows
@@ -1952,7 +1952,7 @@ async fn handle_close_session(
     let Some(entry) = removed else {
         return responder.respond_with_error(invalid_params_error("no such session"));
     };
-    // Fire cancel via the sibling cell — never blocks on the runtime mutex (which an in-flight
+    // Fire cancel via the sibling cell; never blocks on the runtime mutex (which an in-flight
     // prompt may hold for the whole turn).
     let token = entry
         .cancellation
@@ -1961,7 +1961,7 @@ async fn handle_close_session(
         .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
     token.cancel();
     // Detach the session's tool registry from the MCP manager so tools/list_changed updates stop
-    // targeting it. Briefly lock the runtime to read the registry handle — the in-flight prompt (if
+    // targeting it. Briefly lock the runtime to read the registry handle; the in-flight prompt (if
     // any) was just cancelled and will release the lock shortly.
     let registry = {
         let runtime = entry.runtime.lock().await;
@@ -1977,7 +1977,7 @@ async fn handle_close_session(
 }
 
 /// `session/set_mode`: switch the active session to a different permission level. Validates against
-/// the configured enabled set — modes outside it become JSON-RPC errors rather than silently
+/// the configured enabled set; modes outside it become JSON-RPC errors rather than silently
 /// failing. On success, emit `current_mode_update` so every connected client (the picker UI)
 /// reflects the new state.
 async fn handle_set_session_mode(
@@ -2023,7 +2023,7 @@ async fn handle_set_session_mode(
 
 /// Build a fresh [`SessionRuntime`] from the process-wide
 /// [`crate::SharedDeps`]. Called from `session/new`, `session/load`,
-/// and `session/resume` — each follows the same shape:
+/// and `session/resume`. Each follows the same shape:
 /// 1. Construct the per-session `AcpFrontend` bound to this connection + session id.
 /// 2. Build a per-session `SharedPermission` cell seeded from config defaults.
 /// 3. Build the per-session `Agent` + `ToolRegistry` via [`crate::build_session_agent`], which also
@@ -2150,7 +2150,7 @@ mod tests {
     fn test_translate_permission_outcome_maps_each_option() {
         use agent_client_protocol::schema::SelectedPermissionOutcome;
 
-        // Capture sticky pushes via a `Cell` so each call site borrows it fresh — sidesteps the
+        // Capture sticky pushes via a `Cell` so each call site borrows it fresh; this sidesteps the
         // closure-vs-direct-read borrow conflict that comes from sharing one `&mut Vec`.
         let sticky: std::cell::RefCell<Vec<&'static str>> = std::cell::RefCell::new(Vec::new());
         let record = |s: StickyDecision| {
@@ -2243,9 +2243,9 @@ mod tests {
     }
 
     /// Image content has no ACP analogue today, so `build_completion_content` collapses it to a
-    /// `[image]` text marker. Walks the resulting `ContentBlock::Text` to confirm the literal —
-    /// guard against accidentally swapping in the `ImageContent` ACP variant before the wire format
-    /// is wired through end-to-end.
+    /// `[image]` text marker. Walks the resulting `ContentBlock::Text` to confirm the literal. This
+    /// guards against accidentally swapping in the `ImageContent` ACP variant before the wire
+    /// format is wired through end-to-end.
     #[test]
     fn test_build_completion_content_image_falls_back_to_marker() {
         use crate::provider::ImageSource;
@@ -2342,7 +2342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slash_to_prompt_text_passes_through_double_slash_comment() {
-        // `//foo` parses as name="/foo" — invalid, pass through.
+        // `//foo` parses as name="/foo", which is invalid; pass through.
         let cache = SkillCache::for_root(None);
         let out = slash_to_prompt_text("//comment line".to_string(), &cache, "sid")
             .await

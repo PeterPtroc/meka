@@ -12,8 +12,8 @@ use crate::{
     tools::ToolOutput,
 };
 
-/// Maximum raw image bytes before base64 encoding. Keeps the resulting base64 payload under ~5 MB —
-/// a safe ceiling across providers.
+/// Maximum raw image bytes before base64 encoding. Keeps the resulting base64 payload under ~5
+/// MB, a safe ceiling across providers.
 pub(crate) const MAX_IMAGE_RAW_BYTES: usize = 3_750_000;
 
 /// Formats a multimodal provider (Claude, OpenAI) accepts directly in an `Image` content block.
@@ -29,9 +29,9 @@ const NATIVE_FORMATS: &[ImageFormat] = &[
 /// Classification of an input image for downstream handling.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ImageHandling {
-    /// Format is already provider-native — pass bytes through unchanged.
+    /// Format is already provider-native; pass bytes through unchanged.
     PassThrough(ImageFormat),
-    /// Format is decodable by the `image` crate — convert to PNG.
+    /// Format is decodable by the `image` crate; convert to PNG.
     Convert(ImageFormat),
     /// Unknown format, or the decoder isn't compiled into this build.
     Unsupported,
@@ -114,8 +114,8 @@ pub(crate) fn read_image_dimensions(
 }
 
 /// Decode `bytes`, downscale (preserving aspect ratio) if either dimension exceeds `max_dim`, and
-/// re-encode as PNG. Provider-agnostic plumbing — called by the Claude provider, where Anthropic
-/// enforces a 2000 px cap on multi-image requests. Other providers shouldn't need this.
+/// re-encode as PNG. Provider-agnostic plumbing (called by the Claude provider, where Anthropic
+/// enforces a 2000 px cap on multi-image requests). Other providers shouldn't need this.
 pub(crate) fn downscale_to_dim_cap(
     bytes: &[u8],
     source: ImageFormat,
@@ -136,7 +136,7 @@ pub(crate) fn downscale_to_dim_cap(
 }
 
 /// Run the classification pipeline end-to-end: pass-through native formats, convert others to PNG,
-/// enforce the byte cap. Provider-agnostic — does NOT enforce per-axis pixel limits (Anthropic's
+/// enforce the byte cap. Provider-agnostic. Does NOT enforce per-axis pixel limits (Anthropic's
 /// 2000 px multi-image cap is enforced separately at the Claude provider layer in
 /// `src/provider/claude/shared.rs`, so OpenAI providers don't pay for it). Returns `(media_type,
 /// bytes)`.

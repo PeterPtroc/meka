@@ -59,7 +59,7 @@ Sessions are stored in a SQLite database at a platform-specific location:
 
 The database has three tables:
 
-**sessions** -- one row per session:
+**sessions**, one row per session:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -69,7 +69,7 @@ The database has three tables:
 | `locked_by` | TEXT (PID) | PID of the process holding the lock, or NULL |
 | `metadata` | TEXT | Reserved for future use |
 
-**messages** -- one row per message in a session:
+**messages**, one row per message in a session:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -79,7 +79,7 @@ The database has three tables:
 | `content` | TEXT | Message content (plain text or JSON) |
 | `created_at` | TEXT (RFC 3339) | When the message was saved |
 
-**tool_outputs** -- scratchpad entries, one row per entry:
+**tool_outputs**, scratchpad entries, one row per entry:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -94,8 +94,8 @@ Scratchpad entries are scoped to a session. Two sessions can have entries with t
 
 meka automatically manages session storage on startup with sensible defaults:
 
-- **`retention_days`** (default: `90`) -- deletes sessions whose `updated_at` is older than this many days.
-- **`max_storage_bytes`** (default: `52428800` / 50 MB) -- when total message content exceeds this limit, the oldest sessions are deleted until the total is under the limit.
+- **`retention_days`** (default: `90`): deletes sessions whose `updated_at` is older than this many days.
+- **`max_storage_bytes`** (default: `52428800` / 50 MB): when total message content exceeds this limit, the oldest sessions are deleted until the total is under the limit.
 
 You can override these defaults in the config file under `[session]`:
 
@@ -122,7 +122,7 @@ The full history remains in SQLite for resumption. Only the API payload is trunc
 
 If a session becomes too long, you can use the `/compact` command to have the LLM summarize the conversation and replace older messages with a structured summary. Recent messages are preserved verbatim. The summary includes key files, decisions, errors, and user preferences.
 
-Compaction preserves scratchpad entries and the todo list, and re-injects environment context so the agent isn't disoriented after compaction. Tools that the model loaded via `load_tool` before compaction stay loaded after — the deferred-tool active set is snapshotted into the compaction boundary, so resumed sessions don't re-issue `load_tool` for tools they already used.
+Compaction preserves scratchpad entries and the todo list, and re-injects environment context so the agent isn't disoriented after compaction. Tools that the model loaded via `load_tool` before compaction stay loaded after; the deferred-tool active set is snapshotted into the compaction boundary, so resumed sessions don't re-issue `load_tool` for tools they already used.
 
 Internally, compaction does not delete pre-compaction rows from the database. It appends a `compact_boundary` row to the `messages` table; the materialized view is reconstructed from the event log, so the persisted log itself stays append-only.
 

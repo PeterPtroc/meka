@@ -491,13 +491,13 @@ impl Tool for GetMcpPromptTool {
     }
 }
 
-// `expect()` on each registration: a collision means two builtins share a name — a coding bug,
-// not a runtime condition. We want the first build to fail loudly rather than silently dropping
+// `expect()` on each registration: a collision means two builtins share a name (a coding bug,
+// not a runtime condition). We want the first build to fail loudly rather than silently dropping
 // the second registration. Scoped to this function because the same justification applies to every
 // `.register(...).expect(...)` site below.
 #[allow(clippy::expect_used)]
 pub(crate) fn register_all(registry: &super::ToolRegistry, manager: Arc<McpClientManager>) {
-    // Skip registration if no servers are configured — these tools rely on the manager and there's
+    // Skip registration if no servers are configured. These tools rely on the manager and there's
     // nothing useful to do without at least one.
     if manager.server_names().is_empty() {
         return;
@@ -537,7 +537,7 @@ pub(crate) fn register_all(registry: &super::ToolRegistry, manager: Arc<McpClien
         .expect("builtin list_mcp_resource_updates tool name collision");
     drop(manager);
 
-    // These tools are discovery-style helpers — mark them deferred so they don't clutter the tool
+    // These tools are discovery-style helpers; mark them deferred so they don't clutter the tool
     // list until a prompt/resource-focused flow is activated. The registry's auto-activate path
     // already promotes them to the API when invoked.
     registry.mark_deferred("list_mcp_resources");
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn format_resource_contents_truncates_when_text_exceeds_cap() {
-        // 1 MiB text body with a 1 KiB cap — must bail out, not emit the body.
+        // 1 MiB text body with a 1 KiB cap: must bail out, not emit the body.
         let body = "X".repeat(1024 * 1024);
         let contents = vec![text_contents("file:///big.txt", Some("text/plain"), &body)];
         let out = format_resource_contents(&contents, 1024).join("\n");

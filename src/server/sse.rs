@@ -13,7 +13,7 @@ use crate::{
     frontend::FrontendEvent, provider::Notice, server::http_frontend::SessionCapabilities,
 };
 
-/// One SSE event emitted on the wire. Monotonic `id` per turn — reserved for future
+/// One SSE event emitted on the wire. Monotonic `id` per turn, reserved for future
 /// `Last-Event-ID` resumption (out of current spec scope).
 #[derive(Debug, Clone)]
 pub struct SseEvent {
@@ -145,7 +145,7 @@ pub fn translate(
                 "content": tool_result_content_view(&content),
             }),
         ),
-        // Metadata-only events — the recorder captures them for the blocking JSON / terminal
+        // Metadata-only events: the recorder captures them for the blocking JSON / terminal
         // SSE payload but they don't get their own wire events.
         FrontendEvent::TodoListUpdated(_)
         | FrontendEvent::TokenUsage(_)

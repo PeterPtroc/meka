@@ -10,7 +10,7 @@ meka looks for a TOML configuration file at a platform-specific location:
 
 The config file is optional. If it does not exist, meka silently skips it.
 
-Set the `MEKA_CONFIG_DIR` environment variable to override the default location entirely — the value points at the `meka` directory itself (contains `config.toml` and `skills/`). Useful for tests, portable installs, and isolating a per-project config from your global one.
+Set the `MEKA_CONFIG_DIR` environment variable to override the default location entirely. The value points at the `meka` directory itself (contains `config.toml` and `skills/`). Useful for tests, portable installs, and isolating a per-project config from your global one.
 
 ## Format
 
@@ -22,7 +22,7 @@ api_key = "sk-..."
 base_url = "https://api.openai.com/v1"
 ```
 
-All fields under `[provider]` are optional individually -- you can set some in the config file and override others with environment variables or CLI flags.
+All fields under `[provider]` are optional individually; you can set some in the config file and override others with environment variables or CLI flags.
 
 ## Fields
 
@@ -98,7 +98,7 @@ effort = "medium"
 
 ### `provider.redact_thinking`
 
-`claude-oauth` only. When `true`, meka sends the `redact-thinking-2026-02-12` beta header so the API returns `redacted_thinking` blocks instead of full thinking summaries — useful when you don't render thinking in the UI and want the smaller response. Defaults to `false` (full thinking summaries).
+`claude-oauth` only. When `true`, meka sends the `redact-thinking-2026-02-12` beta header so the API returns `redacted_thinking` blocks instead of full thinking summaries, useful when you don't render thinking in the UI and want the smaller response. Defaults to `false` (full thinking summaries).
 
 Caveat: `redacted_thinking` blocks carry a signed payload that must be replayed verbatim on subsequent turns; meka currently flattens them to `[redacted]` text on receipt, which means multi-turn conversations after enabling this flag may be rejected by the server. Treat as experimental.
 
@@ -111,7 +111,7 @@ redact_thinking = true
 
 `claude-oauth` only. Stable per-device identifier embedded in `metadata.user_id` to mirror Claude Code's `~/.claude.json` device ID (`getOrCreateUserID` in `utils/config.ts`).
 
-If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine look like the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way, the resolved value is persisted back to this same config file under `[provider].device_id`. This file write only happens for the `claude-oauth` provider — other providers don't need a device ID.
+If unset, meka first tries to adopt `userID` from `~/.claude.json` (so meka and Claude Code on the same machine look like the same device). If that file is missing or has no `userID`, meka generates a 64-character hex string. Either way, the resolved value is persisted back to this same config file under `[provider].device_id`. This file write only happens for the `claude-oauth` provider; other providers don't need a device ID.
 
 You can supply your own value if you want to control attribution explicitly:
 
@@ -255,7 +255,7 @@ When set to a positive integer `N`, resuming a session reprints the **last `N` t
 
 Useful when you regularly resume long-running sessions and want more context than the single-message default. Inside a session, the `/history` slash command provides the same rendering on demand (`/history` dumps everything; `/history N` shows the last N turns).
 
-Default: unset (resume reprints only the last assistant message — today's behaviour).
+Default: unset (resume reprints only the last assistant message, today's behaviour).
 
 ```toml
 [display]
@@ -264,7 +264,7 @@ resume_show_recent = 3
 
 ### `display.input_style`
 
-Visual style applied to text typed into the REPL prompt. Makes submitted prompts easy to spot when scrolling back through a long session — reedline paints the buffer with this style on every repaint, including the final paint before the newline, so the styling lands in the terminal's scrollback alongside the literal text.
+Visual style applied to text typed into the REPL prompt. Makes submitted prompts easy to spot when scrolling back through a long session. Reedline paints the buffer with this style on every repaint, including the final paint before the newline, so the styling lands in the terminal's scrollback alongside the literal text.
 
 Accepted values:
 - `default` (or unset): bold white-ish foreground on a slate-blue background, rendered in truecolor RGB so it looks the same across terminal themes.
@@ -299,7 +299,7 @@ Settings for the HTTP client shared by `fetch_url` and `web_search`. All keys ar
 | `proxy` | string | unset (honours `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` env) | Proxy URL. Schemes: `http://`, `https://`, `socks5://`, `socks5h://`, `socks4://`. The literal string `"none"` explicitly disables env-var auto-detection. |
 | `ca_cert_file` | path | unset | Extra PEM bundle to trust on top of the system store. Useful for corporate MITM proxies or self-signed internal services. Accepts single-cert and multi-cert files. |
 | `https_only` | bool | `false` | Refuse plain `http://` URLs. |
-| `min_tls_version` | string | unset (reqwest default) | Minimum TLS version. Accepts `"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`. Unknown values log a warn and fall through. Note: the bundled rustls backend supports only TLS 1.2 and 1.3 — `"1.0"` / `"1.1"` will surface a build error. |
+| `min_tls_version` | string | unset (reqwest default) | Minimum TLS version. Accepts `"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`. Unknown values log a warning and fall through. Note: the bundled rustls backend supports only TLS 1.2 and 1.3; `"1.0"` / `"1.1"` will surface a build error. |
 | `danger_accept_invalid_certs` | bool | `false` | **DANGEROUS.** Disable TLS certificate validation entirely. Emits a `warn!` on every startup when enabled. Only use against trusted local dev servers. |
 | `danger_accept_invalid_hostnames` | bool | `false` | **DANGEROUS.** Accept certificates whose hostname doesn't match. Emits a `warn!` on every startup when enabled. Only use against trusted local dev servers. |
 
@@ -319,7 +319,7 @@ request_timeout_seconds = 60
 [web]
 # Route everything through a local SOCKS proxy you control.
 proxy = "socks5h://127.0.0.1:1080"
-# Accept self-signed certs on dev.local — KEEP THIS OFF IN PROD.
+# Accept self-signed certs on dev.local, KEEP THIS OFF IN PROD.
 danger_accept_invalid_certs = true
 ```
 
@@ -353,12 +353,12 @@ The sandbox uses one of two backends on Linux (see [`shell.sandbox_backend`](#sh
 
 Linux-only choice between `"landlock"` and `"bubblewrap"`:
 
-- **Bubblewrap** (`"bubblewrap"`) — wraps the command in `bwrap` with read-only bind of `/`, tmpfs masks over `/run` / `/tmp` / `/var/tmp` / `$XDG_RUNTIME_DIR`, and `--unshare-user --unshare-pid --unshare-uts --unshare-ipc`. The tmpfs masks hide the dbus session bus and the systemd-user socket, so state-changing IPC calls like `systemctl --user start` and `dbus-send` fail. Network is intentionally not unshared so `curl http://x | pdftotext` still works. Requires the `bubblewrap` package and a kernel with user-namespace creation enabled.
-- **Landlock** (`"landlock"`) — uses the Landlock LSM (kernel 5.13+) to block filesystem writes. Does **not** block dbus / systemd-user IPC; a sandboxed shell can still invoke state-mutating dbus methods. Kept as the lighter-weight fallback for hosts without Bubblewrap.
+- **Bubblewrap** (`"bubblewrap"`) wraps the command in `bwrap` with read-only bind of `/`, tmpfs masks over `/run` / `/tmp` / `/var/tmp` / `$XDG_RUNTIME_DIR`, and `--unshare-user --unshare-pid --unshare-uts --unshare-ipc`. The tmpfs masks hide the dbus session bus and the systemd-user socket, so state-changing IPC calls like `systemctl --user start` and `dbus-send` fail. Network is intentionally not unshared so `curl http://x | pdftotext` still works. Requires the `bubblewrap` package and a kernel with user-namespace creation enabled.
+- **Landlock** (`"landlock"`) uses the Landlock LSM (kernel 5.13+) to block filesystem writes. Does **not** block dbus / systemd-user IPC; a sandboxed shell can still invoke state-mutating dbus methods. Kept as the lighter-weight fallback for hosts without Bubblewrap.
 
-When omitted, meka probes Bubblewrap once at startup. If Bubblewrap is available it auto-picks it; otherwise it auto-picks Landlock and emits a one-shot warning nudging you to install `bubblewrap` for stronger protection. Set the field explicitly to either value (including `"landlock"`) to suppress that warning. `meka setup` does not write this field — leave it unset to keep auto-detection.
+When omitted, meka probes Bubblewrap once at startup. If Bubblewrap is available it auto-picks it; otherwise it auto-picks Landlock and emits a one-shot warning nudging you to install `bubblewrap` for stronger protection. Set the field explicitly to either value (including `"landlock"`) to suppress that warning. `meka setup` does not write this field; leave it unset to keep auto-detection.
 
-If the configured backend can't be used at runtime (bwrap not installed, user namespaces denied, etc.), `execute_command` in read mode hard-errors with a message naming the configured backend and the specific failure reason. Read mode is not blocked for other tools — only `execute_command` requires a usable sandbox.
+If the configured backend can't be used at runtime (bwrap not installed, user namespaces denied, etc.), `execute_command` in read mode hard-errors with a message naming the configured backend and the specific failure reason. Read mode is not blocked for other tools; only `execute_command` requires a usable sandbox.
 
 Default: unset (auto-detect). Ignored on macOS and Windows.
 
@@ -375,9 +375,9 @@ Controls which permission modes are reachable at runtime and which mode the sess
 | Field | Required | Description |
 |-------|----------|-------------|
 | `default` | No | Mode the session starts in. One of `"none"`, `"read"`, `"ask"`, `"write"`. Default `"read"`. Overridden by `--permission` and `MEKA_PERMISSION`. |
-| `enabled` | No | List of modes that can be reached at runtime via `/permission` and Shift+Tab. Default `["none", "read", "write"]` — `"ask"` is opt-in. Disabled modes are skipped during Shift+Tab cycling and rejected by `/permission` with an error. |
+| `enabled` | No | List of modes that can be reached at runtime via `/permission` and Shift+Tab. Default `["none", "read", "write"]`; `"ask"` is opt-in. Disabled modes are skipped during Shift+Tab cycling and rejected by `/permission` with an error. |
 
-If `default` is not in `enabled`, meka logs a warning and falls back to `read` if it's enabled, otherwise the lowest-discriminant enabled mode (in `none → read → ask → write` order). Same behavior if `--permission` or `MEKA_PERMISSION` selects a disabled mode — meka warns and starts in the configured default rather than refusing to launch.
+If `default` is not in `enabled`, meka logs a warning and falls back to `read` if it's enabled, otherwise the lowest-discriminant enabled mode (in `none → read → ask → write` order). Same behavior if `--permission` or `MEKA_PERMISSION` selects a disabled mode: meka warns and starts in the configured default rather than refusing to launch.
 
 ```toml
 [permissions]
@@ -391,7 +391,7 @@ Settings for session history retention and context window management.
 
 ### `session.context_messages`
 
-Maximum number of messages to send to the LLM API per request. Older messages are truncated from the beginning while preserving tool call chain integrity. The full history remains stored in SQLite -- only the API payload is limited.
+Maximum number of messages to send to the LLM API per request. Older messages are truncated from the beginning while preserving tool call chain integrity. The full history remains stored in SQLite; only the API payload is limited.
 
 Default: `200`
 
@@ -473,7 +473,7 @@ show_content = true
 
 ## `[prompt]`
 
-Settings for injecting custom instructions into the system prompt. Use this to set installation-specific rules that should apply to every session -- things the agent needs to know about your system, preferred tools, or policies.
+Settings for injecting custom instructions into the system prompt. Use this to set installation-specific rules that should apply to every session: things the agent needs to know about your system, preferred tools, or policies.
 
 ### `prompt.instructions`
 
@@ -481,8 +481,8 @@ A string of custom instructions that meka will include in every system prompt, u
 
 Suitable use cases:
 
-- System-specific policies: "Never install Python packages globally with pip -- always use `uv` or a venv."
-- Installed tooling the agent should know about: "Poppler is available on this system -- use `pdftotext` for PDFs."
+- System-specific policies: "Never install Python packages globally with pip; always use `uv` or a venv."
+- Installed tooling the agent should know about: "Poppler is available on this system; use `pdftotext` for PDFs."
 - Workflow preferences: "Prefer ripgrep over grep; it's installed and faster."
 - Signing / compliance rules: "Git commits on this system must use gpg signing."
 
@@ -492,7 +492,7 @@ Default: unset (no custom instructions).
 [prompt]
 instructions = """
 Never install Python packages globally with pip. Always use `uv` or a venv.
-Poppler is available on this system — use `pdftotext` for PDFs.
+Poppler is available on this system, use `pdftotext` for PDFs.
 Prefer ripgrep over grep.
 """
 ```
@@ -526,12 +526,12 @@ An array of MCP server configurations. Each entry defines a server to connect to
 | `headers_helper` | No | Path to an executable whose stdout (`Name: Value\n` lines) is merged over `headers` at connect-time (HTTP only). Executed with `MEKA_MCP_SERVER_NAME` / `MEKA_MCP_SERVER_URL` in env; 15 s timeout. |
 | `permission` | No | Server-wide permission override. Applies to every tool on this server, beating the `readOnlyHint` the server advertises and the `[mcp].default_permission` global fallback. See *Permission resolution* below. |
 | `allowed_tools` | No | Optional allow-list of raw tool names (the form the server advertises, not the `server__tool` namespaced form). When set and non-empty, only these tools are registered; all others from this server are ignored. |
-| `disabled_tools` | No | Optional block-list of raw tool names. Applied **after** `allowed_tools` — tools listed here are never registered. Both lists can coexist; the net set is `allowed_tools \ disabled_tools`. |
+| `disabled_tools` | No | Optional block-list of raw tool names. Applied **after** `allowed_tools`; tools listed here are never registered. Both lists can coexist; the net set is `allowed_tools \ disabled_tools`. |
 | `eager_load_tools` | No | Raw tool names that should ship **eager-loaded** instead of deferred. Listed tools skip the `load_tool` round-trip and sit in the cacheable tools-array prefix from turn 1. Use this for tools the agent invokes constantly (search, fetch, …); leave others deferred so the tools array stays lean. |
 | `tool_permissions` | No | Per-tool permission overrides keyed by raw tool name. Beats the server-level `permission` and the server's `readOnlyHint` when resolving a tool's required permission. |
-| `sampling` | No | Allow this server to call `sampling/createMessage` against your configured LLM provider. Default `false` (reject). Enabling this lets a compromised server inject arbitrary messages into your LLM context and burn your provider quota — opt in per-server, deliberately. |
+| `sampling` | No | Allow this server to call `sampling/createMessage` against your configured LLM provider. Default `false` (reject). Enabling this lets a compromised server inject arbitrary messages into your LLM context and burn your provider quota; opt in per-server, deliberately. |
 | `sampling_limit` | No | Cap on sampling calls per meka session from this server when `sampling = true`. Default `10`. Requests beyond the limit return an `INTERNAL_ERROR` to the server. |
-| `disabled` | No | When `true`, the server is skipped entirely at startup — no process is spawned, no HTTP connect is attempted. Flip it back with `meka mcp enable <name>` or by editing the config. Defaults to `false`. |
+| `disabled` | No | When `true`, the server is skipped entirely at startup: no process is spawned, no HTTP connect is attempted. Flip it back with `meka mcp enable <name>` or by editing the config. Defaults to `false`. |
 
 ### `[mcp]` top-level table
 
@@ -549,39 +549,39 @@ MCP servers connect in parallel at startup, partitioned by transport so a fleet 
 - stdio: `MEKA_MCP_STDIO_CONCURRENCY` (default `3`)
 - http: `MEKA_MCP_HTTP_CONCURRENCY` (default `20`)
 
-These env vars are tuning knobs — rarely needed, but useful if you're running ~30 stdio servers on a constrained box (lower it) or ~50 HTTP servers (raise it).
+These env vars are tuning knobs: rarely needed, but useful if you're running ~30 stdio servers on a constrained box (lower it) or ~50 HTTP servers (raise it).
 
 ### Permission resolution
 
 Every MCP tool's required permission is resolved through a five-step chain; the first match wins:
 
-1. **`server.tool_permissions[<raw-tool>]`** — explicit per-tool override.
-2. **`server.permission`** — explicit server-level override. Applies to every tool on that server regardless of what the server advertises.
+1. **`server.tool_permissions[<raw-tool>]`**: explicit per-tool override.
+2. **`server.permission`**: explicit server-level override. Applies to every tool on that server regardless of what the server advertises.
 3. **`tool.annotations.readOnlyHint`** from the server: `true` → `Read`, `false` → `Write`.
-4. **`[mcp].default_permission`** — global fallback.
-5. **Hardcoded `Write`** — strict ultimate fallback.
+4. **`[mcp].default_permission`**: global fallback.
+5. **Hardcoded `Write`**: strict ultimate fallback.
 
-User-supplied config (1, 2, 4) always beats the server's self-classification — if a server lies about a tool, you can override. But when no user config says anything, the server's hint is trusted for that specific tool so `readOnlyHint = false` destructive tools don't silently become Read-accessible just because the user opted into a lenient global default.
+User-supplied config (1, 2, 4) always beats the server's self-classification; if a server lies about a tool, you can override. But when no user config says anything, the server's hint is trusted for that specific tool so `readOnlyHint = false` destructive tools don't silently become Read-accessible just because the user opted into a lenient global default.
 
 **Hint spoofing**: a compromised server could claim `readOnlyHint = true` on a destructive tool. Defend by setting `server.permission = "write"` on suspect servers (step 2 wins) or by listing the destructive tools explicitly in `tool_permissions` / `disabled_tools`.
 
-**Stale config**: entries in `allowed_tools` / `disabled_tools` / `eager_load_tools` / `tool_permissions` that don't match any advertised tool get a `warn!` line at connect time. The server still connects; you just see a heads-up so you can clean up after the server renames a tool. A name that appears in both `eager_load_tools` and `disabled_tools` also warns — the disabled filter wins, so eager-loading the disabled tool is a no-op.
+**Stale config**: entries in `allowed_tools` / `disabled_tools` / `eager_load_tools` / `tool_permissions` that don't match any advertised tool get a `warn!` line at connect time. The server still connects; you just see a heads-up so you can clean up after the server renames a tool. A name that appears in both `eager_load_tools` and `disabled_tools` also warns: the disabled filter wins, so eager-loading the disabled tool is a no-op.
 
 **Visibility across levels**: the resolved permission doesn't hide a tool from the agent. Every registered tool is listed in the system prompt with its required level noted inline, and a per-turn `[Permission context]` block names the current level plus any tools it blocks. The agent can still reason about an inaccessible tool and suggest `/permission <level>` to enable it; the permission gate is enforced at dispatch time. Keeping the tool catalogue visible across levels is also what lets the Claude prompt cache survive mid-session permission toggles.
 
 #### Examples
 
-**Exa** — reliable web search when the built-in DuckDuckGo scraper gets CAPTCHA'd. The free tier works without an API key; paste a key into the `headers` table for the paid tier:
+**Exa**: reliable web search when the built-in DuckDuckGo scraper gets CAPTCHA'd. The free tier works without an API key; paste a key into the `headers` table for the paid tier:
 ```bash
-# Free tier — no key required
+# Free tier, no key required
 meka mcp add exa https://mcp.exa.ai/mcp
 ```
 ```bash
-# Paid tier — expands from EXA_API_KEY at connect time
+# Paid tier, expands from EXA_API_KEY at connect time
 meka mcp add exa https://mcp.exa.ai/mcp --header "x-api-key=${EXA_API_KEY}"
 ```
 
-Well-annotated server — no config needed. Every tool is classified by its own `readOnlyHint` (read tools Read, write tools Write):
+Well-annotated server: no config needed. Every tool is classified by its own `readOnlyHint` (read tools Read, write tools Write):
 ```toml
 [[mcp.servers]]
 name = "notion"
@@ -589,7 +589,7 @@ transport = "http"
 url = "https://mcp.notion.com/mcp"
 ```
 
-User-declared trust on an unannotated server — all tools accessible in Read:
+User-declared trust on an unannotated server (all tools accessible in Read):
 ```toml
 [[mcp.servers]]
 name       = "internal"
@@ -598,7 +598,7 @@ url        = "https://mcp.internal/…"
 permission = "read"
 ```
 
-Overriding a mis-annotated or distrusted tool — one specific tool requires Write:
+Overriding a mis-annotated or distrusted tool (one specific tool requires Write):
 ```toml
 [[mcp.servers]]
 name      = "notion"
@@ -609,7 +609,7 @@ url       = "https://mcp.notion.com/mcp"
 "notion-do-something-scary" = "write"
 ```
 
-Subset of a server's tools — only `query` registers, all others are ignored:
+Subset of a server's tools (only `query` registers, all others are ignored):
 ```toml
 [[mcp.servers]]
 name          = "pg"
@@ -619,7 +619,7 @@ args          = ["-y", "@modelcontextprotocol/server-postgres"]
 allowed_tools = ["query"]
 ```
 
-Block-list with a narrow exception — all fs tools are Read-accessible except the two destructive ones, which are never registered:
+Block-list with a narrow exception (all fs tools are Read-accessible except the two destructive ones, which are never registered):
 ```toml
 [[mcp.servers]]
 name           = "filesystem"
@@ -696,25 +696,25 @@ $ meka mcp add notion https://mcp.notion.com/mcp
 ok: added 'notion' to ~/.config/meka/config.toml
 probe: server requires OAuth.
 running OAuth authorisation for 'notion' (use --no-login to skip).
-no [auth] block for 'notion' — assuming OAuth authorization_code.
+no [auth] block for 'notion', assuming OAuth authorization_code.
 …
 ok: authorized 'notion'
 ```
 
 `meka mcp add` on an HTTP endpoint:
 
-1. **Probe** — issues an unauthenticated `GET` (3 s timeout, redirects off) and classifies the response per the MCP authorization spec + RFC 6750 + RFC 9728:
+1. **Probe**: issues an unauthenticated `GET` (3 s timeout, redirects off) and classifies the response per the MCP authorization spec + RFC 6750 + RFC 9728:
 
    - `2xx` → server is open, no login needed.
    - `401` / `403` with `WWW-Authenticate: Bearer …` → OAuth required. The `resource_metadata="…"` attribute (RFC 9728) is captured at DEBUG.
    - Any other status → couldn't infer, prints the status code.
    - Network failure → prints the error.
 
-2. **Auto-login** — if the probe says OAuth is required (or `--auth oauth` was explicitly set), the OAuth authorization_code flow runs immediately as though the user had chained `meka mcp login <name>` themselves. The synthesised `[auth] = oauth` block is written back to `config.toml` on success.
+2. **Auto-login**: if the probe says OAuth is required (or `--auth oauth` was explicitly set), the OAuth authorization_code flow runs immediately as though the user had chained `meka mcp login <name>` themselves. The synthesised `[auth] = oauth` block is written back to `config.toml` on success.
 
-3. **Rollback on failure** — if the OAuth flow errors out, the entry we just wrote is purged from `config.toml` (alongside any partial credentials + probe cache), leaving the user's config clean. The command exits non-zero.
+3. **Rollback on failure**: if the OAuth flow errors out, the entry we just wrote is purged from `config.toml` (alongside any partial credentials + probe cache), leaving the user's config clean. The command exits non-zero.
 
-4. **`--no-login`** — skips step 2. The entry is still persisted and the probe's hint is still printed; run `meka mcp login <name>` when ready. Useful for scripted setup or when you expect to edit `[auth]` by hand.
+4. **`--no-login`**: skips step 2. The entry is still persisted and the probe's hint is still printed; run `meka mcp login <name>` when ready. Useful for scripted setup or when you expect to edit `[auth]` by hand.
 
 The probe and the auto-login only run for HTTP servers, and only when the user didn't provide `--auth-token` (static bearer) or `--auth` (other than `oauth`). Stdio servers skip both.
 
@@ -724,7 +724,7 @@ The OAuth flow redirects the browser to `http://127.0.0.1:<port>/callback`. When
 
 - While `meka mcp login <name>` waits for the callback it also watches stdin.
 - The browser's address bar still contains the full callback URL (including `code` and `state`) even when the connection fails. Copy it, paste it into the meka prompt, and press Enter.
-- Whichever completes first — the TCP callback or the pasted URL — wins.
+- Whichever completes first, the TCP callback or the pasted URL, wins.
 
 ```console
 $ meka mcp login notion
@@ -742,14 +742,14 @@ ok: authorized 'notion'
 #### REPL parity
 
 Inside the REPL:
-- `/mcp list` — list configured servers.
-- `/mcp reconnect <server>` — reconnect smoke-test.
-- `/mcp login <server>` / `/mcp logout <server>` — run the auth flow or revoke.
-- `/mcp <server>:<prompt> [args...]` — render a server-defined prompt as the next user turn.
+- `/mcp list`: list configured servers.
+- `/mcp reconnect <server>`: reconnect smoke-test.
+- `/mcp login <server>` / `/mcp logout <server>`: run the auth flow or revoke.
+- `/mcp <server>:<prompt> [args...]`: render a server-defined prompt as the next user turn.
 
 ### Resources and prompts
 
-In addition to tools, meka exposes MCP resources and prompts through several builtin tools (deferred — the agent calls `load_tool` first to fetch the schema, then invokes them):
+In addition to tools, meka exposes MCP resources and prompts through several builtin tools (deferred: the agent calls `load_tool` first to fetch the schema, then invokes them):
 
 | Builtin | Purpose |
 |---------|---------|
@@ -767,7 +767,7 @@ In addition to tools, meka exposes MCP resources and prompts through several bui
 - **Session-expired recovery**: rmcp 1.5 transparently re-initialises HTTP sessions on 404 / JSON-RPC `-32001`. meka relies on this; no per-call handling is required.
 - **Cancellation**: when the agent cancels a tool call (e.g. Ctrl-C), meka sends `notifications/cancelled` to the server with the in-flight request id so the server can stop work.
 - **Timeouts**: tool calls default to 600 s; override with `MEKA_MCP_TOOL_TIMEOUT` in ms.
-- **Tool list refresh**: on `tools/list_changed`, meka re-discovers the server's tools and hot-swaps them in the registry — no restart needed.
+- **Tool list refresh**: on `tools/list_changed`, meka re-discovers the server's tools and hot-swaps them in the registry; no restart needed.
 - **Progress notifications**: MCP tool calls attach a per-request `progressToken`; incoming `notifications/progress` render as a live status line under the tool invocation.
 - **Server instructions**: `InitializeResult.instructions` is captured once per connection and spliced into the system prompt (sanitised + truncated to 2048 chars) under `## MCP Server Instructions`.
 - **Auth-probe cache**: 401 responses are cached for 15 minutes so a restart after a failed auth flow skips the unauthenticated probe and goes straight to OAuth. Cleared by `meka mcp logout`.
@@ -778,7 +778,7 @@ In addition to tools, meka exposes MCP resources and prompts through several bui
 | Feature | meka behaviour |
 |---------|----------------|
 | `roots/list` | Returns a single root: `file://<current-working-directory>` with the directory basename as the name. |
-| `elicitation/create` | Always responds with `Decline` and logs a warning — interactive form/URL input is not wired into the REPL. |
+| `elicitation/create` | Always responds with `Decline` and logs a warning; interactive form/URL input is not wired into the REPL. |
 | `sampling/createMessage` | Rejected with `METHOD_NOT_FOUND` unless the server has `sampling = true` in its config. When allowed, the current provider handles the request; per-session `sampling_limit` caps how many times each server may invoke it. |
 
 ### `[mcp.servers.auth]`
@@ -916,9 +916,9 @@ redirect_port = 8400
 
 If `client_id` is omitted, meka attempts [dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591) with the server.
 
-## `[tools]` — built-in tool filters
+## `[tools]`: built-in tool filters
 
-The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to meka's built-in tools (`read_file`, `write_file`, `execute_command`, `web_search`, etc.) via a top-level `[tools]` table. MCP per-server filtering is separate from this and keeps its own namespaces — this block only affects the built-ins.
+The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to meka's built-in tools (`read_file`, `write_file`, `execute_command`, `web_search`, etc.) via a top-level `[tools]` table. MCP per-server filtering is separate from this and keeps its own namespaces; this block only affects the built-ins.
 
 | Key | Purpose |
 |---|---|
@@ -926,7 +926,7 @@ The three knobs `[[mcp.servers]]` exposes for MCP tools also apply to meka's bui
 | `disabled_tools` | Block-list of built-in tool names. Applied **after** `allowed_tools`; a tool here is never registered even if it also appears in the allow-list. |
 | `tool_permissions` | Per-tool required-permission override keyed by built-in name. Beats the hardcoded required level from the tool's impl. Levels: `none`, `read`, `ask`, `write`. |
 
-Stale entries (a name that doesn't match any built-in) emit a `warn!` at startup. meka still starts — the warning just flags a likely typo or a tool the binary renamed.
+Stale entries (a name that doesn't match any built-in) emit a `warn!` at startup. meka still starts; the warning just flags a likely typo or a tool the binary renamed.
 
 Restrict a session to read-only inspection:
 ```toml
@@ -946,7 +946,7 @@ Disable web access entirely in a locked-down environment:
 disabled_tools = ["web_search", "fetch_url"]
 ```
 
-Sub-agents spawned via `spawn_agent` inherit the same filter — a disabled built-in is disabled everywhere. Run `meka tools list` to see every built-in's effective required permission, whether a `[tools.tool_permissions]` override is in effect, and whether the current config enables it.
+Sub-agents spawned via `spawn_agent` inherit the same filter; a disabled built-in is disabled everywhere. Run `meka tools list` to see every built-in's effective required permission, whether a `[tools.tool_permissions]` override is in effect, and whether the current config enables it.
 
 ## `[serve]`
 
@@ -991,7 +991,7 @@ How long a session can sit idle (no turns submitted) before the GC evicts it fro
 |------|---------|
 | `string` (duration) | `"24h"` |
 
-Eviction drops the in-memory runtime but **preserves the SQLite row** — a later request transparently re-attaches. See `delete_on_idle` to also remove the DB row.
+Eviction drops the in-memory runtime but **preserves the SQLite row**; a later request transparently re-attaches. See `delete_on_idle` to also remove the DB row.
 
 ### `serve.gc_scan_interval`
 
@@ -1030,7 +1030,7 @@ An array of bearer tokens for API authentication. At least one token is required
 
 \* Exactly one of `token` or `token_file` must be set.
 
-Inline plaintext tokens log a startup warning — use `${ENV_VAR}` or `token_file` for production.
+Inline plaintext tokens log a startup warning; use `${ENV_VAR}` or `token_file` for production.
 
 #### Examples
 

@@ -1,7 +1,7 @@
 //! SQLite-backed session store. Persists messages, large tool outputs (so they can be referenced
 //! from the conversation by handle), OAuth tokens, and MCP credentials. Per-session mutual
 //! exclusion is provided by an OS-level file lock ([`SessionLock`]) so the kernel reclaims it
-//! whenever the holder dies — no PID-aliveness check, no risk of stale locks.
+//! whenever the holder dies: no PID-aliveness check, no risk of stale locks.
 //!
 //! On Unix the data directory (`0700`), lock directory (`0700`), and the database file itself
 //! (`0600`) are tightened after creation so the persisted OAuth tokens, MCP credentials, and
@@ -23,7 +23,7 @@ use crate::{
     provider::AuthCredential,
 };
 
-/// Raw row from the `messages` table — the on-disk shape of a single
+/// Raw row from the `messages` table, the on-disk shape of a single
 /// [`crate::conversation::Event`]. Internal to the session module: only the encoder and decoder
 /// helpers handle these directly. External consumers go through [`SessionManager::save_event`] /
 /// [`SessionManager::load_events`].
@@ -35,7 +35,7 @@ struct StoredMessage {
 }
 
 /// Result of [`SessionManager::create_session_with_metadata`]. Carries the canonical RFC 3339
-/// `created_at` so the caller's in-memory state shares one timestamp with the DB row — without
+/// `created_at` so the caller's in-memory state shares one timestamp with the DB row; without
 /// this, the handler's `SessionEntry.created_at` and the DB `sessions.created_at` would each
 /// capture `Utc::now()` independently and drift by a few ms. Re-attach reads the DB value,
 /// so the in-memory value has to match for round-trip tests to be deterministic.
@@ -95,11 +95,11 @@ pub struct SessionManager {
 /// RAII handle for an exclusive per-session OS file lock. Holding this value keeps the underlying
 /// lock file descriptor open; dropping it (including when the process exits or panics) closes the
 /// FD, which causes the kernel to release the `flock`/`LockFileEx` lock automatically. There is no
-/// "stale lock" failure mode — even `SIGKILL` is safe.
+/// "stale lock" failure mode; even `SIGKILL` is safe.
 ///
 /// Internally this is a self-referential struct: `guard` borrows from `*lock` (a `Box` for stable
 /// heap address). The explicit [`Drop`] impl drops `guard` before `lock` regardless of field
-/// declaration order — the safety invariant of the lifetime transmute used during construction.
+/// declaration order, the safety invariant of the lifetime transmute used during construction.
 pub struct SessionLock {
     guard: std::mem::ManuallyDrop<FdRwLockWriteGuard<'static, File>>,
     lock: std::mem::ManuallyDrop<Box<FdRwLock<File>>>,
@@ -118,7 +118,7 @@ impl Drop for SessionLock {
 }
 
 fn default_database_path() -> Result<PathBuf> {
-    // `MEKA_DATA_DIR` is the cross-platform override — the only env var that works on every OS,
+    // `MEKA_DATA_DIR` is the cross-platform override, the only env var that works on every OS,
     // mirroring how `MEKA_CONFIG_DIR` overrides the config directory. The value points at the
     // `meka` data dir itself (the parent that contains `sessions.db`). Useful for tests, portable
     // installs, and isolating per-project session state from the global one.
@@ -146,7 +146,7 @@ fn default_database_path() -> Result<PathBuf> {
 /// that `create_dir_all` + later `set_permissions` would open: between `mkdir(2)` and `chmod(2)`,
 /// the directory would be readable by other local users on a permissive umask.
 /// `DirBuilderExt::mode` passes the mode straight to `mkdir`. Pre-existing directories keep their
-/// mode — callers that need to tighten an already-existing dir should still follow up with
+/// mode; callers that need to tighten an already-existing dir should still follow up with
 /// `restrict_permissions`.
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
@@ -162,7 +162,7 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// Restrict a path's permissions on Unix. Best-effort — if the call fails we log and continue,
+/// Restrict a path's permissions on Unix. Best-effort: if the call fails we log and continue,
 /// because on some mounts (`/tmp` under specific overlay setups, NFS without proper support, etc.)
 /// `chmod` returns `EPERM`/`EROFS` and refusing to open the session is a strictly worse failure
 /// than leaving the file at the umask-derived mode.
@@ -225,7 +225,7 @@ impl SessionManager {
         restrict_permissions(&lock_dir, 0o700);
 
         // Pre-touch the DB file at 0600 so SQLite's `Connection::open` reuses an already-restricted
-        // file rather than creating one at umask defaults that we then chmod down — the latter
+        // file rather than creating one at umask defaults that we then chmod down; the latter
         // leaves a window where another local user could open the file. `-wal`/`-shm` companions
         // still inherit the umask, but the parent directory's 0700 mode keeps them inaccessible to
         // other users.
@@ -258,7 +258,7 @@ impl SessionManager {
             restrict_permissions(&database_path, 0o600);
         }
 
-        // SQLite defaults foreign-key enforcement to OFF per-connection — the `FOREIGN KEY` clauses
+        // SQLite defaults foreign-key enforcement to OFF per-connection; the `FOREIGN KEY` clauses
         // in `CREATE TABLE` are decorative without this. Set before `initialize_schema` so the
         // migration's DELETE/ALTER statements run with enforcement active. Must run outside any
         // transaction to take effect.
@@ -462,7 +462,7 @@ impl SessionManager {
                     > 0;
                 if !has_cascade {
                     // PRAGMA foreign_keys only takes effect outside any transaction. Toggle, run
-                    // rebuild, restore — even on failure — so the connection isn't left in a state
+                    // rebuild, restore (even on failure) so the connection isn't left in a state
                     // where FKs are silently off for subsequent queries.
                     connection.execute_batch("PRAGMA foreign_keys = OFF")?;
                     let migration_result = (|| -> rusqlite::Result<()> {
@@ -518,7 +518,7 @@ impl SessionManager {
                 // can be re-attached with the same shape the client originally created it with.
                 // Legacy rows (REPL / ACP / pre-0.27 HTTP) get NULL, and the re-attach helper falls
                 // back to the process default. Runs after the cascade-FK rebuild because the
-                // rebuild's `sessions_new` schema doesn't include these columns — the ALTER ADD
+                // rebuild's `sessions_new` schema doesn't include these columns; the ALTER ADD
                 // here applies to both fresh DBs (no-op) and rebuilt DBs alike.
                 let has_permission_col: bool = connection
                     .query_row(
@@ -620,7 +620,7 @@ impl SessionManager {
         })
     }
 
-    /// Create a session whose `parent_session_id` references an existing session — used by
+    /// Create a session whose `parent_session_id` references an existing session, used by
     /// `spawn_agent` so sub-agent conversations persist as children of the parent for auditing.
     /// Cascades on parent delete (see [`Self::delete_session`]). The optional `cwd` is the parent's
     /// cwd snapshot at spawn time.
@@ -705,7 +705,7 @@ impl SessionManager {
     }
 
     /// Best-effort removal of `<lock_dir>/<uuid>.lock` files whose session no longer exists.
-    /// `lock_session` creates these files but never deletes them — the OS releases the *lock* on
+    /// `lock_session` creates these files but never deletes them; the OS releases the *lock* on
     /// process exit, yet the empty file remains. A file for a UUID that isn't in the `sessions`
     /// table is pure garbage.
     ///
@@ -713,8 +713,8 @@ impl SessionManager {
     /// (`warn!`); a per-file unlink failure (e.g. a root-owned file left by a container run) is
     /// expected and logged at `debug!`.
     ///
-    /// Deleting a *held* lock file for an already-deleted session is benign — no process starts a
-    /// deleted session — and the sweep never races a live one: a session's row is committed before
+    /// Deleting a *held* lock file for an already-deleted session is benign (no process starts a
+    /// deleted session), and the sweep never races a live one: a session's row is committed before
     /// its lock file is acquired (see `main.rs`), so a live UUID is always in the set this query
     /// returns.
     async fn prune_orphan_lock_files(&self) {
@@ -753,7 +753,7 @@ impl SessionManager {
             if path.extension().and_then(|ext| ext.to_str()) != Some("lock") {
                 continue;
             }
-            // Only touch files whose stem is a UUID — never delete an unrelated file someone
+            // Only touch files whose stem is a UUID; never delete an unrelated file someone
             // dropped into the lock directory.
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
@@ -1002,7 +1002,7 @@ impl SessionManager {
     /// matches; ordered most-recent-first so the caller's "ambiguous prefix" listing leads with the
     /// session the user most likely meant.
     ///
-    /// Anything outside the UUID alphabet (`0-9a-fA-F-`) returns an empty list — both because such
+    /// Anything outside the UUID alphabet (`0-9a-fA-F-`) returns an empty list, both because such
     /// a prefix can't match any real session ID and to keep SQL `LIKE` wildcards (`%`, `_`) from
     /// sneaking through.
     pub async fn find_sessions_by_prefix(&self, prefix: &str) -> Result<Vec<Uuid>> {
@@ -1035,17 +1035,17 @@ impl SessionManager {
     }
 
     /// List sessions, most-recent first. When `include_children` is `false`, sub-agent sessions
-    /// (rows with non-NULL `parent_session_id`) are hidden — they're persisted for audit/debug but
+    /// (rows with non-NULL `parent_session_id`) are hidden; they're persisted for audit/debug but
     /// shouldn't clutter the user's view of their own conversations. Set to `true` to surface them,
     /// e.g. via `meka list --include-children`.
     ///
     /// `cwd_filter`, if `Some`, restricts the result set to sessions whose persisted `cwd` matches
-    /// the given path (rows with NULL `cwd` are excluded — legacy rows can't be filtered by cwd
+    /// the given path (rows with NULL `cwd` are excluded; legacy rows can't be filtered by cwd
     /// they never recorded).
     ///
     /// `cursor`, if `Some`, is a previous `next_cursor` value from this method; rows are returned
-    /// strictly *after* the cursor in `(updated_at, id) DESC` order. Returns `(rows, next_cursor)`
-    /// — `next_cursor` is `Some` iff there is at least one more row past `limit`. Invalid cursors
+    /// strictly *after* the cursor in `(updated_at, id) DESC` order. Returns `(rows, next_cursor)`;
+    /// `next_cursor` is `Some` iff there is at least one more row past `limit`. Invalid cursors
     /// are rejected with [`MekaError::Database`].
     pub async fn list_sessions(
         &self,
@@ -1261,7 +1261,7 @@ impl SessionManager {
 
     pub async fn delete_expired_sessions(&self, retention_days: u64) -> Result<u64> {
         // `TimeDelta::days` panics on out-of-range input, so route through `try_days`: an absurdly
-        // large `retention_days` falls back to a ~100-year window, which deletes nothing — the
+        // large `retention_days` falls back to a ~100-year window, which deletes nothing: the
         // intended "retain everything" outcome.
         let retention = i64::try_from(retention_days)
             .ok()
@@ -1290,7 +1290,7 @@ impl SessionManager {
     }
 
     /// Update the persisted cwd for an existing session. Called by the ACP `session/load` /
-    /// `session/resume` handlers when the client's `cwd` differs from the persisted value — the
+    /// `session/resume` handlers when the client's `cwd` differs from the persisted value; the
     /// client wins so future `session/list` results reflect the live state. `cwd` is stored as the
     /// path's `to_string_lossy()` form (UTF-8 is the only column type SQLite has). Returns the
     /// number of rows updated (0 if the session id doesn't exist).
@@ -1374,7 +1374,7 @@ impl SessionManager {
     ) -> Result<usize> {
         let permission = permission.to_string();
         let id_string = session_id.to_string();
-        // Bump `updated_at` alongside the target column — see `update_session_cwd`.
+        // Bump `updated_at` alongside the target column. See `update_session_cwd`.
         let updated_at = chrono::Utc::now().to_rfc3339();
         self.connection
             .call(move |connection| -> rusqlite::Result<_> {
@@ -1390,7 +1390,7 @@ impl SessionManager {
     }
 
     /// Update the persisted capabilities JSON blob for a session. Symmetric counterpart to
-    /// [`Self::update_session_permission`]. The blob's internal shape isn't validated here — the
+    /// [`Self::update_session_permission`]. The blob's internal shape isn't validated here; the
     /// HTTP handler is the only writer and serialises a `SessionCapabilities` value.
     #[allow(
         dead_code,
@@ -1645,7 +1645,7 @@ impl SessionManager {
     }
 
     /// Delete the oldest sessions until total `messages.content` size is at or below `max_bytes`.
-    /// `active_ids` is the set of session ids the caller knows to be currently in use — they are
+    /// `active_ids` is the set of session ids the caller knows to be currently in use; they are
     /// excluded from the eviction sweep so the caller's in-flight `save_event` calls don't trip on
     /// foreign-key violations after a deletion. Pass an empty set when there are no live sessions
     /// (typical at startup, when this is called before any session is opened).
@@ -1702,7 +1702,7 @@ impl SessionManager {
                             )?;
                             deleted += 1;
                         }
-                        // No eligible row left — either the DB is empty, or every remaining session
+                        // No eligible row left: either the DB is empty, or every remaining session
                         // is in the active set. Either way, we can't reclaim more without touching
                         // live state.
                         Err(rusqlite::Error::QueryReturnedNoRows) => break,
@@ -2046,7 +2046,7 @@ fn decode_event_from_row(
 }
 
 /// Pagination cursor for [`SessionManager::list_sessions`]: encodes the `(updated_at, id)` of the
-/// last row in a page as base64-url JSON. The shape is opaque to clients — they only round-trip it
+/// last row in a page as base64-url JSON. The shape is opaque to clients; they only round-trip it
 /// back as `next_cursor`.
 #[derive(Serialize, Deserialize)]
 struct ListSessionsCursor {
@@ -2102,8 +2102,8 @@ mod tests {
     }
 
     /// Persist one of every event variant via `save_event` and read it back through `load_events`.
-    /// Verifies the encoding/decoding round trip — including the JSON envelope used for
-    /// `CompactBoundary` — matches the in-memory shape.
+    /// Verifies the encoding/decoding round trip, including the JSON envelope used for
+    /// `CompactBoundary`, matches the in-memory shape.
     #[tokio::test]
     async fn test_save_and_load_events_round_trip() {
         use std::collections::HashSet;
@@ -2196,7 +2196,7 @@ mod tests {
     }
 
     /// Legacy databases (predating PR 2) only contain rows with the `user` / `assistant` /
-    /// `tool_results` roles — no `compact_boundary`. `load_events` must hydrate every legacy row as
+    /// `tool_results` roles, no `compact_boundary`. `load_events` must hydrate every legacy row as
     /// an `Event::Append` so resume works without a schema migration.
     #[tokio::test]
     async fn test_load_events_legacy_rows_as_append() {
@@ -2368,7 +2368,7 @@ mod tests {
             .create_session(None)
             .await
             .expect("failed to create session");
-        // First 8 hex chars (before the first dash) — guaranteed unique for a freshly-generated
+        // First 8 hex chars (before the first dash), guaranteed unique for a freshly-generated
         // random UUID with only one row in the DB.
         let prefix: String = id.to_string().chars().take(8).collect();
         let matches = manager
@@ -2390,7 +2390,7 @@ mod tests {
             .await
             .expect("failed prefix lookup");
         // Real UUIDs are random; collision with this prefix is astronomically unlikely but
-        // theoretically possible — re-create a session if so.
+        // theoretically possible; re-create a session if so.
         assert!(matches.is_empty() || matches.len() == 1);
     }
 
@@ -2765,7 +2765,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_sessions_preview_is_user_prompt_not_context_wrapper() {
         // The canonical regression: user types a prompt, turn runs, `meka list` must show the
-        // prompt — not `<context>`, not the permission/environment metadata.
+        // prompt, not `<context>`, not the permission/environment metadata.
         let manager = test_manager().await;
         let session_id = manager.create_session(None).await.expect("create_session");
 
@@ -2873,7 +2873,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_preview_is_first_user_turn_not_later() {
-        // Multiple turns in one session — preview must be the FIRST user prompt, not a later one.
+        // Multiple turns in one session: preview must be the FIRST user prompt, not a later one.
         // `ORDER BY id ASC LIMIT 1` guarantees this; guard against that being changed.
         let manager = test_manager().await;
         let session_id = manager.create_session(None).await.expect("create_session");
@@ -2887,7 +2887,7 @@ mod tests {
                 .save_message(session_id, "user", &stored)
                 .await
                 .expect("save_message");
-            // Interleave an assistant reply — real sessions alternate.
+            // Interleave an assistant reply: real sessions alternate.
             manager
                 .save_message(session_id, "assistant", &format!("reply {}", i))
                 .await
@@ -2928,7 +2928,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_preview_independent_per_session() {
-        // Each session's preview is its own first user turn — no cross-contamination from neighbour
+        // Each session's preview is its own first user turn: no cross-contamination from neighbour
         // sessions.
         let manager = test_manager().await;
         let a = manager.create_session(None).await.expect("create_session");
@@ -2962,7 +2962,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_sessions_preview_empty_session_has_empty_preview() {
         // A session with zero user messages (e.g. created but Ctrl-C'd before first dispatch) falls
-        // back to an empty string — it should not panic or render `<no user msg>` scaffolding.
+        // back to an empty string; it should not panic or render `<no user msg>` scaffolding.
         let manager = test_manager().await;
         let session_id = manager.create_session(None).await.expect("create_session");
 
@@ -3003,7 +3003,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_sessions_preview_legacy_unwrapped_user_message() {
         // Backward-compat: older sessions (or future non-wrapper message paths) whose user content
-        // has no `<context>` block at all — the stored string IS the prompt, and the preview equals
+        // has no `<context>` block at all; the stored string IS the prompt, and the preview equals
         // it.
         let manager = test_manager().await;
         let session_id = manager.create_session(None).await.expect("create_session");
@@ -3058,7 +3058,7 @@ mod tests {
             .await
             .expect("save younger");
 
-        // Mark the oldest as active — it must be skipped even though it would otherwise be the
+        // Mark the oldest as active; it must be skipped even though it would otherwise be the
         // natural eviction target.
         let mut active = std::collections::HashSet::new();
         active.insert(oldest.to_string());
@@ -3411,7 +3411,7 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..5 {
             let id = manager.create_session(None).await.expect("create");
-            // `created_at`/`updated_at` use chrono::Utc::now() — pause to ensure each row's
+            // `created_at`/`updated_at` use chrono::Utc::now(); pause to ensure each row's
             // timestamp is strictly newer (RFC3339 millisecond resolution).
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             ids.push(id);
@@ -3461,7 +3461,7 @@ mod tests {
             .expect("create child");
 
         // Populate the child with a message and a tool_output so the cascade has something to clean
-        // up — proves the descendant deletions run, not just the parent row.
+        // up. This proves the descendant deletions run, not just the parent row.
         manager
             .save_message(child, "user", "hello from sub-agent")
             .await
@@ -3576,7 +3576,7 @@ mod tests {
         store.save_auth_probe("srv", true).await.expect("save true");
         assert_eq!(store.load_auth_probe("srv", ttl).await.unwrap(), Some(true));
 
-        // Upsert — flip the verdict.
+        // Upsert: flip the verdict.
         store
             .save_auth_probe("srv", false)
             .await
@@ -3660,7 +3660,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_oauth_token_round_trip_account_id_optional() {
-        // Claude OAuth doesn't populate `account_id` — make sure round-tripping a `None` value
+        // Claude OAuth doesn't populate `account_id`; make sure round-tripping a `None` value
         // works without losing other fields.
         let manager = SessionManager::open(Some(Path::new(":memory:")))
             .await
@@ -3694,8 +3694,9 @@ mod tests {
         }
     }
 
-    /// Two providers can persist independently with different `account_id` values — verifies the
-    /// provider PK keeps openai-codex and a hypothetical future OAuth provider isolated.
+    /// Two providers can persist independently with different `account_id` values. This test
+    /// verifies the provider PK keeps openai-codex and a hypothetical future OAuth provider
+    /// isolated.
     #[tokio::test]
     async fn test_oauth_token_two_providers_independent() {
         let manager = SessionManager::open(Some(Path::new(":memory:")))

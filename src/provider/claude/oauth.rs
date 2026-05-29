@@ -179,7 +179,7 @@ impl ClaudeOAuthProvider {
             }
         }
 
-        // Token expired — attempt refresh
+        // Token expired: attempt refresh
         let mut credential = self.credential.write().await;
 
         // Re-read the latest credential from the DB. Refresh tokens rotate on each successful
@@ -321,7 +321,7 @@ impl ClaudeOAuthProvider {
         if !system_prompt.is_empty() {
             let billing_header = attestation::generate_billing_header(messages);
             // Matches recent Claude Code wire shape: only the user system prompt carries
-            // `cache_control`. Billing header and identity prefix are unmarked — the source's
+            // `cache_control`. Billing header and identity prefix are unmarked; the source's
             // "boundary mode" (`utils/api.ts:362-409`) assigns `cacheScope: null` to both. ttl `1h`
             // matches Claude Code's `getCacheControl` for OAuth subscribers (`claude.ts:358-374`).
             body.insert(
@@ -570,7 +570,7 @@ mod tests {
 
         assert_eq!(system[1]["type"], "text");
         assert_eq!(system[1]["text"], CC_SYSTEM_PROMPT_PREFIX);
-        // Identity prefix carries no cache_control — matches recent Claude Code wire shape
+        // Identity prefix carries no cache_control, which matches recent Claude Code wire shape
         // (boundary mode in `utils/api.ts:362-409`).
         assert!(system[1].get("cache_control").is_none());
 
@@ -1261,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_betas_redact_thinking_omitted_when_thinking_disabled() {
-        // The beta only makes sense when thinking is also enabled — Claude Code's
+        // The beta only makes sense when thinking is also enabled; Claude Code's
         // `getAllModelBetas` gates it on `modelSupportsISP(model)` (which we collapse into
         // `model_supports_modern_features`) AND we additionally gate on the thinking toggle since
         // there's no thinking stream to redact when thinking is off.
@@ -1494,7 +1494,7 @@ mod tests {
     /// Simulates a two-turn conversation where the user toggles the permission level between turns
     /// and verifies that the cacheable prefix (system prompt + tools array + historical messages)
     /// is byte-identical across the toggle. This is the regression guard for Option 1 of the
-    /// higher-permission-visibility work — it proves that `/permission <level>` mid-session does
+    /// higher-permission-visibility work; it proves that `/permission <level>` mid-session does
     /// not invalidate the Claude prompt cache.
     ///
     /// Covers the full agent request-body assembly:
@@ -1541,7 +1541,7 @@ mod tests {
 
         let provider = test_provider();
 
-        // The agent fetches these once per turn. None of them take the current permission — that's
+        // The agent fetches these once per turn. None of them take the current permission; that's
         // the invariant we're testing.
         let catalogue = registry.tool_catalogue();
         let system = build_system_prompt(&catalogue, true, &[], None, &[]);
@@ -1576,16 +1576,15 @@ mod tests {
         // 1. The system prompt is identical. (Breakpoint 2 cache-hit.)
         assert_eq!(
             body_t1["system"], body_t2["system"],
-            "system prompt diverged across /permission toggle — cache prefix invalidated"
+            "system prompt diverged across /permission toggle: cache prefix invalidated"
         );
 
         // 2. The tools array is identical. (Breakpoint 3 cache-hit.) Reuse the existing helper
         //    which tolerates cache_control movement between the last-tool position across requests.
         assert_prefix_stable(&body_t1, &body_t2, 1);
 
-        // 3. The turn-1 user message is preserved verbatim in turn-2's history — historical
-        //    messages must never mutate on toggle, otherwise breakpoint 4 (messages cache)
-        //    cascades.
+        // 3. The turn-1 user message is preserved verbatim in turn-2's history. Historical messages
+        //    must never mutate on toggle; otherwise breakpoint 4 (messages cache) cascades.
         let t1_msg = strip_cache_control(&body_t1["messages"][0]);
         let t2_msg0 = strip_cache_control(&body_t2["messages"][0]);
         assert_eq!(
@@ -1603,7 +1602,7 @@ mod tests {
     /// `load_tool` activation must NOT mutate the cacheable system prompt. This is the regression
     /// guard for the deferred-tool refactor: when the model invokes `load_tool` to expose a
     /// deferred tool's schema, the system prompt block stays byte-identical (so breakpoint 2 cache
-    /// hits) — the tools array is what grows, append-only, so its prior entries also cache
+    /// hits); the tools array is what grows, append-only, so its prior entries also cache
     /// (breakpoint 3).
     ///
     /// Mirrors [`test_permission_toggle_preserves_cache_prefix`] structurally.
@@ -1691,7 +1690,7 @@ mod tests {
                 }],
             },
         ];
-        // System prompt is rebuilt the same way every turn — its content is a function of the
+        // System prompt is rebuilt the same way every turn; its content is a function of the
         // catalogue, not the messages, so it must not shift when load_tool is invoked.
         let catalogue_t2 = registry.tool_catalogue();
         let system_t2 = build_system_prompt(&catalogue_t2, true, &[], None, &[]);
@@ -1701,7 +1700,7 @@ mod tests {
         // 1. The system prompt is byte-identical. (Breakpoint 2 cache-hit.)
         assert_eq!(
             body_t1["system"], body_t2["system"],
-            "system prompt diverged across load_tool invocation — cache prefix invalidated"
+            "system prompt diverged across load_tool invocation: cache prefix invalidated"
         );
 
         // 2. The tools array gained fixture_deferred (append-only growth).
@@ -1715,7 +1714,7 @@ mod tests {
             "tools array should grow by exactly one entry after load_tool"
         );
 
-        // 3. The prior tools (turn-1 set) are present in turn-2 in the same relative order — i.e.,
+        // 3. The prior tools (turn-1 set) are present in turn-2 in the same relative order, i.e.,
         //    the prefix is preserved. Stripping cache_control because the marker moves to the new
         //    last tool.
         let tools_arr_t1 =
@@ -1725,7 +1724,7 @@ mod tests {
         for (idx, tool) in tools_arr_t1.iter().enumerate() {
             assert_eq!(
                 &tools_arr_t2[idx], tool,
-                "tool at index {} mutated between turns — cache prefix invalidated",
+                "tool at index {} mutated between turns: cache prefix invalidated",
                 idx
             );
         }
@@ -1810,7 +1809,7 @@ mod tests {
             pre_loaded.clone(),
         );
 
-        // The materialized view shrank — but events are append-only.
+        // The materialized view shrank, but events are append-only.
         let post_loaded = extract_loaded_tool_names_from_events(log.events());
         assert!(
             post_loaded.contains("fixture_deferred"),
@@ -2050,7 +2049,7 @@ mod tests {
         let provider = test_provider();
         let system = "system";
 
-        // Build with 2 messages — cache_control should be on message[1]
+        // Build with 2 messages: cache_control should be on message[1]
         let messages_a = vec![Message::user("hello"), Message::assistant_text("hi")];
         let body_a = provider.build_request_body(system, &messages_a, &[], false);
         let msgs_a = body_a["messages"].as_array().unwrap();
@@ -2062,7 +2061,7 @@ mod tests {
         let block_1 = &msgs_a[1]["content"].as_array().unwrap()[0];
         assert!(block_1.get("cache_control").is_some());
 
-        // Now append a third message — cache_control should move to message[2]
+        // Now append a third message: cache_control should move to message[2]
         let messages_b = vec![
             Message::user("hello"),
             Message::assistant_text("hi"),
@@ -2396,7 +2395,7 @@ mod tests {
             let hits = Arc::clone(&hits);
             tokio::spawn(async move {
                 // Drain enough of the request to know we got a full POST body. The OAuth endpoint
-                // sends a small JSON body — read until we see two CRLFs (header end) and then
+                // sends a small JSON body; read until we see two CRLFs (header end) and then
                 // enough bytes to satisfy Content-Length.
                 let mut buf = Vec::with_capacity(2048);
                 let mut headers_end: Option<usize> = None;
@@ -2518,8 +2517,8 @@ mod tests {
             results.push(handle.await.expect("join").expect("ensure_valid"));
         }
 
-        // Every caller must return the same fresh token — proves they observed the refresh that
-        // landed, didn't double-refresh.
+        // Every caller must return the same fresh token, which proves they observed the refresh
+        // that landed and didn't double-refresh.
         for header in &results {
             assert_eq!(header, "Bearer fresh-token-xyz", "stale token leaked",);
         }

@@ -97,7 +97,7 @@ fn discover_skills_in(root: &Path) -> Vec<Skill> {
 /// Snapshot the disk state of a skills root: `subdir/SKILL.md → mtime` for every non-dot
 /// subdirectory. Used by [`SkillCache`] to decide whether to re-run discovery on the next turn.
 ///
-/// Returns `None` when `read_dir` fails with anything other than `NotFound` — that signals the
+/// Returns `None` when `read_dir` fails with anything other than `NotFound`; that signals the
 /// caller to serve the cached (stale) state rather than wiping it on a transient filesystem hiccup.
 /// A `NotFound` error maps to `Some(empty)` so a deleted skills dir properly clears the cache.
 fn disk_snapshot(root: &Path) -> Option<BTreeMap<PathBuf, SystemTime>> {
@@ -156,7 +156,7 @@ impl SkillCache {
         Self::for_root(skills_dir())
     }
 
-    /// Construct a cache backed by a specific root. `None` produces a permanently-empty cache —
+    /// Construct a cache backed by a specific root. `None` produces a permanently-empty cache,
     /// useful for tests and for subcommands (`meka tools list`) that don't read skill metadata.
     pub fn for_root(root: Option<PathBuf>) -> Arc<Self> {
         let (skills, snapshot) = match root.as_deref() {
@@ -184,7 +184,7 @@ impl SkillCache {
         };
         // Discovery touches the filesystem (`read_dir` + per-skill `metadata` / `read_to_string`);
         // this runs on every prompt from the async agent loop, so offload it to the blocking pool.
-        // Transient errors (e.g. EACCES on the dir) yield `None` — serve stale state rather than
+        // Transient errors (e.g. EACCES on the dir) yield `None`; serve stale state rather than
         // wipe the cache.
         let now = {
             let root = root.clone();
@@ -197,7 +197,7 @@ impl SkillCache {
             return self.state.lock().await.skills.clone();
         }
         // Run discovery *without* holding the state lock so concurrent `current()` callers aren't
-        // blocked behind the filesystem walk. A racing caller may discover in parallel — harmless:
+        // blocked behind the filesystem walk. A racing caller may discover in parallel. Harmless:
         // both results derive from disk and the last write wins.
         let discovered = match tokio::task::spawn_blocking(move || discover_skills_in(&root)).await
         {
@@ -349,7 +349,7 @@ pub fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 /// Resolve `~/.config/meka/skills/<name>` for a given skill name. Returns `None` if the meka config
-/// directory cannot be determined. Performs no I/O and does not validate the name — callers are
+/// directory cannot be determined. Performs no I/O and does not validate the name; callers are
 /// expected to call [`validate_skill_name`] first.
 pub fn skill_dir_for(name: &str) -> Option<PathBuf> {
     skills_dir().map(|root| root.join(name))
@@ -661,8 +661,8 @@ mod tests {
         let first = cache.current().await;
         let second = cache.current().await;
 
-        // Same Arc pointer ⇒ no rediscovery happened — proves the cache really did skip the inner
-        // walk on the stable-snapshot path.
+        // Same Arc pointer ⇒ no rediscovery happened, which proves the cache really did skip the
+        // inner walk on the stable-snapshot path.
         assert!(
             Arc::ptr_eq(&first, &second),
             "expected cache to skip rediscovery when nothing changed"

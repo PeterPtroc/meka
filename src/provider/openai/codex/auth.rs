@@ -1,15 +1,15 @@
 //! Decoders for the JWT `id_token` returned by `auth.openai.com`.
 //!
 //! We extract two values:
-//! - `chatgpt_account_id` — sent on every Codex request as the `ChatGPT-Account-ID` header
-//!   (required for subscription auth).
-//! - The `exp` claim from the `access_token` — used to schedule refresh before the token expires.
+//! - `chatgpt_account_id`, sent on every Codex request as the `ChatGPT-Account-ID` header (required
+//!   for subscription auth).
+//! - The `exp` claim from the `access_token`, used to schedule refresh before the token expires.
 //!
 //! The id_token's payload nests ChatGPT-specific claims under the namespaced key
 //! `https://api.openai.com/auth`, matching Codex's own parsing in
 //! `temp/codex/codex-rs/login/src/token_data.rs:71-99`.
 //!
-//! No signature verification — the auth server's TLS handshake provides integrity for the
+//! No signature verification: the auth server's TLS handshake provides integrity for the
 //! in-transit token, and the API server validates the token on every request. Local validation
 //! would only catch tampering by a process that already has full access to our memory.
 
@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::error::{MekaError, Result};
 
 /// Pull `chatgpt_account_id` out of an OpenAI id_token JWT. Returns `None` when the claim is absent
-/// (e.g. for a free-tier account with no workspace) — the caller decides whether absence is fatal.
+/// (e.g. for a free-tier account with no workspace); the caller decides whether absence is fatal.
 pub(super) fn extract_account_id(id_token: &str) -> Result<Option<String>> {
     let claims: IdClaims = decode_jwt_payload(id_token)?;
     Ok(claims.auth.and_then(|auth| auth.chatgpt_account_id))
@@ -51,7 +51,7 @@ struct StandardClaims {
 }
 
 fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> Result<T> {
-    // JWT format: header.payload.signature — three non-empty parts.
+    // JWT format: header.payload.signature, three non-empty parts.
     let mut parts = jwt.split('.');
     let payload = match (parts.next(), parts.next(), parts.next()) {
         (Some(header), Some(payload), Some(signature))
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     /// Build a synthesised JWT-shape string from a payload JSON object. Header and signature are
-    /// placeholders — `decode_jwt_payload` only reads the middle segment, so the others just need
+    /// placeholders; `decode_jwt_payload` only reads the middle segment, so the others just need
     /// to be non-empty.
     fn make_jwt(payload: serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");

@@ -22,7 +22,7 @@ pub fn build_stdio_command(command_str: &str, args: &[String]) -> Command {
             || lower.ends_with(".bat")
             || lower.ends_with(".ps1");
         if is_shim {
-            // `cmd /c <command> <args...>` — Windows wraps argument quoting. We don't try to
+            // `cmd /c <command> <args...>`: Windows wraps argument quoting. We don't try to
             // shell-quote the args; the `Command` API does the OS-appropriate escaping via
             // CreateProcess's lpCommandLine.
             let mut cmd = Command::new("cmd");
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn parse_header_lines_value_may_contain_colons() {
-        // Only the first ':' separates — URL values must survive intact.
+        // Only the first ':' separates; URL values must survive intact.
         let map = parse_header_lines("Location: https://example.com/x\n").expect("parses");
         assert_eq!(
             map.get("Location").map(String::as_str),

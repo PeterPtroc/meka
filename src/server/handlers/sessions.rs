@@ -107,7 +107,7 @@ pub struct CreateSessionRequest {
 #[serde(deny_unknown_fields)]
 pub struct CapabilitiesBody {
     /// When `true`, the SSE stream includes `thinking.delta` events for extended-thinking
-    /// content. Default `false` — chat-transcript clients (Telegram bridges) don't want
+    /// content. Default `false`: chat-transcript clients (Telegram bridges) don't want
     /// reasoning inline.
     #[serde(default)]
     pub supports_reasoning_stream: bool,
@@ -170,7 +170,7 @@ pub struct ListSessionsResponse {
 /// - paths that don't exist on the filesystem
 /// - paths that exist but aren't directories
 ///
-/// This is *input validation*, not a security sandbox — a valid absolute directory still lets the
+/// This is *input validation*, not a security sandbox. A valid absolute directory still lets the
 /// agent operate anywhere the OS permissions allow. The check prevents obviously-wrong inputs
 /// (like `/dev/null` or `/proc/self`) from producing confusing downstream tool errors.
 #[allow(clippy::result_large_err)]
@@ -217,7 +217,7 @@ fn validate_cwd(path: &std::path::Path) -> Result<(), ProblemDetail> {
     Ok(())
 }
 
-/// POST /v1/sessions — create a session.
+/// POST /v1/sessions: create a session.
 ///
 /// Requires scope `sessions:w`. The created session's runtime (Agent, ToolRegistry,
 /// HttpFrontend) is constructed eagerly so subsequent `POST /turn` doesn't pay the build cost.
@@ -366,7 +366,7 @@ pub async fn create_session(
 
     state.sessions.write().await.insert(session_uuid, entry);
 
-    // Just-created session has zero messages, so title is always empty — skip the DB round-trip.
+    // Just-created session has zero messages, so title is always empty. Skip the DB round-trip.
     let title = String::new();
 
     tracing::info!(
@@ -377,7 +377,7 @@ pub async fn create_session(
         principal.token_id,
     );
 
-    // Past the point of no return — disarm so the rollback Drop doesn't fire.
+    // Past the point of no return: disarm so the rollback Drop doesn't fire.
     rollback.disarm();
     // Use the canonical `created_at` from the DB insert so all three surfaces agree.
     let timestamp = created.created_at;
@@ -396,7 +396,7 @@ pub async fn create_session(
     ))
 }
 
-/// GET /v1/sessions — paginated list. Returns persisted sessions from the DB (not just
+/// GET /v1/sessions: paginated list. Returns persisted sessions from the DB (not just
 /// in-memory entries) so audit consumers can see everything regardless of GC state.
 #[utoipa::path(
     get,
@@ -482,7 +482,7 @@ pub async fn list_sessions(
     }))
 }
 
-/// GET /v1/sessions/{id} — single session metadata.
+/// GET /v1/sessions/{id}: single session metadata.
 #[utoipa::path(
     get,
     path = "/v1/sessions/{id}",
@@ -571,11 +571,11 @@ pub async fn get_session(
     }))
 }
 
-/// PATCH /v1/sessions/{id} — update mutable session knobs (permission, cwd) on a live session
+/// PATCH /v1/sessions/{id}: update mutable session knobs (permission, cwd) on a live session
 /// without re-creating it. Returns the updated metadata.
 ///
 /// Permission and cwd are hoisted on [`SessionEntry`] outside the runtime mutex precisely so the
-/// PATCH handler can apply them without contending with a long-running turn — the change is
+/// PATCH handler can apply them without contending with a long-running turn; the change is
 /// visible to the next agent operation that reads the cells.
 #[utoipa::path(
     patch,
@@ -760,14 +760,14 @@ fn turn_in_flight_conflict(id: Uuid, detail: impl Into<String>) -> ProblemDetail
         .with("session_id", id.to_string())
 }
 
-/// DELETE /v1/sessions/{id} — drop the in-memory entry and (optionally) the DB row.
+/// DELETE /v1/sessions/{id}: drop the in-memory entry and (optionally) the DB row.
 #[utoipa::path(
     delete,
     path = "/v1/sessions/{id}",
     tag = "sessions",
     params(("id" = Uuid, Path, description = "Session UUID")),
     responses(
-        (status = 204, description = "Session deleted (idempotent — also returned for unknown ids)"),
+        (status = 204, description = "Session deleted (idempotent, also returned for unknown ids)"),
         (status = 401, description = "Authorization missing or invalid", body = ProblemDetail),
         (status = 403, description = "Insufficient scope", body = ProblemDetail),
         (status = 409, description = "Turn in flight; cancel first", body = ProblemDetail),
@@ -787,7 +787,7 @@ pub async fn delete_session(
             "scope `sessions:w` is required",
         ));
     }
-    // Refuse DELETE while a turn is in flight — silently destroying agent work would surprise
+    // Refuse DELETE while a turn is in flight: silently destroying agent work would surprise
     // callers. DB-delete runs BEFORE the in-memory remove so a transient DB failure leaves
     // the session usable (client can retry).
     {
@@ -830,7 +830,7 @@ pub async fn delete_session(
             "session has an in-flight turn; cancel it first via POST /v1/sessions/{id}/cancel",
         ));
     }
-    // DB-delete first — on failure the in-memory entry stays so the session keeps working.
+    // DB-delete first: on failure the in-memory entry stays so the session keeps working.
     state
         .shared
         .session_manager

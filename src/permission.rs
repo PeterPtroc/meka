@@ -102,7 +102,7 @@ impl EnabledPermissions {
     /// code constructs the set from config.
     #[cfg(test)]
     pub const ALL: Self = Self { bits: 0b1111 };
-    /// `none / read / write` — `ask` is opt-in.
+    /// `none / read / write`. `ask` is opt-in.
     pub const DEFAULT: Self = Self {
         bits: (1 << Permission::None as u8)
             | (1 << Permission::Read as u8)
@@ -110,7 +110,7 @@ impl EnabledPermissions {
     };
 
     /// Build an `EnabledPermissions` from any iterable of [`Permission`]s. Returns `None` if the
-    /// iterator yields no items — an empty enabled set is meaningless (meka would have no level to
+    /// iterator yields no items. An empty enabled set is meaningless (meka would have no level to
     /// start in), so the caller has to handle that case explicitly (typically by falling back to
     /// [`Self::DEFAULT`]).
     pub fn from_modes<I: IntoIterator<Item = Permission>>(iter: I) -> Option<Self> {
@@ -138,7 +138,7 @@ impl EnabledPermissions {
 
     /// Lowest-discriminant enabled mode. Every constructor ([`Self::from_modes`] returns `None`
     /// on empty input, [`Self::DEFAULT`] is non-empty by definition) refuses an empty set, so
-    /// `iter().next()` always yields `Some` — the `expect` documents the invariant rather than
+    /// `iter().next()` always yields `Some`; the `expect` documents the invariant rather than
     /// checking it.
     #[allow(clippy::expect_used)]
     pub fn lowest(self) -> Permission {
