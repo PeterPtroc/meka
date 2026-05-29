@@ -947,10 +947,14 @@ impl Frontend for ReplFrontend {
             // (the next assistant turn). No additional UI is needed at completion time; the
             // model's response that follows already summarizes what happened.
             FrontendEvent::ToolCallCompleted { .. } => {}
-            FrontendEvent::TodoListUpdated(items) => {
+            FrontendEvent::TodoListUpdated { title, items } => {
                 Self::close_text_run(&mut state);
-                render::render_todo_list(&items);
-                state.spacing.after_todo_list();
+                // Only advance spacing when the list actually rendered. An empty list prints
+                // nothing; claiming a trailing blank would swallow the next text run's leading
+                // blank after a tool indicator.
+                if render::render_todo_list(title.as_deref(), &items) {
+                    state.spacing.after_todo_list();
+                }
             }
             FrontendEvent::TokenUsage(usage) => {
                 Self::close_text_run(&mut state);

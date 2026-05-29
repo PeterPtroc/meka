@@ -1,7 +1,9 @@
-//! `todo_write` tool and the shared todo list state. Lets the agent track multi-step plans and
-//! surface their progress in the system prompt and the REPL display.
+//! The `todo` tool and the shared task-list state. A single tool the agent uses to track multi-step
+//! work: it both mutates the list and echoes the canonical state back on every call, so the model
+//! always has authoritative task numbers for its next update. The list is also surfaced in the
+//! per-turn context block and the REPL display.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -9,70 +11,155 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput};
-use crate::{
-    error::{MekaError, Result},
-    permission::Permission,
-    provider::ToolDefinition,
-};
+use crate::{error::Result, permission::Permission, provider::ToolDefinition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
+    #[serde(
+        alias = "wip",
+        alias = "in-progress",
+        alias = "in progress",
+        alias = "started"
+    )]
     InProgress,
-    Done,
+    #[serde(alias = "done", alias = "complete", alias = "finished")]
+    Completed,
+    #[serde(
+        alias = "canceled",
+        alias = "skipped",
+        alias = "dropped",
+        alias = "wontfix"
+    )]
+    Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
-    pub id: String,
-    pub description: String,
+    pub text: String,
     pub status: TodoStatus,
 }
 
-pub type SharedTodoList = Arc<RwLock<Vec<TodoItem>>>;
+/// The full task-list state: a `title` (set by the agent when it builds the list and rendered as
+/// the heading) and the ordered items. Task numbers are positional (1-based) and owned by the tool,
+/// so they are derived from order rather than stored on the item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodoState {
+    pub title: Option<String>,
+    pub items: Vec<TodoItem>,
+}
 
-pub(super) struct TodoWriteTool {
+pub type SharedTodoList = Arc<RwLock<TodoState>>;
+
+/// One element of the `items` array: either a bare task string (status defaults to `pending`) or an
+/// object carrying an explicit status. `Text` must come first so a JSON string matches it before
+/// the object variant is tried.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TodoItemInput {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        status: Option<TodoStatus>,
+    },
+}
+
+impl From<TodoItemInput> for TodoItem {
+    fn from(input: TodoItemInput) -> Self {
+        match input {
+            TodoItemInput::Text(text) => TodoItem {
+                text,
+                status: TodoStatus::Pending,
+            },
+            TodoItemInput::Full { text, status } => TodoItem {
+                text,
+                status: status.unwrap_or(TodoStatus::Pending),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TodoInput {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    items: Option<Vec<TodoItemInput>>,
+    #[serde(default)]
+    set: Option<BTreeMap<String, TodoStatus>>,
+}
+
+pub(super) struct TodoTool {
     pub todo_list: SharedTodoList,
 }
 
 #[async_trait]
-impl Tool for TodoWriteTool {
+impl Tool for TodoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "todo_write".to_string(),
-            description: "Create or update a structured task list. Replaces the entire list each \
-                          call. Use this to break down multi-step work, track progress, and \
-                          communicate status."
+            name: "todo".to_string(),
+            description: "Track and display progress on multi-step work. The full list (with task \
+                          numbers) is returned after every call, so you never need a separate \
+                          read.\n\
+                          - Set up or restructure: pass `items` to (re)create the whole list, \
+                          together with a `title` summarizing the overall goal (the `title` is \
+                          required whenever you pass `items`). Each entry is a task string (status \
+                          defaults to pending) or an object {\"text\":..., \"status\":...}. Tasks \
+                          are numbered 1..N in order.\n\
+                          - As you work: pass `set` to flip statuses by task number, e.g. \
+                          {\"1\":\"completed\",\"2\":\"in_progress\"} — this is the common case; do \
+                          it as you start and finish each step.\n\
+                          Call with no arguments to just read the current list. Keep exactly one \
+                          task in_progress; mark a task completed only when truly done, or \
+                          cancelled if you drop it."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "tasks": {
+                    "title": {
+                        "type": "string",
+                        "description": "A short heading summarizing the overall goal of the list. \
+                                        Required whenever you pass `items`; persists across later \
+                                        `set` updates."
+                    },
+                    "items": {
                         "type": "array",
-                        "description": "The complete task list (replaces any existing list)",
+                        "description": "Replace the whole list. Each entry is a task string \
+                                        (status defaults to pending) or an object {text, status}. \
+                                        Tasks are numbered 1..N in order.",
                         "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {
-                                    "type": "string",
-                                    "description": "Unique task identifier"
-                                },
-                                "description": {
-                                    "type": "string",
-                                    "description": "What needs to be done"
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "done"],
-                                    "description": "Task status"
+                            "anyOf": [
+                                { "type": "string" },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {
+                                            "type": "string",
+                                            "description": "What needs to be done"
+                                        },
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "in_progress", "completed", "cancelled"]
+                                        }
+                                    },
+                                    "required": ["text"]
                                 }
-                            },
-                            "required": ["id", "description", "status"]
+                            ]
+                        }
+                    },
+                    "set": {
+                        "type": "object",
+                        "description": "Sparse status update keyed by 1-based task number, e.g. \
+                                        {\"1\":\"completed\",\"2\":\"in_progress\"}.",
+                        "additionalProperties": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed", "cancelled"]
                         }
                     }
-                },
-                "required": ["tasks"]
+                }
             }),
             ..Default::default()
         }
@@ -87,79 +174,133 @@ impl Tool for TodoWriteTool {
         input: serde_json::Value,
         _cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
-        let tasks_value = input.get("tasks").ok_or_else(|| MekaError::ToolExecution {
-            tool_name: "todo_write".to_string(),
-            message: "missing 'tasks' parameter".to_string(),
-        })?;
+        let parsed: TodoInput = match serde_json::from_value(input) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(ToolOutput::text(
+                    format!("invalid todo input: {}", error),
+                    true,
+                ));
+            }
+        };
 
-        let tasks: Vec<TodoItem> =
-            serde_json::from_value(tasks_value.clone()).map_err(|error| {
-                MekaError::ToolExecution {
-                    tool_name: "todo_write".to_string(),
-                    message: format!("invalid tasks format: {}", error),
+        let mut state = self.todo_list.write().await;
+
+        let title = parsed
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty());
+
+        // Precedence: items (replace) -> set (patch by resulting position).
+        if let Some(items) = parsed.items {
+            let new_items: Vec<TodoItem> = items.into_iter().map(TodoItem::from).collect();
+            // A non-empty list needs a heading; the model must name what it's working towards.
+            if !new_items.is_empty() && title.is_none() {
+                return Ok(ToolOutput::text(
+                    "todo: a `title` is required when creating or replacing the task list"
+                        .to_string(),
+                    true,
+                ));
+            }
+            state.title = title.map(str::to_string);
+            state.items = new_items;
+        } else if let Some(title) = title {
+            // Rename without rebuilding the list.
+            state.title = Some(title.to_string());
+        }
+
+        if let Some(set) = parsed.set {
+            let len = state.items.len();
+            // Validate every key before mutating so a single bad id leaves the list untouched.
+            let mut patches = Vec::with_capacity(set.len());
+            for (key, status) in set {
+                match key.parse::<usize>() {
+                    Ok(id) if (1..=len).contains(&id) => patches.push((id, status)),
+                    _ => {
+                        return Ok(ToolOutput::text(
+                            format!(
+                                "todo set: '{}' is not a valid task number (the list has {} \
+                                 task{})",
+                                key,
+                                len,
+                                if len == 1 { "" } else { "s" }
+                            ),
+                            true,
+                        ));
+                    }
                 }
-            })?;
+            }
+            for (id, status) in patches {
+                if let Some(item) = state.items.get_mut(id - 1) {
+                    item.status = status;
+                }
+            }
+        }
 
-        let count = tasks.len();
-        *self.todo_list.write().await = tasks;
-
-        Ok(ToolOutput::text(
-            format!("Task list updated ({} tasks)", count),
-            false,
-        ))
+        Ok(ToolOutput::text(format_todo_state(&state), false))
     }
 }
 
-pub(super) struct TodoReadTool {
-    pub todo_list: SharedTodoList,
-}
+/// Render the task list as plain text (no ANSI), used both as the `todo` tool result echoed to the
+/// model and in the per-turn / post-compaction context blocks. Terminal colouring lives separately
+/// in `render::render_todo_list`.
+pub fn format_todo_state(state: &TodoState) -> String {
+    if state.items.is_empty() {
+        return "(no tasks)\n".to_string();
+    }
 
-#[async_trait]
-impl Tool for TodoReadTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_read".to_string(),
-            description: "Read the current task list. Returns an empty list if no tasks have \
-                          been written. Use this to check progress before deciding the next step."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-            ..Default::default()
+    // Heading is `TODO: <title>` (defensive fallback when somehow absent), followed by a blank line
+    // and the tasks as a markdown checklist.
+    let title = state.title.as_deref().unwrap_or("Tasks");
+    let mut output = format!("TODO: {}\n\n", title);
+
+    for (index, item) in state.items.iter().enumerate() {
+        let number = index + 1;
+        let marker = match item.status {
+            TodoStatus::Pending => "[ ]",
+            TodoStatus::InProgress => "[~]",
+            TodoStatus::Completed => "[x]",
+            TodoStatus::Cancelled => "[-]",
+        };
+        if item.status == TodoStatus::Cancelled {
+            output.push_str(&format!(
+                "- {} {} (cancelled) {}\n",
+                marker, number, item.text
+            ));
+        } else {
+            output.push_str(&format!("- {} {} {}\n", marker, number, item.text));
         }
     }
 
-    fn required_permission(&self) -> Permission {
-        Permission::Read
+    // Soft-invariant footer: report violations of the "exactly one in_progress" convention without
+    // blocking the call. The model self-corrects on its next update.
+    let in_progress: Vec<usize> = state
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.status == TodoStatus::InProgress)
+        .map(|(index, _)| index + 1)
+        .collect();
+    if in_progress.len() > 1 {
+        let ids = in_progress
+            .iter()
+            .map(|id| format!("#{}", id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!(
+            "(!) tasks {} are all in_progress — keep exactly one in_progress at a time\n",
+            ids
+        ));
+    } else if in_progress.is_empty()
+        && state
+            .items
+            .iter()
+            .any(|item| item.status == TodoStatus::Pending)
+    {
+        output.push_str("(!) no task in_progress — set the next task to in_progress\n");
     }
 
-    async fn execute(
-        &self,
-        _input: serde_json::Value,
-        _cancellation: CancellationToken,
-    ) -> Result<ToolOutput> {
-        let items = self.todo_list.read().await;
-        let text = if items.is_empty() {
-            "[Current task list]\n(empty)\n".to_string()
-        } else {
-            format_todo_for_context(&items)
-        };
-        Ok(ToolOutput::text(text, false))
-    }
-}
-
-pub fn format_todo_for_context(items: &[TodoItem]) -> String {
-    let mut output = String::from("[Current task list]\n");
-    for item in items {
-        let marker = match item.status {
-            TodoStatus::Done => "[x]",
-            TodoStatus::InProgress => "[~]",
-            TodoStatus::Pending => "[ ]",
-        };
-        output.push_str(&format!("{} {} - {}\n", marker, item.id, item.description));
-    }
-    output.push('\n');
     output
 }
 
@@ -169,82 +310,57 @@ mod tests {
     use crate::tools::tests::text_content;
 
     fn test_list() -> SharedTodoList {
-        Arc::new(RwLock::new(Vec::new()))
+        Arc::new(RwLock::new(TodoState::default()))
+    }
+
+    fn tool() -> (TodoTool, SharedTodoList) {
+        let list = test_list();
+        (
+            TodoTool {
+                todo_list: list.clone(),
+            },
+            list,
+        )
     }
 
     #[tokio::test]
-    async fn test_todo_write() {
-        let list = test_list();
-        let tool = TodoWriteTool {
-            todo_list: list.clone(),
-        };
-
+    async fn test_empty_call_reads() {
+        let (tool, _list) = tool();
         let result = tool
-            .execute(
-                serde_json::json!({
-                    "tasks": [
-                        {"id": "1", "description": "First task", "status": "pending"},
-                        {"id": "2", "description": "Second task", "status": "done"}
-                    ]
-                }),
-                CancellationToken::new(),
-            )
+            .execute(serde_json::json!({}), CancellationToken::new())
             .await
-            .expect("should succeed");
-
+            .expect("empty call should succeed");
         assert!(!result.is_error);
-        assert!(text_content(&result).contains("2 tasks"));
-
-        let items = list.read().await;
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].status, TodoStatus::Pending);
-        assert_eq!(items[1].status, TodoStatus::Done);
+        assert!(text_content(&result).contains("(no tasks)"));
     }
 
     #[tokio::test]
-    async fn test_todo_write_rejects_unknown_status() {
-        let list = test_list();
-        let tool = TodoWriteTool {
-            todo_list: list.clone(),
-        };
-
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "tasks": [{"id": "1", "description": "x", "status": "bogus"}]
-                }),
-                CancellationToken::new(),
-            )
-            .await;
-
-        assert!(
-            result.is_err(),
-            "an unrecognized status must fail the write"
-        );
-        assert!(list.read().await.is_empty(), "list must be untouched");
-    }
-
-    #[tokio::test]
-    async fn test_todo_write_replaces_list() {
-        let list = test_list();
-        let tool = TodoWriteTool {
-            todo_list: list.clone(),
-        };
-
+    async fn test_items_as_strings_default_pending() {
+        let (tool, list) = tool();
         tool.execute(
-            serde_json::json!({
-                "tasks": [{"id": "1", "description": "Old", "status": "pending"}]
-            }),
+            serde_json::json!({ "title": "Setup", "items": ["First", "Second"] }),
             CancellationToken::new(),
         )
         .await
         .expect("should succeed");
 
+        let state = list.read().await;
+        assert_eq!(state.title.as_deref(), Some("Setup"));
+        assert_eq!(state.items.len(), 2);
+        assert_eq!(state.items[0].text, "First");
+        assert_eq!(state.items[0].status, TodoStatus::Pending);
+        assert_eq!(state.items[1].status, TodoStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_items_as_objects_honor_status() {
+        let (tool, list) = tool();
         tool.execute(
             serde_json::json!({
-                "tasks": [
-                    {"id": "a", "description": "New A", "status": "in_progress"},
-                    {"id": "b", "description": "New B", "status": "done"}
+                "title": "Work",
+                "items": [
+                    {"text": "A", "status": "in_progress"},
+                    {"text": "B"}
                 ]
             }),
             CancellationToken::new(),
@@ -252,92 +368,230 @@ mod tests {
         .await
         .expect("should succeed");
 
-        let items = list.read().await;
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].id, "a");
-        assert_eq!(items[1].id, "b");
+        let state = list.read().await;
+        assert_eq!(state.items[0].status, TodoStatus::InProgress);
+        assert_eq!(state.items[1].status, TodoStatus::Pending);
     }
 
     #[tokio::test]
-    async fn test_todo_read_empty() {
-        let list = test_list();
-        let tool = TodoReadTool {
-            todo_list: list.clone(),
-        };
+    async fn test_status_aliases() {
+        let (tool, list) = tool();
+        tool.execute(
+            serde_json::json!({
+                "title": "Work",
+                "items": [
+                    {"text": "A", "status": "done"},
+                    {"text": "B", "status": "wip"},
+                    {"text": "C", "status": "skipped"}
+                ]
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
 
+        let state = list.read().await;
+        assert_eq!(state.items[0].status, TodoStatus::Completed);
+        assert_eq!(state.items[1].status, TodoStatus::InProgress);
+        assert_eq!(state.items[2].status, TodoStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_title_required_when_building() {
+        let (tool, list) = tool();
         let result = tool
-            .execute(serde_json::json!({}), CancellationToken::new())
-            .await
-            .expect("should succeed");
-
-        assert!(!result.is_error);
-        let text = text_content(&result);
-        assert!(text.contains("[Current task list]"));
-        assert!(text.contains("(empty)"));
-    }
-
-    #[tokio::test]
-    async fn test_todo_read_after_write() {
-        let list = test_list();
-        let writer = TodoWriteTool {
-            todo_list: list.clone(),
-        };
-        let reader = TodoReadTool {
-            todo_list: list.clone(),
-        };
-
-        writer
             .execute(
-                serde_json::json!({
-                    "tasks": [
-                        {"id": "1", "description": "Plan", "status": "in_progress"},
-                        {"id": "2", "description": "Execute", "status": "pending"}
-                    ]
-                }),
+                serde_json::json!({ "items": ["A", "B"] }),
                 CancellationToken::new(),
             )
             .await
-            .expect("write should succeed");
+            .expect("call returns is_error, not Err");
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("title"));
+        assert!(list.read().await.items.is_empty(), "list must be untouched");
+    }
 
-        let result = reader
-            .execute(serde_json::json!({}), CancellationToken::new())
+    #[tokio::test]
+    async fn test_title_persists_across_set() {
+        let (tool, list) = tool();
+        tool.execute(
+            serde_json::json!({ "title": "Refactor", "items": ["A", "B"] }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+        tool.execute(
+            serde_json::json!({ "set": {"1": "completed"} }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+        assert_eq!(list.read().await.title.as_deref(), Some("Refactor"));
+    }
+
+    #[tokio::test]
+    async fn test_set_patches_by_position() {
+        let (tool, list) = tool();
+        tool.execute(
+            serde_json::json!({ "title": "Work", "items": ["A", "B", "C"] }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+        tool.execute(
+            serde_json::json!({ "set": {"1": "completed", "2": "in_progress"} }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+
+        let state = list.read().await;
+        assert_eq!(state.items[0].status, TodoStatus::Completed);
+        assert_eq!(state.items[1].status, TodoStatus::InProgress);
+        assert_eq!(state.items[2].status, TodoStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_set_out_of_range_is_error_and_no_mutation() {
+        let (tool, list) = tool();
+        tool.execute(
+            serde_json::json!({ "title": "Work", "items": ["A"] }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+        let result = tool
+            .execute(
+                serde_json::json!({ "set": {"9": "completed"} }),
+                CancellationToken::new(),
+            )
             .await
-            .expect("read should succeed");
+            .expect("call returns is_error, not Err");
 
-        let text = text_content(&result);
-        assert!(text.contains("[~] 1 - Plan"));
-        assert!(text.contains("[ ] 2 - Execute"));
+        assert!(result.is_error);
+        assert!(text_content(&result).contains("valid task number"));
+        assert_eq!(list.read().await.items[0].status, TodoStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_set_non_numeric_key_is_error() {
+        let (tool, _list) = tool();
+        tool.execute(
+            serde_json::json!({ "title": "Work", "items": ["A"] }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+        let result = tool
+            .execute(
+                serde_json::json!({ "set": {"abc": "completed"} }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns is_error, not Err");
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_items_then_set_precedence_in_one_call() {
+        let (tool, list) = tool();
+        tool.execute(
+            serde_json::json!({
+                "title": "Work",
+                "items": ["A", "B", "C"],
+                "set": {"2": "completed"}
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+
+        let state = list.read().await;
+        assert_eq!(state.items.len(), 3);
+        assert_eq!(state.items[1].status, TodoStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_rejects_unknown_status() {
+        let (tool, list) = tool();
+        let result = tool
+            .execute(
+                serde_json::json!({ "title": "Work", "items": [{"text": "x", "status": "bogus"}] }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns is_error, not Err");
+        assert!(result.is_error);
+        assert!(list.read().await.items.is_empty(), "list must be untouched");
     }
 
     #[test]
-    fn test_format_todo_for_context() {
-        let items = vec![
-            TodoItem {
-                id: "1".to_string(),
-                description: "Do something".to_string(),
+    fn test_format_heading_and_markers() {
+        let state = TodoState {
+            title: Some("My tasks".to_string()),
+            items: vec![
+                TodoItem {
+                    text: "Pending one".to_string(),
+                    status: TodoStatus::Pending,
+                },
+                TodoItem {
+                    text: "Working".to_string(),
+                    status: TodoStatus::InProgress,
+                },
+                TodoItem {
+                    text: "Finished".to_string(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    text: "Dropped".to_string(),
+                    status: TodoStatus::Cancelled,
+                },
+            ],
+        };
+        let output = format_todo_state(&state);
+        // Heading is `TODO: <title>` on its own line, followed by a blank line; tasks are a
+        // markdown checklist with no progress count.
+        assert!(output.starts_with("TODO: My tasks\n\n"));
+        assert!(!output.contains("done"));
+        assert!(output.contains("- [ ] 1 Pending one"));
+        assert!(output.contains("- [~] 2 Working"));
+        assert!(output.contains("- [x] 3 Finished"));
+        assert!(output.contains("- [-] 4 (cancelled) Dropped"));
+    }
+
+    #[test]
+    fn test_format_soft_invariant_multiple_in_progress() {
+        let state = TodoState {
+            items: vec![
+                TodoItem {
+                    text: "A".to_string(),
+                    status: TodoStatus::InProgress,
+                },
+                TodoItem {
+                    text: "B".to_string(),
+                    status: TodoStatus::InProgress,
+                },
+            ],
+            ..Default::default()
+        };
+        let output = format_todo_state(&state);
+        assert!(output.contains("(!) tasks #1, #2 are all in_progress"));
+    }
+
+    #[test]
+    fn test_format_soft_invariant_none_in_progress() {
+        let state = TodoState {
+            items: vec![TodoItem {
+                text: "A".to_string(),
                 status: TodoStatus::Pending,
-            },
-            TodoItem {
-                id: "2".to_string(),
-                description: "Working on it".to_string(),
-                status: TodoStatus::InProgress,
-            },
-            TodoItem {
-                id: "3".to_string(),
-                description: "Already done".to_string(),
-                status: TodoStatus::Done,
-            },
-        ];
-
-        let output = format_todo_for_context(&items);
-        assert!(output.contains("[ ] 1 - Do something"));
-        assert!(output.contains("[~] 2 - Working on it"));
-        assert!(output.contains("[x] 3 - Already done"));
+            }],
+            ..Default::default()
+        };
+        assert!(format_todo_state(&state).contains("(!) no task in_progress"));
     }
 
     #[test]
-    fn test_format_todo_empty() {
-        let output = format_todo_for_context(&[]);
-        assert!(output.contains("[Current task list]"));
+    fn test_format_empty() {
+        assert!(format_todo_state(&TodoState::default()).contains("(no tasks)"));
     }
 }

@@ -7,7 +7,7 @@ meka uses a four-level permission system to control what tools the agent can use
 | Level | Indicator | Allowed Tools |
 |-------|-----------|---------------|
 | **None** | `[n]` (green) | No tools. The agent can only respond with text. |
-| **Read** | `[r]` (yellow) | Read-only tools: `read_file`, `find_files`, `search_contents`, `fetch_url`, `web_search`, `execute_command` (sandboxed), `todo_write`, `todo_read`, `spawn_agent`, scratchpad tools |
+| **Read** | `[r]` (yellow) | Read-only tools: `read_file`, `find_files`, `search_contents`, `fetch_url`, `web_search`, `execute_command` (sandboxed), `todo`, `spawn_agent`, scratchpad tools |
 | **Ask** | `[a]` (magenta) | All tools, but each call requires user approval (Y/n prompt) |
 | **Write** | `[w]` (red) | All tools without restrictions: `write_file`, `edit_file`, `execute_command` (unsandboxed) |
 

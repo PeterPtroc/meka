@@ -137,6 +137,10 @@ pub struct Agent {
     shared_permission: SharedPermission,
     options: AgentOptions,
     todo_list: SharedTodoList,
+    /// Last todo state pushed to the frontend, so a no-op `todo` call (e.g. a read with no
+    /// arguments, or a rewrite that changes nothing) doesn't re-render the list. Private to this
+    /// `Agent`; sub-agents route through `Agent::new` and so get their own.
+    last_rendered_todo: tokio::sync::RwLock<Option<crate::tools::todo::TodoState>>,
     shared_session_id: Arc<tokio::sync::RwLock<Option<uuid::Uuid>>>,
     /// Shared skill cache. Re-checks the on-disk snapshot at the top of each turn and re-discovers
     /// when something changed, so adds / removes / frontmatter edits land without restart.
@@ -188,6 +192,7 @@ impl Agent {
             shared_permission,
             options,
             todo_list,
+            last_rendered_todo: tokio::sync::RwLock::new(None),
             shared_session_id,
             skills,
             frontend,
@@ -901,13 +906,13 @@ impl Agent {
         let outputs = futures::future::join_all(futures).await;
 
         // Serial pass to accumulate scratchpad hints, emit per-tool completion events in source
-        // order, build ToolResult blocks, and emit a single TodoListUpdated event if any todo_write
-        // call landed.
+        // order, build ToolResult blocks, and emit a single TodoListUpdated event if any `todo`
+        // call landed and actually changed the rendered state.
         let mut results = Vec::with_capacity(planned.len());
-        let mut todo_write_fired = false;
+        let mut todo_fired = false;
         for ((id, name, _), output) in planned.into_iter().zip(outputs) {
-            if name == "todo_write" && !self.todo_list.read().await.is_empty() {
-                todo_write_fired = true;
+            if name == "todo" {
+                todo_fired = true;
             }
             if let Some(hint) = output.scratchpad_hint.clone() {
                 self.scratchpad_hints.write().await.insert(id.clone(), hint);
@@ -929,11 +934,28 @@ impl Agent {
                 is_error: output.is_error,
             });
         }
-        if todo_write_fired {
-            let items = self.todo_list.read().await.clone();
-            self.frontend
-                .emit(FrontendEvent::TodoListUpdated(items))
-                .await;
+        if todo_fired {
+            let state = self.todo_list.read().await.clone();
+            // Suppress re-renders for reads and rewrites that change nothing. Drop the guard before
+            // awaiting the emit.
+            let should_emit = {
+                let mut last = self.last_rendered_todo.write().await;
+                let changed = last.as_ref() != Some(&state);
+                if changed {
+                    *last = Some(state.clone());
+                }
+                // An empty list renders nothing, so emitting it would be a no-op event that also
+                // corrupts REPL spacing; require something to show.
+                !state.items.is_empty() && changed
+            };
+            if should_emit {
+                self.frontend
+                    .emit(FrontendEvent::TodoListUpdated {
+                        title: state.title,
+                        items: state.items,
+                    })
+                    .await;
+            }
         }
 
         results

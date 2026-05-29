@@ -71,7 +71,7 @@ The agent has access to the following built-in tools:
 - **FetchUrl**: fetch and read web page content
 - **WebSearch**: search the web for up-to-date information
 - **Scratchpad**: session-scoped working memory for intermediate results
-- **Todo**: structured task tracking (read and write) for multi-step work
+- **Todo**: structured task tracking for multi-step work, with live progress display
 - **SpawnAgent**: delegate research tasks to a read-only sub-agent
 - **Skill**: load reusable prompt templates on demand
 - **RenderImage**: render an image into the conversation for vision-capable models

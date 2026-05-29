@@ -147,7 +147,7 @@ pub fn translate(
         ),
         // Metadata-only events: the recorder captures them for the blocking JSON / terminal
         // SSE payload but they don't get their own wire events.
-        FrontendEvent::TodoListUpdated(_)
+        FrontendEvent::TodoListUpdated { .. }
         | FrontendEvent::TokenUsage(_)
         | FrontendEvent::McpProgress(_) => return None,
         FrontendEvent::Notice(notice) => (SseEventType::Notice, notice_view(notice)),

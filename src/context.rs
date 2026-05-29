@@ -11,7 +11,7 @@ use crate::{
     permission::Permission,
     session::ToolOutputSummary,
     skills::Skill,
-    tools::todo::{self, TodoItem},
+    tools::todo::{self, TodoState},
 };
 
 /// A tool's entry in the catalogue rendered into the system prompt. Tuple:
@@ -380,15 +380,15 @@ pub fn build_environment_context(permission: Permission, cwd: &std::path::Path) 
 /// included so the model sees the current level on every turn.
 pub fn build_turn_context(
     permission: Permission,
-    todos: &[TodoItem],
+    todos: &TodoState,
     cwd: &std::path::Path,
 ) -> String {
     let mut sections = Vec::new();
 
     sections.push(build_permission_context(permission));
 
-    if !todos.is_empty() {
-        sections.push(todo::format_todo_for_context(todos));
+    if !todos.items.is_empty() {
+        sections.push(todo::format_todo_state(todos));
     }
 
     let environment_context = build_environment_context(permission, cwd);
@@ -403,7 +403,7 @@ pub fn build_turn_context(
 /// scratchpad inventory) that must persist across the compacted message window.
 pub fn build_post_compact_context(
     permission: Permission,
-    todos: &[TodoItem],
+    todos: &TodoState,
     scratchpad_entries: &[ToolOutputSummary],
     cwd: &std::path::Path,
 ) -> String {
@@ -414,8 +414,8 @@ pub fn build_post_compact_context(
         parts.push(env);
     }
 
-    if !todos.is_empty() {
-        parts.push(todo::format_todo_for_context(todos));
+    if !todos.items.is_empty() {
+        parts.push(todo::format_todo_state(todos));
     }
 
     if !scratchpad_entries.is_empty() {
@@ -449,10 +449,9 @@ mod tests {
         }
     }
 
-    fn sample_todo(id: &str, description: &str, status: todo::TodoStatus) -> TodoItem {
-        TodoItem {
-            id: id.to_string(),
-            description: description.to_string(),
+    fn sample_todo(text: &str, status: todo::TodoStatus) -> todo::TodoItem {
+        todo::TodoItem {
+            text: text.to_string(),
             status,
         }
     }
@@ -859,7 +858,11 @@ mod tests {
 
     #[test]
     fn test_turn_context_always_has_permission_context() {
-        let context = build_turn_context(Permission::None, &[], std::path::Path::new("."));
+        let context = build_turn_context(
+            Permission::None,
+            &TodoState::default(),
+            std::path::Path::new("."),
+        );
         assert!(context.starts_with("<context>\n"));
         assert!(context.ends_with("</context>"));
         assert!(context.contains("[Permission context]"));
@@ -867,18 +870,21 @@ mod tests {
 
     #[test]
     fn test_turn_context_has_environment_in_read_mode() {
-        let context = build_turn_context(Permission::Read, &[], std::path::Path::new("."));
+        let context = build_turn_context(
+            Permission::Read,
+            &TodoState::default(),
+            std::path::Path::new("."),
+        );
         assert!(context.contains("[Permission context]"));
         assert!(context.contains("[Environment context]"));
     }
 
     #[test]
     fn test_turn_context_includes_todos() {
-        let todos = vec![sample_todo(
-            "1",
-            "write tests",
-            todo::TodoStatus::InProgress,
-        )];
+        let todos = TodoState {
+            items: vec![sample_todo("write tests", todo::TodoStatus::InProgress)],
+            ..Default::default()
+        };
         let context = build_turn_context(Permission::Read, &todos, std::path::Path::new("."));
         assert!(context.contains("write tests"));
         assert!(context.contains("[Environment context]"));
@@ -887,7 +893,10 @@ mod tests {
 
     #[test]
     fn test_turn_context_none_mode_omits_environment() {
-        let todos = vec![sample_todo("1", "do a thing", todo::TodoStatus::Pending)];
+        let todos = TodoState {
+            items: vec![sample_todo("do a thing", todo::TodoStatus::Pending)],
+            ..Default::default()
+        };
         let context = build_turn_context(Permission::None, &todos, std::path::Path::new("."));
         assert!(context.contains("do a thing"));
         assert!(context.contains("[Permission context]"));
@@ -896,14 +905,21 @@ mod tests {
 
     #[test]
     fn test_post_compact_context_empty_in_none_mode_no_state() {
-        let result =
-            build_post_compact_context(Permission::None, &[], &[], std::path::Path::new("."));
+        let result = build_post_compact_context(
+            Permission::None,
+            &TodoState::default(),
+            &[],
+            std::path::Path::new("."),
+        );
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_post_compact_context_includes_env_todos_scratchpad() {
-        let todos = vec![sample_todo("1", "keep working", todo::TodoStatus::Pending)];
+        let todos = TodoState {
+            items: vec![sample_todo("keep working", todo::TodoStatus::Pending)],
+            ..Default::default()
+        };
         let entries = vec![sample_scratchpad_entry("notes", 1024)];
         let result = build_post_compact_context(
             Permission::Read,
@@ -920,8 +936,12 @@ mod tests {
     #[test]
     fn test_post_compact_context_scratchpad_only() {
         let entries = vec![sample_scratchpad_entry("log", 500)];
-        let result =
-            build_post_compact_context(Permission::None, &[], &entries, std::path::Path::new("."));
+        let result = build_post_compact_context(
+            Permission::None,
+            &TodoState::default(),
+            &entries,
+            std::path::Path::new("."),
+        );
         assert!(result.contains("[Scratchpad entries]"));
         assert!(result.contains("\"log\""));
         assert!(!result.contains("[Environment context]"));

@@ -14,8 +14,7 @@ Tools are the actions that the agent can perform on your behalf. The LLM decides
 | [`fetch_url`](./web.md#fetch_url) | Read | Fetch a web page as markdown |
 | [`web_search`](./web.md#web_search) | Read | Search the web |
 | [`execute_command`](./shell.md#execute_command) | Read/Write | Run a shell command |
-| [`todo_write`](./overview.md#todo_write) | Read | Manage a structured task list |
-| [`todo_read`](./overview.md#todo_read) | Read | Read the current task list |
+| [`todo`](./overview.md#todo) | Read | Manage and read a structured task list |
 | [`spawn_agent`](./overview.md#spawn_agent) | Read | Delegate tasks to a sub-agent |
 | [`scratchpad_write`](./scratchpad.md#scratchpad_write) | Read | Store content in the scratchpad |
 | [`scratchpad_read`](./scratchpad.md#scratchpad_read) | Read | Read a scratchpad entry |
@@ -32,7 +31,7 @@ Tools are grouped by the minimum permission level required:
 **Read permission** (available in read, ask, and write modes):
 - `read_file`, `find_files`, `search_contents`, `fetch_url`, `web_search`
 - `execute_command` (sandboxed, filesystem write-protected)
-- `todo_write`, `todo_read`, `spawn_agent`, `skill`, `render_image`
+- `todo`, `spawn_agent`, `skill`, `render_image`
 - All scratchpad tools
 
 **Write permission** (only available in write mode):
@@ -81,17 +80,21 @@ execute_command({"command": "pdftotext doc.pdf -", "scratchpad": "pdf_text"})
 
 Tool calls and their results are displayed in the terminal so you can see what the agent is doing.
 
-## `todo_write`
+## `todo`
 
-A built-in tool for managing a structured task list during a session. The agent uses this to track multi-step work and communicate progress. The task list is displayed in the terminal (for the main agent) and injected into the conversation context each turn. Calling `todo_write` replaces the entire list each time.
+A built-in tool for managing a structured task list during a session. The agent uses it to track multi-step work and communicate progress; the list is displayed in the terminal (for the main agent) and injected into the conversation context each turn. Every call returns the full current list (with task numbers), so the agent never needs a separate read.
 
-## `todo_read`
+Inputs (all optional):
 
-Reads the current task list and returns it as plain text. The main agent normally sees the latest list via the per-turn context block, so `todo_read` mostly matters for sub-agents (whose context isn't re-injected mid-loop), but it's available to any agent that wants to fetch its current list explicitly.
+- `title` — a short heading summarizing the overall goal; rendered as the list's heading (`TODO: <title>`). **Required whenever you pass `items`**, and persists across later `set` updates.
+- `items` — replace the whole list. Each entry is a task string (status defaults to `pending`) or an object `{text, status}`. Tasks are numbered `1..N` in order.
+- `set` — a sparse status update keyed by task number, e.g. `{"1": "completed", "2": "in_progress"}`. This is the common path while working.
+
+Task statuses are `pending`, `in_progress`, `completed`, and `cancelled`. Calling `todo` with no arguments simply reads the current list.
 
 ## `spawn_agent`
 
-Spawns a sub-agent to perform research, analysis, or any other delegated task. The sub-agent inherits the parent's permission level, gets its own private todo list (`todo_write` / `todo_read` operate on the sub-agent's own state), and cannot recursively spawn further sub-agents. The sub-agent runs silently (its tool calls are not surfaced to the terminal) and returns a single text report. Use this to keep exploratory or speculative work out of the main conversation context.
+Spawns a sub-agent to perform research, analysis, or any other delegated task. The sub-agent inherits the parent's permission level, gets its own private todo list (`todo` operates on the sub-agent's own state), and cannot recursively spawn further sub-agents. The sub-agent runs silently (its tool calls are not surfaced to the terminal) and returns a single text report. Use this to keep exploratory or speculative work out of the main conversation context.
 
 Multiple `spawn_agent` calls in one assistant turn run in parallel; useful when independent investigations can proceed concurrently.
 

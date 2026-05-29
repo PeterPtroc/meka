@@ -552,13 +552,13 @@ where
 /// MCP-loaded tools (named `mcp__server__tool`) and anything unknown fall through to `Other`.
 fn tool_kind_for(name: &str) -> ToolKind {
     match name {
-        "read_file" | "todo_read" => ToolKind::Read,
+        "read_file" | "todo" => ToolKind::Read,
         "edit_file" | "write_file" => ToolKind::Edit,
         "find_files" | "search_contents" => ToolKind::Search,
         "execute_command" => ToolKind::Execute,
         "fetch_url" | "web_search" => ToolKind::Fetch,
         "spawn_agent" => ToolKind::Think,
-        // skill, scratchpad_*, render_image, todo_write, load_tool, mcp__*, and any future
+        // skill, scratchpad_*, render_image, load_tool, mcp__*, and any future
         // built-ins.
         _ => ToolKind::Other,
     }

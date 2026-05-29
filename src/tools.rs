@@ -140,8 +140,7 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "search_contents",
     "skill",
     "spawn_agent",
-    "todo_read",
-    "todo_write",
+    "todo",
     "web_search",
     "write_file",
 ];
@@ -559,10 +558,7 @@ impl ToolRegistry {
             session_id: shared_session_id.clone(),
             session_manager: session_manager.clone(),
         }));
-        self.register_builtin(Arc::new(todo::TodoWriteTool {
-            todo_list: todo_list.clone(),
-        }));
-        self.register_builtin(Arc::new(todo::TodoReadTool { todo_list }));
+        self.register_builtin(Arc::new(todo::TodoTool { todo_list }));
         self.register_builtin(Arc::new(scratchpad::ScratchpadWriteTool {
             session_manager: session_manager.clone(),
             session_id: shared_session_id.clone(),
@@ -721,7 +717,7 @@ pub(crate) mod tests {
     }
 
     fn test_todo_list() -> todo::SharedTodoList {
-        Arc::new(RwLock::new(Vec::new()))
+        Arc::new(RwLock::new(todo::TodoState::default()))
     }
 
     async fn test_registry() -> ToolRegistry {
@@ -1012,7 +1008,7 @@ pub(crate) mod tests {
         assert!(registry.get("execute_command").is_some());
         assert!(registry.get("fetch_url").is_some());
         assert!(registry.get("web_search").is_some());
-        assert!(registry.get("todo_write").is_some());
+        assert!(registry.get("todo").is_some());
         assert!(registry.get("scratchpad_write").is_some());
         assert!(registry.get("scratchpad_read").is_some());
         assert!(registry.get("scratchpad_edit").is_some());
@@ -1402,8 +1398,7 @@ pub(crate) mod tests {
         .expect("default web client config should build cleanly");
         assert!(registry.get("read_file").is_some());
         assert!(registry.get("web_search").is_none());
-        assert!(registry.get("todo_write").is_some());
-        assert!(registry.get("todo_read").is_some());
+        assert!(registry.get("todo").is_some());
         assert!(registry.get("spawn_agent").is_none());
     }
 
@@ -1422,8 +1417,7 @@ pub(crate) mod tests {
             "execute_command",
             "fetch_url",
             "web_search",
-            "todo_write",
-            "todo_read",
+            "todo",
             "scratchpad_read",
             "scratchpad_write",
             "scratchpad_edit",

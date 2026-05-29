@@ -1519,7 +1519,9 @@ mod tests {
         let shared_permission =
             SharedPermission::new(Permission::Read, crate::permission::EnabledPermissions::ALL);
         let shared_session_id = std::sync::Arc::new(tokio::sync::RwLock::new(None));
-        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::todo::TodoState::default(),
+        ));
         let registry = ToolRegistry::build_default(
             crate::config::WebClientConfig::default(),
             shared_permission,
@@ -1548,7 +1550,11 @@ mod tests {
         let tools = registry.definitions_active(&[]);
 
         let u1_text = {
-            let block = build_turn_context(Permission::Read, &[], std::path::Path::new("."));
+            let block = build_turn_context(
+                Permission::Read,
+                &crate::tools::todo::TodoState::default(),
+                std::path::Path::new("."),
+            );
             format!("{}\n\n{}", block, "list files under /tmp")
         };
         let messages_t1 = vec![Message::user(&u1_text)];
@@ -1563,7 +1569,11 @@ mod tests {
         let tools_t2 = registry.definitions_active(&[]);
 
         let u2_text = {
-            let block = build_turn_context(Permission::Write, &[], std::path::Path::new("."));
+            let block = build_turn_context(
+                Permission::Write,
+                &crate::tools::todo::TodoState::default(),
+                std::path::Path::new("."),
+            );
             format!("{}\n\n{}", block, "now write 'hi' to /tmp/out.txt")
         };
         let messages_t2 = vec![
@@ -1625,7 +1635,9 @@ mod tests {
             crate::permission::EnabledPermissions::ALL,
         );
         let shared_session_id = std::sync::Arc::new(tokio::sync::RwLock::new(None));
-        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::todo::TodoState::default(),
+        ));
         let registry = ToolRegistry::build_default(
             crate::config::WebClientConfig::default(),
             shared_permission,
@@ -1655,7 +1667,11 @@ mod tests {
 
         // Turn 1: empty history, fixture_deferred not yet exposed.
         let u1_text = {
-            let block = build_turn_context(Permission::Write, &[], std::path::Path::new("."));
+            let block = build_turn_context(
+                Permission::Write,
+                &crate::tools::todo::TodoState::default(),
+                std::path::Path::new("."),
+            );
             format!("{}\n\n{}", block, "investigate scratchpad")
         };
         let messages_t1 = vec![Message::user(&u1_text)];
@@ -1754,7 +1770,9 @@ mod tests {
             crate::permission::EnabledPermissions::ALL,
         );
         let shared_session_id = std::sync::Arc::new(tokio::sync::RwLock::new(None));
-        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::todo::TodoState::default(),
+        ));
         let registry = ToolRegistry::build_default(
             crate::config::WebClientConfig::default(),
             shared_permission,
@@ -1856,7 +1874,9 @@ mod tests {
         let shared_permission =
             SharedPermission::new(Permission::Read, crate::permission::EnabledPermissions::ALL);
         let shared_session_id = std::sync::Arc::new(tokio::sync::RwLock::new(None));
-        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let todo_list = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::todo::TodoState::default(),
+        ));
         let registry = ToolRegistry::build_default(
             crate::config::WebClientConfig::default(),
             shared_permission.clone(),

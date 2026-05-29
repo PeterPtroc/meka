@@ -258,11 +258,11 @@ impl Tool for SpawnAgentTool {
         };
 
         // Build a sub-agent tool registry: no `spawn_agent` (no recursive spawning) and a fresh,
-        // private todo list so the sub-agent's todo_write / todo_read calls don't touch the
-        // parent's task tracking. Scratchpad and render_image use the new sub-session ID.
+        // private todo list so the sub-agent's `todo` calls don't touch the parent's task
+        // tracking. Scratchpad and render_image use the new sub-session ID.
         let sub_shared_perm = SharedPermission::new(sub_perm, self.parent_permission.enabled());
         let sub_todo_list: super::todo::SharedTodoList =
-            Arc::new(tokio::sync::RwLock::new(Vec::new()));
+            Arc::new(tokio::sync::RwLock::new(super::todo::TodoState::default()));
         // Snapshot the parent's cwd at sub-agent build time so a parent `/cd` mid-sub-agent
         // execution can't shift the sub-agent's path resolution mid-flight. The sub-agent's tool
         // registry sees this snapshot; `Agent::new_subagent` makes the same snapshot for
@@ -406,8 +406,10 @@ fn build_subagent_system_prompt(
         "You are a research sub-agent. Complete the assigned task using the \
          available tools, then produce a concise final report summarizing your \
          findings. Do not ask follow-up questions. Work with what you have. \
-         For multi-step work, use `todo_write` to plan and `todo_read` to \
-         check progress. Your todo list is private to this sub-agent.\n\n",
+         For multi-step work, use the `todo` tool to plan and track progress: \
+         pass `items` together with a `title` to (re)write the list, `set` to \
+         update statuses by task number, and call `todo` with no arguments to \
+         read the current list. Your todo list is private to this sub-agent.\n\n",
     );
 
     prompt.push_str(&format!("## Permission Level: {}\n\n", permission));
@@ -473,8 +475,8 @@ mod tests {
     fn test_subagent_system_prompt_mentions_todo_tools() {
         let prompt = build_subagent_system_prompt(Permission::Read, &[], None, &[]);
         assert!(
-            prompt.contains("todo_write") && prompt.contains("todo_read"),
-            "expected todo_write/todo_read mention in prompt, got: {}",
+            prompt.contains("`todo` tool"),
+            "expected todo tool mention in prompt, got: {}",
             prompt
         );
     }
@@ -550,10 +552,12 @@ mod tests {
             tools::BuiltinToolFilter,
         };
 
-        let parent_list: super::super::todo::SharedTodoList =
-            Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        let sub_list: super::super::todo::SharedTodoList =
-            Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let parent_list: super::super::todo::SharedTodoList = Arc::new(tokio::sync::RwLock::new(
+            super::super::todo::TodoState::default(),
+        ));
+        let sub_list: super::super::todo::SharedTodoList = Arc::new(tokio::sync::RwLock::new(
+            super::super::todo::TodoState::default(),
+        ));
 
         let sub_registry = ToolRegistry::build_for_subagent(
             crate::config::WebClientConfig::default(),
@@ -576,22 +580,17 @@ mod tests {
         )
         .expect("subagent registry should build");
 
-        let todo_write = sub_registry
-            .get("todo_write")
-            .expect("subagent should have todo_write");
-        todo_write
-            .execute(
-                serde_json::json!({
-                    "tasks": [{"id": "1", "description": "sub task", "status": "pending"}]
-                }),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("todo_write should succeed");
+        let todo = sub_registry.get("todo").expect("subagent should have todo");
+        todo.execute(
+            serde_json::json!({ "title": "Sub work", "items": ["sub task"] }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("todo should succeed");
 
-        assert_eq!(sub_list.read().await.len(), 1);
+        assert_eq!(sub_list.read().await.items.len(), 1);
         assert!(
-            parent_list.read().await.is_empty(),
+            parent_list.read().await.items.is_empty(),
             "parent list must remain untouched"
         );
     }

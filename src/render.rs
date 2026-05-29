@@ -929,25 +929,45 @@ pub fn render_thinking_block(thinking: &str, show_full: bool) {
     }
 }
 
-pub fn render_todo_list(items: &[crate::tools::todo::TodoItem]) {
+/// Render the todo list to stderr. Returns `true` if anything was printed, so the caller only
+/// advances `OutputSpacing` when there was actually output; an empty list prints nothing and must
+/// not claim a trailing blank line (otherwise the next text run loses its leading blank).
+pub fn render_todo_list(title: Option<&str>, items: &[crate::tools::todo::TodoItem]) -> bool {
+    use crate::tools::todo::TodoStatus;
+
     if items.is_empty() {
-        return;
+        return false;
     }
     eprintln!();
-    for item in items {
+
+    // Heading is `TODO: <title>` (defensive fallback when absent), not indented, followed by a
+    // blank line and the tasks as a markdown checklist.
+    let heading = format!("TODO: {}", title.unwrap_or("Tasks"));
+    eprintln!("{}", heading.with(Color::White).bold());
+    eprintln!();
+
+    for (index, item) in items.iter().enumerate() {
         let (marker, color) = match item.status {
-            crate::tools::todo::TodoStatus::Done => ("[x]", Color::Green),
-            crate::tools::todo::TodoStatus::InProgress => ("[~]", Color::Yellow),
-            crate::tools::todo::TodoStatus::Pending => ("[ ]", Color::DarkGrey),
+            TodoStatus::Completed => ("[x]", Color::Green),
+            TodoStatus::InProgress => ("[~]", Color::Yellow),
+            TodoStatus::Pending => ("[ ]", Color::DarkGrey),
+            TodoStatus::Cancelled => ("[-]", Color::DarkGrey),
+        };
+        let text = if item.status == TodoStatus::Cancelled {
+            format!("(cancelled) {}", item.text)
+        } else {
+            item.text.clone()
         };
         eprintln!(
-            "  {} {} {}",
+            "- {} {} {}",
             marker.with(color),
-            item.id.clone().with(Color::White),
-            item.description
+            (index + 1).to_string().with(Color::White),
+            text
         );
     }
+
     eprintln!();
+    true
 }
 
 pub fn tool_display_name_for_approval(name: &str) -> &str {
@@ -978,7 +998,7 @@ fn tool_display_name(name: &str) -> &str {
         "search_contents" => "SearchContents",
         "fetch_url" => "FetchUrl",
         "web_search" => "WebSearch",
-        "todo_write" => "TodoWrite",
+        "todo" => "Todo",
         "spawn_agent" => "SpawnAgent",
         "scratchpad_write" => "ScratchpadWrite",
         "scratchpad_read" => "ScratchpadRead",
@@ -1002,6 +1022,38 @@ fn builtin_primary_param(name: &str, input: &serde_json::Value) -> Option<String
             return Some("<inline base64>".to_string());
         }
         return None;
+    }
+
+    // `todo` has no single primary key. Surface what the agent is doing, preferring the status
+    // transitions, then the `title` of a list it is building, then the list size, and finally
+    // "read" for an argument-less read.
+    if name == "todo" {
+        if let Some(set) = input.get("set").and_then(|v| v.as_object()) {
+            let parts: Vec<String> = set
+                .iter()
+                .filter_map(|(id, status)| {
+                    status.as_str().map(|status| format!("#{} {}", id, status))
+                })
+                .collect();
+            if !parts.is_empty() {
+                return Some(parts.join(", "));
+            }
+        }
+        if let Some(title) = input.get("title").and_then(|v| v.as_str()) {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+        if let Some(items) = input.get("items").and_then(|v| v.as_array()) {
+            let count = items.len();
+            return Some(format!(
+                "{} task{}",
+                count,
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+        return Some("read".to_string());
     }
 
     let key = match name {
@@ -1074,6 +1126,53 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_builtin_primary_param_todo() {
+        // set transitions take priority.
+        assert_eq!(
+            builtin_primary_param(
+                "todo",
+                &serde_json::json!({ "title": "Build", "set": {"2": "in_progress"} })
+            )
+            .as_deref(),
+            Some("#2 in_progress")
+        );
+        // title when building a list.
+        assert_eq!(
+            builtin_primary_param(
+                "todo",
+                &serde_json::json!({ "title": "Refactor auth", "items": ["a", "b", "c"] })
+            )
+            .as_deref(),
+            Some("Refactor auth")
+        );
+        // items size as a fallback when there's no title.
+        assert_eq!(
+            builtin_primary_param("todo", &serde_json::json!({ "items": ["a", "b", "c"] }))
+                .as_deref(),
+            Some("3 tasks")
+        );
+        // empty argument-less call reads.
+        assert_eq!(
+            builtin_primary_param("todo", &serde_json::json!({})).as_deref(),
+            Some("read")
+        );
+    }
+
+    #[test]
+    fn test_render_todo_list_reports_whether_it_rendered() {
+        use crate::tools::todo::{TodoItem, TodoStatus};
+
+        // Empty list prints nothing and must report `false` so the caller leaves spacing alone.
+        assert!(!render_todo_list(None, &[]));
+
+        let items = [TodoItem {
+            text: "Do a thing".to_string(),
+            status: TodoStatus::Pending,
+        }];
+        assert!(render_todo_list(Some("My list"), &items));
+    }
 
     #[test]
     fn test_format_columns_aligns_and_leaves_last_unpadded() {

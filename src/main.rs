@@ -513,8 +513,9 @@ async fn assemble_agent(
     frontend: Arc<dyn frontend::Frontend>,
     cwd: crate::agent::SharedCwd,
 ) -> anyhow::Result<(Agent, crate::tools::ToolRegistry)> {
-    let todo_list: crate::tools::todo::SharedTodoList =
-        std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    let todo_list: crate::tools::todo::SharedTodoList = std::sync::Arc::new(
+        tokio::sync::RwLock::new(crate::tools::todo::TodoState::default()),
+    );
     let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(None));
 
@@ -1454,8 +1455,9 @@ async fn run_tools_subcommand(
                 crate::sandbox::BackendProbe::Ok(capability) => capability.clone(),
                 _ => crate::sandbox::SandboxCapability::Unavailable,
             };
-            let todo_list: crate::tools::todo::SharedTodoList =
-                std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+            let todo_list: crate::tools::todo::SharedTodoList = std::sync::Arc::new(
+                tokio::sync::RwLock::new(crate::tools::todo::TodoState::default()),
+            );
             let shared_session_id: std::sync::Arc<tokio::sync::RwLock<Option<uuid::Uuid>>> =
                 std::sync::Arc::new(tokio::sync::RwLock::new(None));
             let reference = ToolRegistry::build_default(

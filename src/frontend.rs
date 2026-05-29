@@ -223,10 +223,14 @@ pub enum FrontendEvent {
         /// render its apply-diff UI). `None` for tools that have nothing extra.
         metadata: Option<ToolOutputMetadata>,
     },
-    /// The shared todo list was just replaced via `todo_write`. Emitted by the agent loop after the
-    /// tool succeeds; the REPL renders the list and the agent's per-turn `OutputSpacing` is
-    /// advanced.
-    TodoListUpdated(Vec<TodoItem>),
+    /// The shared todo list changed via the `todo` tool. Emitted by the agent loop after the tool
+    /// succeeds and only when the rendered state actually changed; the REPL renders the list and
+    /// the agent's per-turn `OutputSpacing` is advanced. `title` is the heading the agent set
+    /// for the list.
+    TodoListUpdated {
+        title: Option<String>,
+        items: Vec<TodoItem>,
+    },
     /// End-of-turn token-usage summary.
     TokenUsage(TokenUsage),
     /// User-visible advisory surfaced by the provider layer (e.g. image redaction when the request

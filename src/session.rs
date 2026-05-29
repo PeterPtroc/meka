@@ -2758,7 +2758,11 @@ mod tests {
         permission: crate::permission::Permission,
         user_input: &str,
     ) -> String {
-        let block = crate::context::build_turn_context(permission, &[], std::path::Path::new("."));
+        let block = crate::context::build_turn_context(
+            permission,
+            &crate::tools::todo::TodoState::default(),
+            std::path::Path::new("."),
+        );
         format!("{}\n\n{}", block, user_input)
     }
 
