@@ -20,6 +20,7 @@ mod context;
 mod conversation;
 mod error;
 mod frontend;
+mod history;
 mod image;
 mod mcp;
 mod permission;
@@ -949,6 +950,7 @@ async fn run_interactive(
     let input_style = config.input_style;
     let repl_sandbox_state = crate::sandbox::SandboxState::from_config(&config);
     let repl_cwd = Arc::clone(&cwd);
+    let repl_history_db_path = Some(session_manager.database_path().to_path_buf());
     let repl_handle = tokio::task::spawn_blocking(move || {
         repl::run_repl(
             repl_permission,
@@ -959,6 +961,7 @@ async fn run_interactive(
             input_sender,
             agent_event_receiver,
             repl_cwd,
+            repl_history_db_path,
         );
     });
 

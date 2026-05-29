@@ -36,6 +36,7 @@ meka uses Emacs-style keybindings (provided by reedline).
 | Ctrl+B | Move cursor backward one character |
 | Alt+F | Move cursor forward one word |
 | Alt+B | Move cursor backward one word |
+| Up / Down | Recall the previous / next input from history |
 
 ### Editing
 
@@ -56,6 +57,14 @@ meka uses Emacs-style keybindings (provided by reedline).
 | Ctrl+D | Exit the shell (when the line is empty) |
 | Ctrl+R | Reverse incremental search through history |
 | Ctrl+L | Clear the screen |
+
+### Input History
+
+The prompts you type are saved to meka's SQLite database, so Up / Down and Ctrl+R recall what
+you typed in **any previous run**. A brand-new `meka`, a resumed `meka -c`, and the current
+session all share one history. Multi-line prompts are preserved intact, and only the most recent
+entries are kept (older ones are pruned). This input history is separate from the conversation
+shown by `/history`.
 
 ## Prompt Format
 

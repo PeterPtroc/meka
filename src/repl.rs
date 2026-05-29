@@ -10,7 +10,7 @@ use std::{
 use async_trait::async_trait;
 use crossterm::style::{Color, Stylize};
 use reedline::{
-    EditCommand, Emacs, ExternalPrinter, Highlighter, KeyCode, KeyModifiers, Prompt,
+    EditCommand, Emacs, ExternalPrinter, Highlighter, History, KeyCode, KeyModifiers, Prompt,
     PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
     Signal, StyledText, default_emacs_keybindings,
 };
@@ -99,6 +99,7 @@ impl Prompt for MekaPrompt {
 fn build_reedline_editor(
     input_style: nu_ansi_term::Style,
     printer: ExternalPrinter<String>,
+    history: Option<Box<dyn History>>,
 ) -> Reedline {
     let mut keybindings = default_emacs_keybindings();
 
@@ -121,11 +122,15 @@ fn build_reedline_editor(
     );
 
     let emacs_mode = Emacs::new(keybindings);
-    Reedline::create()
+    let mut editor = Reedline::create()
         .with_edit_mode(Box::new(emacs_mode))
         .with_highlighter(Box::new(UserInputHighlighter { style: input_style }))
         .use_bracketed_paste(true)
-        .with_external_printer(printer)
+        .with_external_printer(printer);
+    if let Some(history) = history {
+        editor = editor.with_history(history);
+    }
+    editor
 }
 
 pub enum SlashCommand {
@@ -351,6 +356,7 @@ pub fn run_repl(
     input_sender: tokio::sync::mpsc::UnboundedSender<ReplEvent>,
     agent_event_receiver: std::sync::mpsc::Receiver<AgentToReplEvent>,
     cwd: crate::agent::SharedCwd,
+    history_db_path: Option<PathBuf>,
 ) {
     // Install reedline's `ExternalPrinter` on the process-global tracing writer BEFORE the first
     // `read_line()`. From this point on, log lines (including async MCP-connect warnings that fire
@@ -359,7 +365,20 @@ pub fn run_repl(
     let printer = ExternalPrinter::default();
     RELAY.install(printer.clone());
 
-    let mut editor = build_reedline_editor(input_style, printer);
+    // Persistent, cross-session input history backed by the SQLite DB. On failure, degrade to
+    // reedline's default in-memory history rather than taking down the REPL.
+    const HISTORY_CAPACITY: usize = 5000;
+    let history: Option<Box<dyn History>> = history_db_path.and_then(|path| {
+        match crate::history::PromptHistory::open(&path, HISTORY_CAPACITY) {
+            Ok(history) => Some(Box::new(history) as Box<dyn History>),
+            Err(error) => {
+                tracing::warn!("failed to open input history database: {}", error);
+                None
+            }
+        }
+    });
+
+    let mut editor = build_reedline_editor(input_style, printer, history);
     let prompt = MekaPrompt {
         shared_permission: shared_permission.clone(),
         show_path: show_path_in_prompt,

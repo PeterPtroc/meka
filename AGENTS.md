@@ -96,3 +96,7 @@ Clap `///` doc-comments must render within 80 columns when shown via `-h`. Verif
 ## Documentation
 
 - Update the mdBook docs under `docs/book/src/` when adding or changing user-facing features, configuration options, CLI behavior, etc.
+
+## Prose style
+
+- Avoid using em dashes (`—`) in writing.

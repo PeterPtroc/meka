@@ -90,6 +90,9 @@ pub enum RenameOutcome {
 pub struct SessionManager {
     connection: Arc<Connection>,
     lock_dir: PathBuf,
+    /// Resolved path to the on-disk database (or `:memory:`). Exposed via [`Self::database_path`]
+    /// so the REPL can open a second connection for persistent input history.
+    database_path: PathBuf,
 }
 
 /// RAII handle for an exclusive per-session OS file lock. Holding this value keeps the underlying
@@ -264,21 +267,35 @@ impl SessionManager {
         // transaction to take effect.
         connection
             .call(|connection| -> rusqlite::Result<_> {
-                connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+                // WAL lets the REPL's history connection read without blocking the agent's writes;
+                // `busy_timeout` makes both connections wait briefly instead of erroring under
+                // contention. (On `:memory:` the journal_mode request is silently ignored.)
+                connection.execute_batch(
+                    "PRAGMA journal_mode = WAL;\n\
+                     PRAGMA busy_timeout = 5000;\n\
+                     PRAGMA foreign_keys = ON;",
+                )?;
                 Ok(())
             })
             .await
             .map_err(|error| {
-                MekaError::Database(format!("failed to enable foreign keys: {}", error))
+                MekaError::Database(format!("failed to set connection pragmas: {}", error))
             })?;
 
         let manager = Self {
             connection: Arc::new(connection),
             lock_dir,
+            database_path,
         };
         manager.initialize_schema().await?;
         manager.prune_orphan_lock_files().await;
         Ok(manager)
+    }
+
+    /// Resolved path to the on-disk database (or `:memory:`). The REPL opens a second synchronous
+    /// connection here for persistent input history (see [`crate::history::PromptHistory`]).
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     async fn initialize_schema(&self) -> Result<()> {
