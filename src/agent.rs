@@ -552,7 +552,7 @@ impl Agent {
                 // blocking provider call surfaces notices in its return tuple (no event channel);
                 // we forward them to the frontend here so the user sees the same advisories the
                 // streaming path emits inline via `StreamEvent::Notice`.
-                let (assistant_message, stop_reason, usage) = if self.options.streaming {
+                let (mut assistant_message, stop_reason, usage) = if self.options.streaming {
                     match self
                         .run_streaming(
                             Arc::clone(&system_prompt),
@@ -643,6 +643,24 @@ impl Agent {
                     break 'turn Err(MekaError::Interrupted);
                 }
 
+                // A non-tool turn can come back with no content blocks: Claude streams
+                // `stop_reason: "refusal"` with an empty body for hard safety refusals (and an
+                // empty `end_turn` / `max_tokens` is possible too). Without this, the turn renders
+                // as nothing and an empty content array gets persisted - which is also invalid on
+                // the next request, so it breaks resume. Synthesize a visible stand-in, surface it
+                // in the assistant's place, and persist it so the message is non-empty.
+                if !matches!(stop_reason, StopReason::ToolUse)
+                    && assistant_message.content.is_empty()
+                {
+                    let notice = empty_turn_notice(&stop_reason);
+                    self.frontend
+                        .emit(FrontendEvent::AssistantTextDelta(notice.clone()))
+                        .await;
+                    assistant_message
+                        .content
+                        .push(ContentBlock::Text { text: notice });
+                }
+
                 // Defer the assistant-message save until we know whether this iteration ends in
                 // tool_use. On tool_use the assistant + the following tool-results message are
                 // persisted in one transaction so a mid-write failure can't leave the conversation
@@ -724,7 +742,15 @@ impl Agent {
                         }
                         break 'turn match stop_reason {
                             StopReason::MaxTokens => Ok(TurnOutcome::MaxTokens),
-                            StopReason::Refusal(text) => Ok(TurnOutcome::Refusal(text)),
+                            StopReason::Refusal(text) if !text.is_empty() => {
+                                Ok(TurnOutcome::Refusal(text))
+                            }
+                            // Claude streams an empty refusal body, so fall back to the assistant
+                            // message's text (the model's own refusal, or the stand-in synthesized
+                            // above) rather than an empty refusal outcome.
+                            StopReason::Refusal(_) => {
+                                Ok(TurnOutcome::Refusal(assistant_message.text_content()))
+                            }
                             _ => Ok(TurnOutcome::EndTurn),
                         };
                     }
@@ -1369,6 +1395,26 @@ fn has_tool_results(content: &[ContentBlock]) -> bool {
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
+/// Human-readable stand-in for a terminal turn that produced no content. Claude returns an empty
+/// body with `stop_reason: "refusal"` for hard safety refusals; an empty `max_tokens` / `end_turn`
+/// can also land here. Used both as the persisted assistant text (so the message isn't empty) and
+/// as the line surfaced to the user.
+fn empty_turn_notice(stop_reason: &StopReason) -> String {
+    match stop_reason {
+        StopReason::Refusal(text) if !text.is_empty() => text.clone(),
+        StopReason::Refusal(_) => "[The model declined to respond to this request.]".to_string(),
+        StopReason::MaxTokens => {
+            "[The model reached its output limit before producing a response.]".to_string()
+        }
+        // Surface the raw reason so an unrecognised stop reason (a future `pause_turn`, a new
+        // model's reason, etc.) is visible to the user instead of being swallowed as a blank turn.
+        StopReason::Unknown(reason) => {
+            format!("[The model returned an empty response (stop reason: {reason}).]")
+        }
+        _ => "[The model returned an empty response.]".to_string(),
+    }
+}
+
 /// Preprocess message content blocks for the compaction summarizer:
 /// replace images with "[image]" markers and truncate large text blocks.
 fn strip_images_and_truncate(content: &mut [ContentBlock]) {
@@ -1424,6 +1470,22 @@ fn strip_images_and_truncate(content: &mut [ContentBlock]) {
 mod tests {
     use super::*;
     use crate::provider::ToolResultContent;
+
+    #[test]
+    fn test_empty_turn_notice_includes_unknown_stop_reason() {
+        assert_eq!(
+            empty_turn_notice(&StopReason::Refusal("custom refusal".to_string())),
+            "custom refusal"
+        );
+        assert!(
+            empty_turn_notice(&StopReason::Refusal(String::new())).contains("declined to respond")
+        );
+        assert!(empty_turn_notice(&StopReason::MaxTokens).contains("output limit"));
+        // The raw reason of an unrecognised stop reason must be surfaced, not swallowed.
+        let notice = empty_turn_notice(&StopReason::Unknown("pause_turn".to_string()));
+        assert!(notice.contains("pause_turn"), "got: {notice}");
+        assert!(empty_turn_notice(&StopReason::EndTurn).contains("empty response"));
+    }
 
     fn user_msg(text: &str) -> Message {
         Message::user(text)

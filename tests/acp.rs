@@ -4872,3 +4872,29 @@ fn acp_session_prompt_refusal_stop_reason() {
         response,
     );
 }
+
+/// An *empty* refusal: Claude streams `stop_reason: "refusal"` with no body (as fable-5 does after
+/// a search surfaces disallowed content). meka must still surface a visible stand-in message
+/// instead of a blank turn. Regression for session fad3ed41, where the turn rendered nothing and
+/// persisted an empty `[]` assistant message.
+#[test]
+fn acp_empty_refusal_surfaces_standin_message() {
+    let script = serde_json::json!([[
+        { "kind": "message_end", "stop_reason": "refusal" }
+    ]]);
+    let mut harness = AcpTestHarness::spawn(ACP_INVALID_PARAMS_CONFIG, Some(script));
+    let sid = harness.new_session();
+    let id = harness.prompt(&sid, "trigger an empty refusal");
+    let (updates, response) = harness.collect_updates(&sid, id);
+    assert_eq!(
+        response["result"]["stopReason"], "refusal",
+        "empty refusal must still surface as ACP `refusal`: {}",
+        response,
+    );
+    let dump = format!("{:?}", updates);
+    assert!(
+        dump.contains("declined to respond"),
+        "empty refusal must surface a stand-in agent_message_chunk; updates: {}",
+        dump,
+    );
+}
