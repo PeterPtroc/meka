@@ -643,15 +643,21 @@ impl Agent {
                     break 'turn Err(MekaError::Interrupted);
                 }
 
-                // A non-tool turn can come back with no content blocks: Claude streams
-                // `stop_reason: "refusal"` with an empty body for hard safety refusals (and an
-                // empty `end_turn` / `max_tokens` is possible too). Without this, the turn renders
-                // as nothing and an empty content array gets persisted - which is also invalid on
-                // the next request, so it breaks resume. Synthesize a visible stand-in, surface it
-                // in the assistant's place, and persist it so the message is non-empty.
-                if !matches!(stop_reason, StopReason::ToolUse)
-                    && assistant_message.content.is_empty()
-                {
+                // Run tools based on the *presence* of tool-call blocks, not the reported stop
+                // reason: stop reasons are advisory and providers sometimes mislabel a tool turn as
+                // a plain end, but any tool call the model made must be answered with a result or
+                // the next request is invalid. Only complete tool calls reach the content blocks,
+                // so executing whatever is present is safe.
+                let has_tool_calls = assistant_message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+
+                // A non-tool turn can come back with no content (e.g. a hard refusal). Without this
+                // it shows nothing and persists an empty content array, which is invalid on the
+                // next request and breaks resume. Surface a stand-in in the assistant's place and
+                // persist it so the message is non-empty.
+                if !has_tool_calls && assistant_message.content.is_empty() {
                     let notice = empty_turn_notice(&stop_reason);
                     self.frontend
                         .emit(FrontendEvent::AssistantTextDelta(notice.clone()))
@@ -661,99 +667,93 @@ impl Agent {
                         .push(ContentBlock::Text { text: notice });
                 }
 
-                // Defer the assistant-message save until we know whether this iteration ends in
-                // tool_use. On tool_use the assistant + the following tool-results message are
-                // persisted in one transaction so a mid-write failure can't leave the conversation
-                // with an unmatched tool_use head. On any other stop reason the assistant message
-                // stands alone and is saved on its own. The in-memory append happens immediately so
-                // the provider sees the full state on the next iteration.
+                // Append in memory now so the next iteration sees the full state; defer the DB save
+                // to the branches below (atomic with results on the tool path, standalone
+                // otherwise).
                 messages.append(assistant_message.clone());
                 let assistant_event = crate::conversation::Event::Append(assistant_message.clone());
 
-                match stop_reason {
-                    StopReason::ToolUse => {
-                        let mut tool_results = self
-                            .execute_tool_calls(&assistant_message, cancellation.clone())
-                            .await;
+                if has_tool_calls {
+                    // Surface a provider that mislabeled the stop reason - the bug this presence
+                    // check guards against.
+                    if !matches!(stop_reason, StopReason::ToolUse) {
+                        tracing::warn!(
+                            "assistant message carries tool calls but stop_reason is {:?}; executing them anyway so each tool call gets a result",
+                            stop_reason,
+                        );
+                    }
 
-                        if let Err(error) =
-                            crate::tools::scratchpad::save_explicit_scratchpad_results(
-                                &self.session_manager,
-                                sid,
-                                &assistant_message,
-                                &mut tool_results,
-                            )
-                            .await
-                        {
-                            tracing::warn!("failed to save explicit scratchpad results: {}", error);
-                        }
+                    let mut tool_results = self
+                        .execute_tool_calls(&assistant_message, cancellation.clone())
+                        .await;
 
-                        // Take the per-turn hints. This both snapshots them for the call below and
-                        // clears them, so a long session doesn't accumulate entries for tool calls
-                        // that already ran. No clone needed.
-                        let hints_snapshot =
-                            std::mem::take(&mut *self.scratchpad_hints.write().await);
-                        if let Err(error) = crate::tools::scratchpad::persist_oversized_results(
-                            &self.session_manager,
-                            sid,
-                            &assistant_message,
-                            &mut tool_results,
-                            &hints_snapshot,
-                        )
+                    if let Err(error) = crate::tools::scratchpad::save_explicit_scratchpad_results(
+                        &self.session_manager,
+                        sid,
+                        &assistant_message,
+                        &mut tool_results,
+                    )
+                    .await
+                    {
+                        tracing::warn!("failed to save explicit scratchpad results: {}", error);
+                    }
+
+                    // Take the per-turn hints. This both snapshots them for the call below and
+                    // clears them, so a long session doesn't accumulate entries for tool calls that
+                    // already ran. No clone needed.
+                    let hints_snapshot = std::mem::take(&mut *self.scratchpad_hints.write().await);
+                    if let Err(error) = crate::tools::scratchpad::persist_oversized_results(
+                        &self.session_manager,
+                        sid,
+                        &assistant_message,
+                        &mut tool_results,
+                        &hints_snapshot,
+                    )
+                    .await
+                    {
+                        tracing::warn!("failed to persist oversized tool results: {}", error);
+                    }
+
+                    let result_message = Message {
+                        role: Role::User,
+                        content: tool_results,
+                    };
+
+                    // Save assistant + tool-results together in one transaction. Both rows commit
+                    // or neither does: no dangling assistant-with-tool_use that the provider would
+                    // reject on the next iteration.
+                    let result_event = crate::conversation::Event::Append(result_message.clone());
+                    if let Err(error) = self
+                        .session_manager
+                        .save_events_atomic(sid, vec![assistant_event, result_event])
                         .await
-                        {
-                            tracing::warn!("failed to persist oversized tool results: {}", error);
-                        }
-
-                        let result_message = Message {
-                            role: Role::User,
-                            content: tool_results,
-                        };
-
-                        // Save assistant + tool-results together in one transaction.
-                        // Both rows commit or neither does: no dangling assistant-with-
-                        // tool_use that the provider would reject on the next iteration.
-                        let result_event =
-                            crate::conversation::Event::Append(result_message.clone());
-                        if let Err(error) = self
-                            .session_manager
-                            .save_events_atomic(sid, vec![assistant_event, result_event])
-                            .await
-                        {
-                            break 'turn Err(error);
-                        }
-
-                        messages.append(result_message);
+                    {
+                        break 'turn Err(error);
                     }
-                    StopReason::MaxTokens
-                    | StopReason::Refusal(_)
-                    | StopReason::EndTurn
-                    | StopReason::Unknown(_) => {
-                        // Assistant message stands alone (no tool_use follow-up).
-                        // Save it before breaking so the persistent log includes it.
-                        // A single-event batch uses the same atomic path as the
-                        // tool-use branch for consistency.
-                        if let Err(error) = self
-                            .session_manager
-                            .save_events_atomic(sid, vec![assistant_event])
-                            .await
-                        {
-                            break 'turn Err(error);
-                        }
-                        break 'turn match stop_reason {
-                            StopReason::MaxTokens => Ok(TurnOutcome::MaxTokens),
-                            StopReason::Refusal(text) if !text.is_empty() => {
-                                Ok(TurnOutcome::Refusal(text))
-                            }
-                            // Claude streams an empty refusal body, so fall back to the assistant
-                            // message's text (the model's own refusal, or the stand-in synthesized
-                            // above) rather than an empty refusal outcome.
-                            StopReason::Refusal(_) => {
-                                Ok(TurnOutcome::Refusal(assistant_message.text_content()))
-                            }
-                            _ => Ok(TurnOutcome::EndTurn),
-                        };
+
+                    messages.append(result_message);
+                } else {
+                    // No tool calls: the assistant message stands alone and ends the turn. Save it
+                    // before breaking so the persistent log includes it.
+                    if let Err(error) = self
+                        .session_manager
+                        .save_events_atomic(sid, vec![assistant_event])
+                        .await
+                    {
+                        break 'turn Err(error);
                     }
+                    break 'turn match stop_reason {
+                        StopReason::MaxTokens => Ok(TurnOutcome::MaxTokens),
+                        StopReason::Refusal(text) if !text.is_empty() => {
+                            Ok(TurnOutcome::Refusal(text))
+                        }
+                        // An empty refusal body carries no text, so fall back to the assistant
+                        // message's text (the model's own refusal, or the stand-in above).
+                        StopReason::Refusal(_) => {
+                            Ok(TurnOutcome::Refusal(assistant_message.text_content()))
+                        }
+                        _ => Ok(TurnOutcome::EndTurn),
+                    };
                 }
             }
         };
@@ -1395,10 +1395,9 @@ fn has_tool_results(content: &[ContentBlock]) -> bool {
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
-/// Human-readable stand-in for a terminal turn that produced no content. Claude returns an empty
-/// body with `stop_reason: "refusal"` for hard safety refusals; an empty `max_tokens` / `end_turn`
-/// can also land here. Used both as the persisted assistant text (so the message isn't empty) and
-/// as the line surfaced to the user.
+/// Human-readable stand-in for a terminal turn that produced no content (e.g. a hard refusal, or an
+/// empty `max_tokens` / `end_turn`). Used both as the persisted assistant text (so the message
+/// isn't empty) and as the line surfaced to the user.
 fn empty_turn_notice(stop_reason: &StopReason) -> String {
     match stop_reason {
         StopReason::Refusal(text) if !text.is_empty() => text.clone(),
@@ -1406,8 +1405,8 @@ fn empty_turn_notice(stop_reason: &StopReason) -> String {
         StopReason::MaxTokens => {
             "[The model reached its output limit before producing a response.]".to_string()
         }
-        // Surface the raw reason so an unrecognised stop reason (a future `pause_turn`, a new
-        // model's reason, etc.) is visible to the user instead of being swallowed as a blank turn.
+        // Surface the raw reason so an unrecognised stop reason is visible instead of being
+        // swallowed as a blank turn.
         StopReason::Unknown(reason) => {
             format!("[The model returned an empty response (stop reason: {reason}).]")
         }
